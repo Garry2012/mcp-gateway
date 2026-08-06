@@ -16628,7 +16628,7 @@ async def admin_test_a2a_agent(
         agent = await a2a_service.get_agent(db, agent_id, user_email=invoke_user_email, token_teams=token_teams)
 
         # Parse request body to get user-provided query
-        default_message = "Hello from ContextForge Admin UI test!"
+        default_message = "Hello from MCP Gateway Admin UI test!"
         try:
             body = await _read_request_json(request)
             # Use 'or' to also handle empty string queries

@@ -2200,7 +2200,7 @@ class SessionRegistry(SessionBackend):
                     experimental=experimental,  # OAuth capability when configured
                 ),
                 serverInfo=Implementation(name=settings.app_name, version=__version__),
-                instructions=("ContextForge providing federated tools, resources and prompts. Use /admin interface for configuration."),
+                instructions=("MCP Gateway providing federated tools, resources and prompts. Use /admin interface for configuration."),
             )
 
     async def store_client_capabilities(self, session_id: str, capabilities: Dict[str, Any]) -> None:

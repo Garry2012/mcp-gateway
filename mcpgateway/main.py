@@ -1461,7 +1461,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
     # Initialize logging service FIRST to ensure all logging goes to dual output
     await logging_service.initialize()
-    logger.info("Starting ContextForge services")
+    logger.info("Starting MCP Gateway services")
 
     # Wait for the database to be ready, then run bootstrap (alembic + seed).
     # This used to run at module-import time, which made every test that
@@ -1934,7 +1934,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         except Exception as e:
             logger.debug(f"Error stopping runtime-mode coordinator: {e}")
 
-        logger.info("Shutting down ContextForge services")
+        logger.info("Shutting down MCP Gateway services")
         # await stop_streamablehttp()
         # Build service list conditionally
         services_to_shutdown: List[Any] = [
@@ -2080,7 +2080,7 @@ async def setup_passthrough_headers():
 app = FastAPI(
     title=settings.app_name,
     version=__version__,
-    description="ContextForge AI Gateway — an AI gateway, registry, and proxy for MCP, A2A, and REST/gRPC APIs. Exposes a unified control plane with centralized governance, discovery, and observability. Optimizes agent and tool calling, and supports plugins.",
+    description="MCP Gateway — an AI gateway, registry, and proxy for MCP, A2A, and REST/gRPC APIs. Exposes a unified control plane with centralized governance, discovery, and observability. Optimizes agent and tool calling, and supports plugins.",
     root_path=settings.app_root_path,
     lifespan=lifespan,
     default_response_class=ORJSONResponse,  # Use orjson for high-performance JSON serialization

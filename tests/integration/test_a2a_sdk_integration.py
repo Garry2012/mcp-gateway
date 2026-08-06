@@ -337,14 +337,14 @@ class TestA2AUserQueryExtraction:
     @pytest.mark.asyncio
     async def test_default_query_when_body_empty(self):
         body = {}
-        default_message = "Hello from ContextForge Admin UI test!"
+        default_message = "Hello from MCP Gateway Admin UI test!"
         user_query = body.get("query", default_message) if body else default_message
         assert user_query == default_message
 
     @pytest.mark.asyncio
     async def test_default_query_when_body_none(self):
         body = None
-        default_message = "Hello from ContextForge Admin UI test!"
+        default_message = "Hello from MCP Gateway Admin UI test!"
         user_query = body.get("query", default_message) if body else default_message
         assert user_query == default_message
 
@@ -579,7 +579,7 @@ class TestContextForgeA2ATestEndpoint:
     @pytest.mark.asyncio
     async def test_admin_test_endpoint_sends_user_query(self):
         user_query = "calc: 15*3"
-        default_message = "Hello from ContextForge Admin UI test!"
+        default_message = "Hello from MCP Gateway Admin UI test!"
         body = {"query": user_query}
         extracted_query = body.get("query", default_message) if body else default_message
 
@@ -588,7 +588,7 @@ class TestContextForgeA2ATestEndpoint:
 
     @pytest.mark.asyncio
     async def test_admin_test_endpoint_uses_default_when_no_query(self):
-        default_message = "Hello from ContextForge Admin UI test!"
+        default_message = "Hello from MCP Gateway Admin UI test!"
         for body in ({}, {"query": ""}, {"query": None}, None):
             extracted_query = (body.get("query") if body else None) or default_message
             assert extracted_query == default_message

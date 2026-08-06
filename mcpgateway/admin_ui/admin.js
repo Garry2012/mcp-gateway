@@ -532,7 +532,7 @@ import "./events.js";
 // Start Alpine after all Admin methods are assigned so components can call them safely
 Alpine.start();
 
-console.log("🚀 ContextForge AI Gateway Admin API initialized");
+console.log("🚀 MCP Gateway Admin API initialized");
 
 // Export the Admin namespace so Vite's IIFE can expose it as window.Admin
 export default Admin;

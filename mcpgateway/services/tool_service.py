@@ -7549,7 +7549,7 @@ class ToolService(BaseService):
             input_schema={
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "User query", "default": "Hello from ContextForge Admin UI test!"},
+                    "query": {"type": "string", "description": "User query", "default": "Hello from MCP Gateway Admin UI test!"},
                 },
                 "required": ["query"],
             },

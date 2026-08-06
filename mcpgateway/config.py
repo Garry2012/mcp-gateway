@@ -208,7 +208,7 @@ class Settings(BaseSettings):
         True
         >>> s5 = Settings()
         >>> s5.app_name
-        'ContextForge'
+        'MCP Gateway'
         >>> s5.host in ('0.0.0.0', '127.0.0.1')  # Default can be either
         True
         >>> s5.port
@@ -236,7 +236,7 @@ class Settings(BaseSettings):
     """
 
     # Basic Settings
-    app_name: str = "ContextForge"
+    app_name: str = "MCP Gateway"
     host: str = "127.0.0.1"
     port: PositiveInt = Field(default=4444, ge=1, le=65535)
     client_mode: bool = False
@@ -970,7 +970,7 @@ class Settings(BaseSettings):
     dcr_metadata_cache_ttl: int = Field(default=3600, description="AS metadata cache TTL in seconds (RFC 8414 discovery)")
 
     # Client name template
-    dcr_client_name_template: str = Field(default="ContextForge ({gateway_name})", description="Template for client_name in DCR requests")
+    dcr_client_name_template: str = Field(default="MCP Gateway ({gateway_name})", description="Template for client_name in DCR requests")
 
     # Refresh token behavior
     dcr_request_refresh_token_when_unsupported: bool = Field(
@@ -1054,7 +1054,7 @@ class Settings(BaseSettings):
     smtp_user: Optional[str] = Field(default=None, description="SMTP username")
     smtp_password: Optional[SecretStr] = Field(default=None, description="SMTP password")
     smtp_from_email: Optional[str] = Field(default=None, description="From email address used for auth notifications")
-    smtp_from_name: str = Field(default="ContextForge", description="From display name used for auth notifications")
+    smtp_from_name: str = Field(default="MCP Gateway", description="From display name used for auth notifications")
     smtp_use_tls: bool = Field(default=True, description="Use STARTTLS for SMTP connections")
     smtp_use_ssl: bool = Field(default=False, description="Use implicit SSL/TLS for SMTP connections")
     smtp_timeout_seconds: int = Field(default=15, description="SMTP connection timeout in seconds")
