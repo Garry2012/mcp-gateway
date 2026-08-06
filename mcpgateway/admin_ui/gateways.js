@@ -1812,7 +1812,11 @@ export const refreshGatewayTools = async function (gatewayId, gatewayName, butto
   }
 
   try {
-    const response = await fetch(
+    // Use fetchWithTimeout rather than bare fetch: it attaches the
+    // X-CSRF-Token header from the mcpgateway_csrf_token cookie. A bare
+    // fetch omits it, so this POST was rejected with "CSRF validation
+    // failed" before ever reaching the refresh handler.
+    const response = await fetchWithTimeout(
       `${window.ROOT_PATH}/gateways/${gatewayId}/tools/refresh`,
       {
         method: "POST",
