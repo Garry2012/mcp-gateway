@@ -177,6 +177,21 @@ Remapping it risks breaking semantic color meaning for no brand benefit. Left al
 - Retarget the wrapping link to `https://github.com/Garry2012/mcp-gateway`.
 - Keep the dot-pattern background and the three floating pulse accents.
 
+**Write the new markup CSP-clean.** Upstream has an in-progress migration away from
+inline event handlers (`docs/CSP_INLINE_HANDLERS_MIGRATION.md`), and several recent
+`login.html` commits are part of it. Avoid inline `onclick`; prefer classes over inline
+`style` attributes. Markup that fights that migration will be rewritten by a future
+upstream commit, converting a clean merge into a conflict.
+
+**Conflict expectation for this file.** Of the last 8 upstream commits to `login.html`,
+6 modified lines 7-13 (the `<head>`) and 3 modified the right-panel region — including
+`c18218c9`, *"[CHORE][UI]: Consistent ContextForge logo and branding"*. Our `<title>`
+edit at line 6 is adjacent to the most-churned region, and Git's three-line context
+window means adjacent edits conflict, not only overlapping ones. Hand-resolution here is
+expected rather than exceptional. Resolutions should be mechanical, since our version
+deletes most of the contested block, and `rerere` replays them after the first
+occurrence.
+
 ### Remaining brand strings
 
 | File | Occurrences |
