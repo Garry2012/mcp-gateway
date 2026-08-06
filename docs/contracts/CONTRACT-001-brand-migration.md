@@ -457,6 +457,85 @@ deployment configuration must be changed in every place that sets it, or the def
 dead code. When changing a default in `config.py`, grep the deployment surfaces for the
 same setting name before declaring it done.
 
+## 6e. AMENDMENT 5 — prefix-qualified and bare identifiers (2026-08-06)
+
+The Developer's fourth blocker is **accepted in full**. It correctly refutes the
+"zero false positives" claim made in Amendment 4.
+
+### How the Architect got that claim wrong
+
+Amendment 4 verified false positives by inspecting only lines matching
+`mcpContextForge\.[a-z]` — occurrences followed by a **dot** — and generalised the result
+to the whole set. Bare `mcpContextForge` and all-lowercase `contextforge` were never in
+the sample. The claim was true of the sample and false of the population.
+
+This is the same error the contract forbids the Developer from making: asserting coverage
+broader than the evidence. Recorded here rather than quietly fixed.
+
+### Confirmed false positives
+
+| Location | What it actually is | Consequence of renaming |
+|---|---|---|
+| `values.schema.json:208` `"mcpContextForge": {` | Helm top-level key | Breaks every `values.yaml` |
+| `charts/README.md:755` `` `mcpContextForge` `` | Same key in prose | — |
+| `ansible/ocp/vars/defaults.yml:6` `ocp_namespace: contextforge` | Kubernetes namespace **and** Helm release identity | **Orphans live cluster resources** |
+| `docker-compose.with-langfuse.yml:100` `service.namespace=contextforge` | OpenTelemetry service namespace | **Splits historical observability data** |
+| `docker-compose.with-langfuse.yml:162` Langfuse org ID | Stateful external identifier | Detaches existing Langfuse project |
+
+### Root cause
+
+The shape rule keyed only on what **follows** the brand. Two signals were missing:
+
+- **Leading context.** `mcpContextForge` is a compound identifier, but the brand segment
+  may be followed by `"`, a backtick, or nothing at all, so a trailing-only rule cannot
+  see it.
+- **Case.** All-lowercase `contextforge` standing alone is never prose. It is a
+  namespace, release name, org ID, socket path, or image name.
+
+### Fix
+
+Two additions, and a second matching pass:
+
+- `[A-Za-z0-9_][Cc]ontext[Ff]orge` — exempt when preceded by a word character.
+- A **case-sensitive** pass exempting bare `contextforge` / `CONTEXTFORGE`. This cannot be
+  folded into the main pattern, which runs case-insensitively and would then strip the
+  CamelCase brand text the gate exists to find.
+
+### Verification — exhaustive this time
+
+All 250 flagged lines across `ui`, `runtime`, `assets` and `deploy` were re-tested
+programmatically for identifier-only matches. Zero false positives. The only two lines
+that trip an identifier test are the logo paths, which the `assets` tier reports
+deliberately by bypassing the allowlist — without that bypass, `contextforge-logo` would
+be exempt as identifier-shaped and never reported at all.
+
+Critical overrides confirmed still caught: `values.yaml:221`, `values.yaml:902`,
+`docker-compose.yml:370`, `run.sh:106`, `configmap-monitoring.yaml`.
+
+Deploy tier: 93 → 87 lines.
+
+### Architect decisions on the two escalated questions
+
+Both were routed to the product owner. They are technical stability decisions, so the
+Architect takes them:
+
+**Kubernetes namespace / Helm release `contextforge` — REMAINS UNCHANGED, permanently.**
+A namespace is the address of live cluster state, not a label. Renaming it does not
+rename anything; it creates a second, empty namespace and orphans everything in the
+first. There is no cosmetic benefit that justifies a migration of running workloads.
+
+**Langfuse organisation ID and OpenTelemetry `service.namespace` — REMAIN UNCHANGED.**
+These are join keys for historical observability data. Renaming them silently splits
+dashboards and traces at the cut-over point, which is worse than an inconsistent label.
+
+Both are now permanently out of scope, in the same category as the wire-protocol headers.
+
+### Note on counts
+
+The Developer observed 965 Helm keys against the 964 stated in Amendment 4. Counts drift
+as files change; the guard asserts a floor, not equality. No protected identifier was
+modified. Not a defect.
+
 ## 7. Out of scope
 
 - Colour, theme, or layout changes

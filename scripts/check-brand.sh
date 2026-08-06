@@ -56,7 +56,25 @@ cd "$(dirname "$0")/.." || exit 2
 #   contextforge:runtime:*                Redis coordination keys
 #   contextforge_mcp_runtime              Cargo crate name
 #   ContextForgeMCPServer                 Python class symbol
-ALLOW_SHAPE='[Cc]ontext[Ff]orge[-_.:]|ContextForge[A-Z]|CONTEXTFORGE_'
+#   TRAILING context - an identifier continues after the brand:
+#       contextforge-internal-...   contextforge.gateway_id   ContextForgeMCPServer
+#   LEADING context - the brand is a segment of a compound identifier:
+#       mcpContextForge   (Helm top-level key; may be followed by " ` or nothing,
+#                          so a trailing-only rule misses it entirely)
+ALLOW_SHAPE='[Cc]ontext[Ff]orge[-_.:]|ContextForge[A-Z]|CONTEXTFORGE_|[A-Za-z0-9_][Cc]ontext[Ff]orge'
+
+# CASE-SENSITIVE exemptions, applied in a second pass.
+#
+# All-lowercase `contextforge` standing alone is never prose - it is a machine
+# identifier: a Kubernetes namespace, a Helm release name, an OpenTelemetry
+# service.namespace, a Langfuse organisation ID, a socket path, an image name.
+# Several of these are STATEFUL: renaming a namespace orphans live cluster
+# resources, and renaming an observability namespace splits historical data.
+#
+# This must NOT be folded into ALLOW_SHAPE, which is applied case-insensitively
+# and would then also strip the CamelCase brand text we are trying to find.
+# (REVIEW-001 B-004)
+ALLOW_CASE_SENSITIVE='contextforge|CONTEXTFORGE'
 
 # Literal exemptions that are prose but must NOT change: upstream attribution,
 # upstream URLs and package names, and third-party project identifiers.
@@ -100,10 +118,14 @@ scan() {
   # whether the legacy brand still survives. Print the ORIGINAL line so the
   # output stays actionable. (REVIEW-001 B-001)
   hits=$(git grep -nI -iE "$LEGACY_RE" -- "$@" 2>/dev/null \
-         | ALLOW_RE="$ALLOW" LEGACY_RE="$LEGACY_RE" perl -ne '
+         | ALLOW_RE="$ALLOW" ALLOW_CS="$ALLOW_CASE_SENSITIVE" LEGACY_RE="$LEGACY_RE" perl -ne '
              my $orig = $_;
              my $stripped = $_;
+             # Pass 1: shape and literal exemptions, case-insensitive.
              $stripped =~ s/$ENV{ALLOW_RE}//gi;
+             # Pass 2: bare lowercase/uppercase machine identifiers. Case-SENSITIVE,
+             # so CamelCase brand text survives to be reported.
+             $stripped =~ s/$ENV{ALLOW_CS}//g;
              print $orig if $stripped =~ /$ENV{LEGACY_RE}/i;
            ' || true)
 
