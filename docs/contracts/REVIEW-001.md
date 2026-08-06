@@ -33,11 +33,47 @@ alt text (`README.md:30`, `README.md:82`), the product description and roadmap l
 (`docs/docs/deployment/helm.md:654`). The protected identifier must survive, but the
 visible text on the same line still needs review.
 
-This is a contract blocker rather than an implementation-only defect: the Architect
-must decide which omitted runtime identities and operator documents are in scope, which
-historical/upstream references must remain, and what vendor/product values the fork
-should emit in CEF/LEEF. Strengthening the scan or silently editing those surfaces would
-change the executable scope. Per `CONTRACT-001` Task A, work stops before Task B.
+This was a contract blocker rather than an implementation-only defect: the Architect
+needed to decide which omitted runtime identities and operator documents were in scope,
+which historical/upstream references must remain, and what vendor/product values the
+fork should emit in CEF/LEEF. Amendment 1 accepted and resolved this finding in commit
+`894c8c5c`.
+
+### B-002 — The amended runtime gate requires prohibited identifier and authentication changes
+
+After Amendment 1, the runtime tier scans every textual occurrence in `mcpgateway/`
+(`scripts/check-brand.sh:103-104`), although D1 describes its intended scope as emitted
+strings, descriptions, docstrings, and comments
+(`docs/contracts/CONTRACT-001-brand-migration.md:221-228`). The broader textual scan
+also catches identifiers that cannot be renamed under the contract:
+
+- Python derives its trusted runtime-auth header from the literal
+  `contextforge-internal-mcp-runtime-v1` (`mcpgateway/auth_context.py:143`,
+  `mcpgateway/auth_context.py:408`). The Rust runtime uses the identical derivation
+  string (`crates/mcp_runtime/src/lib.rs:100`). Changing only Python breaks cross-runtime
+  authentication; changing both touches the explicitly out-of-scope Rust crate and
+  changes authentication behavior.
+- `contextforge.tool.id`, `contextforge.gateway_id`, `contextforge.runtime`, and
+  `contextforge.transport` are emitted OpenTelemetry attribute keys
+  (`mcpgateway/services/tool_service.py:3767-3769`,
+  `mcpgateway/services/tool_service.py:6033-6036`). Tests and operator-configurable
+  mappings consume those exact keys
+  (`tests/integration/test_span_attribute_mapping_integration.py:206-237`). Renaming
+  them is a telemetry schema migration that can break dashboards and mappings, not a
+  cosmetic string change.
+- The scan also catches Python symbols such as `ContextForgeMCPServer`
+  (`mcpgateway/transports/streamablehttp_transport.py:310-326`) and private header
+  constants whose values are protected wire identifiers
+  (`mcpgateway/transports/rust_mcp_runtime_proxy.py:46-60`). Renaming symbols is not
+  needed to alter product identity and broadens the fork delta; treating a potentially
+  imported class as private would also be an unapproved API assumption.
+
+The protected-value allowlist does not cover the runtime-auth derivation or telemetry
+schema (`scripts/check-brand.sh:35`). The runtime tier therefore cannot pass without
+either weakening compatibility/security or changing the executable contract. Hiding a
+literal by splitting it across source tokens would merely evade the gate and was not
+attempted. Architect direction is required on explicit allowlisting versus a separately
+planned identifier migration, so Task B stops before implementation.
 
 ## Functional
 

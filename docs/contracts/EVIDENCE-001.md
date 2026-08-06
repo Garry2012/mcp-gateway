@@ -1,8 +1,9 @@
 # EVIDENCE-001 — Brand Migration Verification
 
-Task C was not started. Task A found a blocking contract-scope defect and
-`CONTRACT-001` requires stopping before Task B. The command output below records only
-the review-stage checks that were actually run.
+Task C was not started. Amendment 1 resolved the original Task A blocker, but the
+rewritten runtime gate exposed a second contract blocker before implementation:
+cross-language authentication and telemetry identifiers are now required to be renamed.
+The command output below records only the checks that were actually run.
 
 ## Commands run
 
@@ -112,13 +113,65 @@ ea3cf45d
 exit=0
 ```
 
+### Amendment 1 baseline tier gates
+
+The branch was already at the requested Architect commit after refresh:
+
+```console
+$ git fetch origin
+$ git rev-parse HEAD
+894c8c5cd665e197d64f9df6db13b5b984fe9fce
+exit=0
+```
+
+The UI and asset gates still reported the six known logo references and the iframe
+harness. The runtime gate additionally reported identifiers that cannot be changed
+under the cosmetic-only contract. These are exact excerpts:
+
+```console
+$ scripts/check-brand.sh runtime
+Brand check: 'ContextForge' -> 'MCP Gateway'
+===========================================================
+
+FAIL  [runtime] Application package (all emitted strings, descriptions, docstrings)
+        mcpgateway/auth_context.py:143:_INTERNAL_MCP_RUNTIME_AUTH_CONTEXT = "contextforge-internal-mcp-runtime-v1"
+        mcpgateway/services/tool_service.py:3767:                    "contextforge.gateway_id": str(gateway.id),
+        mcpgateway/services/tool_service.py:3768:                    "contextforge.runtime": "python",
+        mcpgateway/services/tool_service.py:3769:                    "contextforge.transport": "streamablehttp",
+        mcpgateway/transports/streamablehttp_transport.py:310:class ContextForgeMCPServer(Server[Any]):
+        mcpgateway/transports/rust_mcp_runtime_proxy.py:46:_CONTEXTFORGE_SERVER_ID_HEADER = "x-contextforge-server-id"
+
+Protected identifiers (must still be present):
+  OK    x-contextforge-* headers (695)
+  OK    mcpContextForge Helm keys (959)
+  OK    contextforge:runtime keys (25)
+  OK    Rust crate name (20)
+
+BRAND CHECK FAILED
+Fix the FAIL lines above, or route a scope change back to the architect.
+exit=1
+```
+
+Cross-runtime source inspection confirmed that the authentication derivation value is
+shared verbatim:
+
+```console
+$ git grep -n '_INTERNAL_MCP_RUNTIME_AUTH_CONTEXT\|contextforge-internal-mcp-runtime-v1' -- .
+crates/mcp_runtime/src/lib.rs:100:const INTERNAL_RUNTIME_AUTH_CONTEXT: &str = "contextforge-internal-mcp-runtime-v1";
+mcpgateway/auth_context.py:87:    _INTERNAL_MCP_RUNTIME_AUTH_CONTEXT   (constant string used to derive headers)
+mcpgateway/auth_context.py:143:_INTERNAL_MCP_RUNTIME_AUTH_CONTEXT = "contextforge-internal-mcp-runtime-v1"
+mcpgateway/auth_context.py:408:    material = f"{secret}:{_INTERNAL_MCP_RUNTIME_AUTH_CONTEXT}".encode("utf-8")
+tests/unit/mcpgateway/middleware/test_token_scoping.py:31:    expected = hashlib.sha256(f"{secret}:contextforge-internal-mcp-runtime-v1".encode("utf-8")).hexdigest()
+exit=0
+```
+
 ## Acceptance criteria
 
 | Criterion | Result | Evidence |
 |---|---|---|
-| `scripts/check-brand.sh` | FAIL | Baseline output above; exit 1. Task B not started. |
-| `make ruff interrogate` | NOT RUN | Stopped after Task A contract blocker. |
-| `make test` | NOT RUN | Stopped after Task A contract blocker. |
+| `scripts/check-brand.sh` | FAIL | Amendment 1 runtime baseline above; exit 1. Task B stopped on B-002. |
+| `make ruff interrogate` | NOT RUN | Stopped on Task B contract blocker B-002. |
+| `make test` | NOT RUN | Stopped on Task B contract blocker B-002. |
 | `make doctest` | FAIL | Output above; exit 2, one stale brand assertion. |
 | `make build-ui` | NOT RUN as Task C | `make install-dev` built the bundle successfully, but the post-change acceptance run did not occur. |
 | Login title HTTP check | NOT RUN | No Task B build and no `make dev` acceptance server started. |
@@ -128,11 +181,12 @@ exit=0
 
 ## Not verified
 
-No Task B changes were made. Lint, the full test suite, the post-change UI build, live
-HTTP responses, and visual coherence were therefore not verified.
+No Task B implementation changes were made after Amendment 1. Lint, the full test
+suite, the post-change UI build, live HTTP responses, and visual coherence were
+therefore not verified.
 
 ## Findings routed back to architect
 
-The brand gate omits live product-identity and operator-documentation surfaces and can
-hide visible legacy branding when a protected identifier occurs on the same line. See
-`docs/contracts/REVIEW-001.md` B-001 for the required scope decision.
+Amendment 1 resolved B-001. Its whole-package textual scan now requires changes to a
+cross-language runtime-auth derivation, stable OpenTelemetry attribute keys, and Python
+symbols. See `docs/contracts/REVIEW-001.md` B-002 for the remaining scope decision.
