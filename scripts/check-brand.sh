@@ -31,7 +31,38 @@ cd "$(dirname "$0")/.." || exit 2
 # These are identifiers, not brand text. Renaming any of them breaks a running
 # system. Do not add to this list without architect sign-off.
 # ---------------------------------------------------------------------------
-ALLOW='x-contextforge-|mcpContextForge|contextforge:runtime:|contextforge_mcp_runtime|ContextForge Contributors|mcp-context-forge|ICA_ContextForgeICACF|CONTEXTFORGE_ENABLE_RUST_BUILD|github\.com/IBM|contextforge-mcp-rust\.sock|lf-contextforge|LANGFUSE_INIT_(ORG|PROJECT)'
+# Allowlisting is by IDENTIFIER SHAPE, not by enumeration.
+#
+# Two rounds of review proved enumeration unworkable: the first list was too
+# narrow and missed live surfaces; the second was so broad it demanded renaming
+# a shared authentication salt and stable telemetry keys. (REVIEW-001 B-001, B-002)
+#
+# The durable distinction is grammatical, not a list:
+#
+#   BRAND TEXT is the word standing alone   -> "ContextForge Support Bundle"
+#   MACHINE IDENTIFIERS carry a separator   -> contextforge-internal-mcp-runtime-v1
+#   or continue in CamelCase                -> ContextForgeMCPServer
+#
+# So: a legacy-brand occurrence immediately followed by [-_.:] or an uppercase
+# letter is an identifier and is exempt. Anything else is prose and must change.
+#
+# This automatically protects, without needing to know they exist:
+#   contextforge-internal-mcp-runtime-v1  SHA-256 auth salt shared with the Rust
+#                                         crate; renaming Python alone breaks
+#                                         cross-runtime authentication
+#   contextforge.gateway_id/.runtime/     OpenTelemetry attribute keys; stable
+#     .tool.id/.transport                 telemetry schema consumed by dashboards
+#   x-contextforge-*                      wire protocol headers
+#   contextforge:runtime:*                Redis coordination keys
+#   contextforge_mcp_runtime              Cargo crate name
+#   ContextForgeMCPServer                 Python class symbol
+ALLOW_SHAPE='[Cc]ontext[Ff]orge[-_.:]|ContextForge[A-Z]|CONTEXTFORGE_'
+
+# Literal exemptions that are prose but must NOT change: upstream attribution,
+# upstream URLs and package names, and third-party project identifiers.
+ALLOW_LITERAL='ContextForge Contributors|mcp-context-forge|ICA_ContextForgeICACF|github\.com/IBM|lf-contextforge|LANGFUSE_INIT_(ORG|PROJECT)'
+
+ALLOW="$ALLOW_SHAPE|$ALLOW_LITERAL"
 
 #   x-contextforge-*            wire protocol shared with the Rust runtime crate
 #   mcpContextForge.*           Helm value keys; renaming breaks existing values.yaml

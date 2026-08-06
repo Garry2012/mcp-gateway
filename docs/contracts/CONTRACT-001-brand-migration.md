@@ -271,6 +271,61 @@ behaviour we changed.
 **D6 — M-001 (fork record drift).** The Architect will reconcile `FORK-CUSTOMIZATIONS.md`
 after Task B lands. Not the Developer's task.
 
+## 6b. AMENDMENT 2 — resolution of REVIEW-001 B-002 (2026-08-06)
+
+The Developer's second blocker is **accepted in full**, and it is the most serious
+finding of the engagement. Amendment 1 over-corrected: broadening the runtime tier to the
+whole package meant the gate demanded renaming security-critical identifiers.
+
+### What was wrong
+
+`contextforge-internal-mcp-runtime-v1` is a **shared salt in a SHA-256 authentication
+derivation**, present in both runtimes:
+
+- `mcpgateway/auth_context.py:143`
+- `crates/mcp_runtime/src/lib.rs:100`, used at `lib.rs:2489`
+
+Renaming it in Python alone makes the two sides compute different digests and **breaks
+cross-runtime authentication**. Renaming both violates the Rust exclusion in §7. The gate
+was therefore demanding a change that was either impossible or a security break. The
+Developer correctly refused and escalated rather than working around it.
+
+Also confirmed: four stable OpenTelemetry attribute keys (`contextforge.gateway_id`,
+`.runtime`, `.tool.id`, `.transport`) whose renaming would break dashboards, and the
+Python class symbol `ContextForgeMCPServer`.
+
+### Root cause
+
+Enumeration. Amendment 1 replaced a too-narrow file list with a too-broad one. Both
+failures share a cause: the gate was trying to distinguish brand text from identifiers
+by *location*, which is not a property of location.
+
+### Fix — allowlist by identifier shape
+
+The distinction is grammatical and therefore durable:
+
+| Form | Example | Treatment |
+|---|---|---|
+| Legacy brand as a standalone word | `ContextForge Support Bundle` | **must change** |
+| Followed by a separator `[-_.:]` | `contextforge-internal-mcp-runtime-v1` | exempt — identifier |
+| Continuing in CamelCase | `ContextForgeMCPServer` | exempt — symbol |
+
+This protects the auth salt, telemetry keys, protocol headers, Redis keys, the crate
+name, and any future identifier of the same shape **without needing to know it exists** —
+which is the property both previous versions lacked.
+
+Runtime tier drops from 233 to 149 lines. The removed 84 were identifiers that should
+never have been in scope. Verified: real brand text in `siem_export_service.py`,
+`support_bundle_service.py`, `well_known.py`, and `cli_export_import.py` is still caught,
+and the six logo references are still caught by the `assets` tier.
+
+### Standing rule
+
+**No brand change may alter any value participating in authentication, authorisation,
+session derivation, or cross-runtime protocol.** If the gate ever demands one, that is a
+gate defect — stop and escalate, exactly as was done here. Do not satisfy the gate by
+renaming such a value, and do not evade it with source-token tricks.
+
 ## 7. Out of scope
 
 - Colour, theme, or layout changes
