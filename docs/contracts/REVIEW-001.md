@@ -107,6 +107,49 @@ shipped Helm product contradicts the rebrand. Amendment 1 explicitly places only
 changing values, schema, and templates would expand the contract. The Architect must
 either add these Helm surfaces to Task B and its gate or explicitly retain their
 upstream identity. No chart keys or values were changed pending that decision.
+Amendment 4 accepted and resolved this finding in commit `49fea8dd` by adding the
+deployment tier and placing brand-valued deployment configuration in scope.
+
+### B-004 — The deployment gate classifies protected and stateful identifiers as brand text
+
+Amendment 4 says the shape allowlist correctly exempts the Helm key
+`mcpContextForge.config.APP_NAME` and reports zero chart false positives
+(`docs/contracts/CONTRACT-001-brand-migration.md:421-440`). The implemented rule only
+examines what follows the legacy substring
+(`scripts/check-brand.sh:46-59`), so it does not recognize a legacy token that is part of
+an identifier because of its *prefix*. Two current deploy-tier failures contain no
+brand text at all:
+
+- the protected schema key alone, `"mcpContextForge": {`
+  (`charts/mcp-stack/values.schema.json:208`); and
+- the same key alone in operator prose, `` `mcpContextForge` section ``
+  (`charts/README.md:755`).
+
+The new tier also finds bare lowercase identifiers whose position, not suffix, makes
+them machine identity:
+
+- `ocp_namespace: contextforge` is both the Kubernetes namespace and Helm release name
+  (`ansible/ocp/vars/defaults.yml:5-6`), and is passed to `helm install`, resource
+  selectors, and `helm uninstall` (`ansible/ocp/playbooks/deploy.yml:45-77`,
+  `ansible/ocp/playbooks/uninstall.yml:52`); and
+- `service.namespace=contextforge` and the Langfuse organization ID fallback
+  `contextforge` are telemetry/resource identifiers
+  (`docker-compose.with-langfuse.yml:100`,
+  `docker-compose.with-langfuse.yml:162`).
+
+Renaming the OpenShift namespace or Helm release would not be a cosmetic rebrand: it
+would change resource identity and cause an existing installation to be addressed as a
+different release/namespace. Renaming observability organization and namespace IDs is
+likewise a data/telemetry migration decision. The contract explicitly prohibits
+functional or schema changes, and its standing instruction says to stop when a match
+looks like an identifier rather than prose. Hiding these values or adding an
+implementation-local exception would evade the executable contract and was not
+attempted.
+
+The Architect must amend the gate so identifier-shape detection considers both sides of
+the occurrence, and decide whether bare deployment IDs remain stable or require an
+explicit compatibility migration. Task B and Task C remain stopped pending that
+decision.
 
 ## Functional
 
