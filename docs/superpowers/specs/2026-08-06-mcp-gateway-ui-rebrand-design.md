@@ -1,259 +1,151 @@
-# MCP Gateway UI Rebrand — Design
+# MCP Gateway Rebrand — Design
 
 - **Date:** 2026-08-06
 - **Branch:** `feature/ui-rebrand-mcp-gateway` (cut from `origin/main` @ `4092d336`)
-- **Status:** Approved, not yet implemented
+- **Status:** Implemented, except the logo assets (see Open Items)
 
 ## Goal
 
-Rebrand the Admin UI and auth pages from "ContextForge" to "MCP Gateway", change the
-color theme to graphite + amber, and replace the login page's right-hand panel with a
-diagram of what the gateway does.
+Replace the "ContextForge" brand with "MCP Gateway" everywhere a user or tenant sees it.
 
-This is a cosmetic rebrand of a fork. It changes no behaviour, no schema, no API, and
-no auth logic.
+Scope is text only. No color, theme, or layout changes. No behaviour, schema, API, or
+auth changes.
 
-## Context
+## Scope decision
 
-`Garry2012/mcp-gateway` is a fork of `IBM/mcp-context-forge`, currently at release
-1.0.7. Upstream releases will be pulled periodically. Every design decision below is
-weighted toward keeping the fork's brand delta small and confined, so future rebases
-stay clean.
+The repository contains roughly 1,166 lines matching "ContextForge" across 145 files.
+Most are not brand text, and replacing them indiscriminately would break the build or
+the running system. The work was therefore split into tiers.
 
-Deployment target is multi-tenant on Azure, but tenants share a single brand. Per-tenant
-theming is explicitly out of scope.
+### Must not change
 
-## Decisions
+| Category | Approx. occurrences | Reason |
+|---|---|---|
+| `x-contextforge-*` HTTP headers | 743 | Wire protocol shared between the Python gateway and the `crates/mcp_runtime` Rust crate, asserted in live e2e tests. Renaming breaks interop. |
+| `mcpContextForge.*` Helm value keys | 957 | Deployment identifiers. Renaming invalidates every existing `values.yaml`. |
+| `contextforge:runtime:*` Redis keys | 4 | Cross-instance runtime coordination state. Renaming mid-deploy would split-brain a running cluster. |
+| `contextforge_mcp_runtime` crate name | 11 | Cargo build identifier. |
+| "ContextForge Contributors" copyright | 47 | Upstream's legal attribution, not ours to rewrite. |
 
-### D1 — Hardcode the brand; do not wire `APP_NAME`
+### Changed — Tier 1, user-visible UI
 
-`mcpgateway/config.py:239` defines `app_name: str = "ContextForge"` and no template
-reads it. It stays unused.
+Page titles, visible strings, and sample payloads in the Admin UI and auth pages.
 
-Wiring it would allow per-tenant naming, but all tenants share one brand, so the
-indirection buys nothing today. Revisit only if per-tenant branding becomes a
-requirement.
+### Changed — Tier 2, runtime product identity
 
-### D2 — Recolor by redefining palette names, not by rewriting usages
+Email subjects and sender name, MCP instructions advertised to connecting clients, and
+the configuration defaults that feed them.
 
-The UI contains roughly 1,629 occurrences of `indigo-*`, `purple-*`, and `violet-*`
-utility classes:
+### Deliberately not changed — Tier 3
 
-| Location | Occurrences |
+Docstrings, module headers, and code comments (roughly 500 occurrences, concentrated in
+`config.py`, `tool_service.py`, and `main.py`). Not user-visible. Changing them would
+put a large diff across the files upstream edits most — `config.py` alone receives about
+261 upstream commits a year — for no visible benefit.
+
+## Changes
+
+### Titles
+
+| File | New title |
 |---|---|
-| `mcpgateway/templates/admin.html` | 833 |
-| Other templates | 517 |
-| `mcpgateway/admin_ui/*.js` | 279 |
+| `mcpgateway/templates/admin.html` | `MCP Gateway - Administration` |
+| `mcpgateway/templates/login.html` | `Sign In - MCP Gateway` |
+| `mcpgateway/templates/reset-password.html` | `Reset Password - MCP Gateway` |
+| `mcpgateway/templates/change-password-required.html` | `Password Change Required - MCP Gateway` |
+| `mcpgateway/version.py` (fallback login page) | `Login - MCP Gateway` |
 
-Rather than rewriting each usage to a new `brand-*` scale, `tailwind.config.js`
-redefines what those palette names resolve to. One file changes; the whole app
-recolors.
+`forgot-password.html` already read "MCP Gateway" and was left alone.
 
-**Rationale:** a `brand-*` rename would put a ~1,629-line cosmetic diff across
-`admin.html` and the other files upstream modifies most frequently, making every future
-rebase a manual conflict resolution. Confining the delta to one config file keeps
-rebases clean. This is the dominant consideration; effort is secondary.
+The Swagger and ReDoc titles derive from `settings.app_name` via `main.py:2081`, so they
+follow the `app_name` change rather than needing their own edit.
 
-**Accepted cost:** a class named `indigo-600` renders amber. This is misleading and
-must be documented at the point of confusion (see D5).
+### UI strings
 
-**Known debt:** the honest fix is a `brand-*` scale with all usages rewritten. Deferred,
-tracked in `FORK-CUSTOMIZATIONS.md` and a GitHub issue.
+- `login.html` — "Secured by MCP Gateway Authentication"
+- `overview_partial.html` — architecture diagram label and four comments
+- `admin.html` — sample `User-Agent` payloads (now `MCP-Gateway/1.0`, hyphenated to stay
+  a valid User-Agent token), the A2A test default message, and a sample bot username
+- `admin_ui/a2aAgents.js`, `admin_ui/admin.js` — default test message, startup log line
 
-### D3 — Login right panel becomes a hero graphic
+### Runtime identity
 
-The current panel (`login.html:183` onward) shows a wordmark, tagline, and six feature
-cards in two labelled groups. The cards restate marketing copy that will drift out of
-date as the product changes, and they occupy a screen users see daily.
+- `services/email_notification_service.py` — three subject lines and the sender-name
+  fallback
+- Three email templates — body text
+- `cache/session_registry.py` — MCP `instructions` advertised to clients.
+  `serverInfo.name` already read `settings.app_name` and needed no edit.
+- `services/tool_service.py` and `admin.py` — the A2A default query string, which is
+  duplicated in both
 
-Replaced with an inline SVG showing many upstreams funnelling through one gateway to
-many servers, plus the wordmark and a one-line tagline.
+### Configuration defaults
 
-Inline SVG rather than a raster asset: no extra HTTP request, scales to any viewport,
-and inherits theme colors without maintaining light and dark variants.
-
-### D4 — Text wordmark, no logo file
-
-The wordmark is text: "MCP" in near-white, "Gateway" in amber. No image asset.
-
-The existing `<img src="/static/contextforge-logo-white.png">` at `login.html:220-224`
-is removed. The surrounding link is retargeted from
-`https://github.com/IBM/mcp-context-forge` to `https://github.com/Garry2012/mcp-gateway`
-(verified public, so tenant users will not hit a 404).
-
-The `contextforge-*` image files in `mcpgateway/static/` are left in place — they are
-upstream files, and deleting them adds rebase conflict surface for no benefit.
-
-### D5 — Track the fork delta in `FORK-CUSTOMIZATIONS.md`
-
-The repo has `docs/docs/architecture/adr/` with 54 ADRs, which would be the natural
-home. It is the wrong choice here: adding an ADR also requires editing `.pages` (manual
-nav) and `index.md`, both of which upstream edits with every ADR they add. Upstream's
-next ADR is 055 and so is ours — a guaranteed conflict on two shared files per rebase.
-Upstream already carries a `005` number collision from this pattern.
-
-Instead:
-
-1. **`FORK-CUSTOMIZATIONS.md`** (new file, repo root) — durable record of what diverges
-   from upstream and why. New file, so it never conflicts. Becomes the landing page for
-   all future fork deltas, not just this one.
-2. **Header comment in `tailwind.config.js`** — explains the palette remap where a
-   confused reader will actually be, with a pointer to the file above.
-3. **GitHub issue** on `Garry2012/mcp-gateway` for the eventual `brand-*` rename, so the
-   debt lives in a tracker rather than only in prose.
-
-## Color System
-
-`tailwind.config.js`, under `theme.extend.colors`. `darkMode: "class"` is unchanged.
-
-### `indigo` → amber (primary accent)
-
-`indigo` carries primary actions: buttons, links, focus rings.
-
-| Token | Hex | Note |
+| Setting | Old | New |
 |---|---|---|
-| 50 | `#fffbeb` | |
-| 100 | `#fef3c7` | |
-| 200 | `#fde68a` | |
-| 300 | `#fcd34d` | |
-| 400 | `#fbbf24` | |
-| 500 | `#f59e0b` | bright amber; intended for use on dark backgrounds |
-| 600 | `#b45309` | darkened; see contrast note |
-| 700 | `#92400e` | |
-| 800 | `#78350f` | |
-| 900 | `#5c2c0c` | |
-| 950 | `#451a03` | |
+| `app_name` | `ContextForge` | `MCP Gateway` |
+| `smtp_from_name` | `ContextForge` | `MCP Gateway` |
+| `dcr_client_name_template` | `ContextForge ({gateway_name})` | `MCP Gateway ({gateway_name})` |
 
-**Contrast note.** `indigo-600` is the most-used token and appears as both button fill
-and body-weight text on white. Measured WCAG contrast ratios:
+`.env.example` updated to match, since `make check-env` compares the two.
 
-| Hex | On white | On `#09090b` (dark panel) |
-|---|---|---|
-| `#f59e0b` (stock amber-500) | 2.15:1 — fails | 9.26:1 — passes AAA |
-| `#d97706` (stock amber-600) | 3.19:1 — fails normal text | 6.24:1 |
-| `#b45309` (chosen for 600) | 5.02:1 — passes AA | 3.96:1 |
+### Tests
 
-Tailwind's stock `amber-600` fails AA for normal text on white, so the ramp darkens 600
-to `#b45309`. The consequence is that light-mode buttons read as a deeper amber than the
-bright `#f59e0b` in the approved mockup; the mockup's panel is dark, where `indigo-500`
-applies and the bright value holds comfortably (9.26:1).
+Seven test files had assertions on strings that changed. All were updated to the new
+expected values; none were deleted or weakened.
 
-Note the inversion in the table: tokens that pass on white degrade on the dark panel and
-vice versa. Any light-mode-tuned token used on a dark surface (or the reverse) needs
-checking rather than assuming the ramp handles it.
+One failure during the run was a genuine find rather than a test problem: the A2A
+default query string is duplicated in `admin.py` and `tool_service.py`, and the initial
+pass had missed both. The failing assertion located them.
 
-This split is deliberate and must be verified visually rather than assumed — see
-Verification.
+## Deployment notes
 
-### `purple` and `violet` → graphite
-
-These carry decorative gradient partners and secondary accents. Both map to the same
-zinc-based neutral ramp (`#fafafa` at 50 through `#09090b` at 950), so gradients that
-currently run indigo → purple become amber → graphite.
-
-### `blue` — unchanged
-
-`blue-*` is used for informational states, badges, and light text on dark panels.
-Remapping it risks breaking semantic color meaning for no brand benefit. Left alone.
-
-## Changes by File
-
-### Titles — 5 templates
-
-| File | Line | New title |
-|---|---|---|
-| `mcpgateway/templates/admin.html` | 10 | `MCP Gateway - Administration` |
-| `mcpgateway/templates/login.html` | 6 | `Sign In - MCP Gateway` |
-| `mcpgateway/templates/reset-password.html` | 6 | `Reset Password - MCP Gateway` |
-| `mcpgateway/templates/change-password-required.html` | 6 | `Password Change Required - MCP Gateway` |
-| `mcpgateway/templates/forgot-password.html` | 6 | `Forgot Password - MCP Gateway` (already correct) |
-
-### Login right panel — `mcpgateway/templates/login.html`
-
-- Remove the six feature cards and their two group headings (`Core Platform`,
-  `Enterprise Ready`).
-- Remove the logo `<img>` at lines 220-224.
-- Add inline SVG hero graphic and text wordmark.
-- Retarget the wrapping link to `https://github.com/Garry2012/mcp-gateway`.
-- Keep the dot-pattern background and the three floating pulse accents.
-
-**Write the new markup CSP-clean.** Upstream has an in-progress migration away from
-inline event handlers (`docs/CSP_INLINE_HANDLERS_MIGRATION.md`), and several recent
-`login.html` commits are part of it. Avoid inline `onclick`; prefer classes over inline
-`style` attributes. Markup that fights that migration will be rewritten by a future
-upstream commit, converting a clean merge into a conflict.
-
-**Conflict expectation for this file.** Of the last 8 upstream commits to `login.html`,
-6 modified lines 7-13 (the `<head>`) and 3 modified the right-panel region — including
-`c18218c9`, *"[CHORE][UI]: Consistent ContextForge logo and branding"*. Our `<title>`
-edit at line 6 is adjacent to the most-churned region, and Git's three-line context
-window means adjacent edits conflict, not only overlapping ones. Hand-resolution here is
-expected rather than exceptional. Resolutions should be mechanical, since our version
-deletes most of the contested block, and `rerere` replays them after the first
-occurrence.
-
-### Remaining brand strings
-
-| File | Occurrences |
-|---|---|
-| `mcpgateway/templates/admin.html` | 9 |
-| `mcpgateway/templates/overview_partial.html` | 6 |
-| `mcpgateway/admin_ui/a2aAgents.js` | 2 |
-| `mcpgateway/admin_ui/admin.js` | 1 |
-
-Text substitution only.
-
-### Email — 3 templates plus Python
-
-Template bodies, one string each:
-
-- `mcpgateway/templates/password_reset_email.html:6`
-- `mcpgateway/templates/password_reset_confirmation_email.html:6`
-- `mcpgateway/templates/account_lockout_email.html:7`
-
-Subject lines and sender name are hardcoded in Python, not in the templates. Without
-these, mail would arrive from "ContextForge" with a ContextForge subject and an MCP
-Gateway body:
-
-- `mcpgateway/services/email_notification_service.py:180` — `"Reset your ContextForge password"`
-- `mcpgateway/services/email_notification_service.py:200` — `"Your ContextForge password was changed"`
-- `mcpgateway/services/email_notification_service.py:222` — `"Your ContextForge account was temporarily locked"`
-- `mcpgateway/services/email_notification_service.py:128` — fallback sender name
-- `mcpgateway/config.py:1057` — `smtp_from_name` default
-
-**Deployment note:** `smtp_from_name` is settable via the `SMTP_FROM_NAME` environment
-variable. Changing the default does not override an existing value set in a `.env` file
-or Azure app setting. Confirm at deploy time.
-
-### New file
-
-`FORK-CUSTOMIZATIONS.md` at repo root, per D5.
+- **`SMTP_FROM_NAME`** is a settable environment variable. Changing the default does not
+  override a value already set in a `.env` file or an Azure app setting. Confirm at
+  deploy time or outgoing mail will still say "ContextForge".
+- **`DCR_CLIENT_NAME_TEMPLATE`** determines the name this gateway registers under with
+  external OAuth authorization servers. Existing registrations keep the old name, so a
+  deployment that has already registered will show a mix until those are re-registered.
 
 ## Verification
 
-1. `make build-ui` — Vite bundle rebuilds without error.
-2. `make dev` — inspect login, dashboard, and one data-heavy tab in **both light and
-   dark mode**. The palette remap touches ~1,629 sites indirectly; the risk is not
-   compile failure but unreadable combinations that only appear visually.
-3. Confirm the `indigo-600` contrast decision holds in practice on light-mode buttons,
-   links, and focus rings. If the deeper amber reads as brown against the approved
-   design, adjust the 600 token and re-measure contrast rather than reverting to
-   `#d97706` (3.19:1, fails AA).
-   Check specifically for the inversion case: any `indigo-600` usage that sits on a dark
-   surface drops to 3.96:1, so dark-mode text using that token needs `indigo-500` or
-   lighter instead.
-4. Check `tests/` (including Playwright specs) for assertions on brand strings or
-   `<title>` values. Update assertions to match the new brand. Do not delete or weaken
-   tests.
-5. `make ruff interrogate pylint` — required for the Python changes in
-   `email_notification_service.py` and `config.py`.
-6. `make test`.
+- `tests/unit/mcpgateway/test_main.py`, `test_admin.py` — pass
+- `tests/unit/mcpgateway/test_config.py`, `services/test_dcr_service.py`,
+  `services/test_email_notification_service.py`, `tests/integration/test_a2a_sdk_integration.py`
+  — 280 pass
+- Doctests in `config.py` and `version.py` — 24 pass
+- `ruff check` on all changed Python files — clean
+- Full `tests/unit/` suite — see commit message for result
 
-## Out of Scope
+Not run: Playwright tests (require a live gateway), and the Rust test suite (no Cargo
+toolchain available in this environment).
 
-- `brand-*` scale rename (deferred debt, D2)
-- Per-tenant theming
-- Wiring `APP_NAME` (D1)
-- Deleting upstream `contextforge-*` static image assets (D4)
-- Remapping the `blue` palette
-- Any Azure deployment work
+## Open Items
+
+### Logo assets — unresolved, user-visible
+
+Six references to ContextForge logo image files remain, because they are images rather
+than text and replacing them is an asset decision:
+
+- `templates/login.html:221-222`
+- `templates/change-password-required.html:261-262`
+- `templates/admin.html:246-251` (logo and icon, light and dark variants)
+
+Until these are replaced, the login page, the password-change page, and the admin header
+display the ContextForge wordmark while every string around them says MCP Gateway. This
+is the most prominent remaining inconsistency.
+
+Options: supply MCP Gateway logo files for `mcpgateway/static/`, or replace the `<img>`
+elements with a text wordmark.
+
+### Rust runtime server name
+
+`crates/mcp_runtime` advertises `server_name: "ContextForge"` (`config.rs:51`,
+`lib.rs:10486`, plus test assertions). Not changed, because no Cargo toolchain was
+available to build or test the result. The value is overridable at deploy time via the
+`MCP_RUST_SERVER_NAME` environment variable, so it can be handled without a code change.
+The crate is also marked deprecated in its own `Cargo.toml`.
+
+### Documentation
+
+`docs/` contains roughly 243 matching lines and `README.md` 8. Not in scope for this
+change.

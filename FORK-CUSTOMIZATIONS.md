@@ -50,63 +50,69 @@ strategy is based on.
 
 | File | Upstream commits | Our change | Conflict risk |
 |---|---|---|---|
-| `tailwind.config.js` | 2 | entire color theme | Very low |
 | `mcpgateway/services/email_notification_service.py` | 5 | 4 strings | Low |
-| `mcpgateway/templates/login.html` | 23 | right panel rewrite, title | **Elevated — see below** |
-| `mcpgateway/templates/admin.html` | 240 (94 touching color classes) | 9 strings | Low, because we only touch strings |
-| `mcpgateway/config.py` | 261 | 1 string | Low, same reason |
+| `mcpgateway/templates/login.html` | 23 | title, one footer string | Moderate — see below |
+| `mcpgateway/templates/admin.html` | 240 | 5 strings | Low, because we only touch strings |
+| `mcpgateway/config.py` | 261 | 3 defaults | Low, same reason |
+| `mcpgateway/main.py` | high | 3 strings | Low, same reason |
 
 Upstream velocity is roughly 4 commits per day.
 
 ### login.html is the hot spot
 
-Of the last 8 upstream commits to `login.html`:
+Of the last 8 upstream commits to `login.html`, **6 modified lines 7-13** — the
+`<head>`: Content Security Policy, stylesheet links, JS bundling. Our `<title>` change
+sits at line 6, immediately adjacent. Git's default three-line context window means
+adjacent edits conflict, not only overlapping ones, so expect to resolve this one
+occasionally. The resolution is trivial (keep both changes), and `rerere` replays it
+after the first time.
 
-- **6 modified lines 7-13** — the `<head>`: Content Security Policy, stylesheet links,
-  JS bundling. Our `<title>` change sits at line 6, immediately adjacent. Git's default
-  three-line context window means adjacent edits conflict, not only overlapping ones.
-- **3 modified the right-panel region** (lines 207, 285, 384), including commit
-  `c18218c9`, *"[CHORE][UI]: Consistent ContextForge logo and branding"*.
-
-Expect to hand-resolve conflicts in this file. They should be mechanical — our version
-deletes most of the contested region, so the resolution is usually "keep the deletion" —
-and `rerere` will replay that decision after the first time.
-
-### Keep the new login panel CSP-clean
-
-Upstream has an in-progress migration away from inline event handlers, documented in
-`docs/CSP_INLINE_HANDLERS_MIGRATION.md`. Several of the `login.html` commits above are
-part of it. Any markup we add to that file should avoid inline `onclick` handlers and
-prefer classes over inline `style` attributes, so our panel is not rewritten by a future
-upstream CSP commit.
+Three of those 8 commits also touched the right-hand feature panel, including
+`c18218c9`, *"[CHORE][UI]: Consistent ContextForge logo and branding"* — worth knowing,
+because upstream periodically does its own branding passes over that block.
 
 ## Divergences
 
 ### 1. Brand: ContextForge to MCP Gateway
 
-Status: **planned, not yet implemented.** Design:
+Status: **implemented**, except logo assets. Design:
 `docs/superpowers/specs/2026-08-06-mcp-gateway-ui-rebrand-design.md`.
 
-Page titles, visible UI strings, email subject lines and sender name, and the login
-page's right-hand panel.
+Text only. Page titles, visible UI strings, email subjects and sender name, MCP
+instructions advertised to clients, and three configuration defaults (`app_name`,
+`smtp_from_name`, `dcr_client_name_template`).
 
-### 2. Color theme via palette redefinition
+**Deliberately not renamed**, because they are identifiers rather than brand text and
+renaming breaks things:
 
-Status: **planned, not yet implemented.**
+| Category | Reason |
+|---|---|
+| `x-contextforge-*` HTTP headers | Wire protocol shared with the Rust runtime crate |
+| `mcpContextForge.*` Helm value keys | Renaming invalidates existing `values.yaml` files |
+| `contextforge:runtime:*` Redis keys | Cross-instance coordination; renaming mid-deploy splits the cluster |
+| `contextforge_mcp_runtime` crate name | Cargo build identifier |
+| "ContextForge Contributors" copyright | Upstream's legal attribution |
 
-`tailwind.config.js` redefines what the palette names `indigo`, `purple`, and `violet`
-resolve to, rather than rewriting the roughly 1,629 utility class usages across the
-codebase to a new `brand-*` scale.
+Docstrings and code comments were also left alone — not user-visible, and changing them
+would put a large diff across the highest-churn files for no benefit.
 
-**A class named `indigo-600` renders amber.** This is intentional. The reason is
-directly visible in the churn table above: a `brand-*` rename would place an
-approximately 1,629-line diff across `admin.html`, where upstream modified color classes
-94 times in 12 months. Redefining the palette confines the change to a file upstream
-touched twice.
+**Outstanding:** six references to ContextForge logo *image files* remain in
+`login.html`, `change-password-required.html`, and `admin.html`. Those pages still
+display the ContextForge wordmark. Resolving this needs a logo asset or a switch to a
+text wordmark.
 
-**Known debt.** The honest implementation is a `brand-*` scale with all usages rewritten.
-It is deferred, not rejected. Revisit if the fork ever stops tracking upstream, at which
-point the conflict argument no longer applies.
+### 2. Color theme
+
+Status: **not pursued.**
+
+A graphite-and-amber theme was designed and then dropped in favour of a text-only
+rebrand. The UI keeps upstream's indigo/violet palette.
+
+If revisited, the recommended approach is to redefine what the palette names resolve to
+in `tailwind.config.js` rather than rewriting the roughly 1,629 utility class usages to a
+new `brand-*` scale. Upstream modified color classes in `admin.html` 94 times in 12
+months, so a rename would conflict on nearly every sync, whereas `tailwind.config.js`
+was touched twice all year.
 
 ## Conventions for future divergences
 
