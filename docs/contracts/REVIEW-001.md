@@ -146,10 +146,11 @@ looks like an identifier rather than prose. Hiding these values or adding an
 implementation-local exception would evade the executable contract and was not
 attempted.
 
-The Architect must amend the gate so identifier-shape detection considers both sides of
-the occurrence, and decide whether bare deployment IDs remain stable or require an
-explicit compatibility migration. Task B and Task C remain stopped pending that
-decision.
+The Architect amended the gate so identifier-shape detection considers both sides of
+the occurrence and decided that the OpenShift namespace/Helm release, Langfuse
+organization ID, and OpenTelemetry service namespace remain stable. Amendment 5
+accepted and resolved this finding in commit `a2c7ec6a`; Task B then proceeded without
+renaming those identifiers.
 
 ## Functional
 
@@ -161,6 +162,9 @@ while runtime output correctly comes from `settings.app_name`
 (`mcpgateway/cache/session_registry.py:2202`). The full run reported exactly one failure:
 this doctest. No other doctest shared the stale expected-brand failure (1 failed, 1217
 passed, 56 skipped).
+
+Resolved in `a639ff55`: the expected value now follows the migrated application name,
+and the full doctest target passes (1,218 passed, 56 skipped).
 
 ### F-002 — Existing and new DCR registrations will show mixed names without an operator note
 
@@ -174,6 +178,9 @@ both names until registrations are recreated. The existing DCR guide still illus
 the old name and contains no compatibility note (`docs/docs/manage/dcr.md:82-98`). A
 migration note is needed if this configuration default remains in scope.
 
+Resolved in `a639ff55`: the DCR guide now explains that existing client names and
+credentials remain valid while newly registered clients use the configured template.
+
 ### F-003 — The known logo references still visibly contradict the migrated page titles
 
 The UI continues loading six `contextforge-*` image assets in the login,
@@ -181,6 +188,9 @@ change-password, and admin headers (`mcpgateway/templates/login.html:221`,
 `mcpgateway/templates/change-password-required.html:261`,
 `mcpgateway/templates/admin.html:246-251`). This is already anticipated by the contract,
 but it confirms the existing implementation is not independently complete.
+
+Resolved in `a639ff55`: those slots now render text wordmarks and the original image
+files remain on disk as required by the contract.
 
 ## Minor
 
@@ -200,6 +210,19 @@ after the Architect resolves B-001.
 `scripts/check-brand.sh:57`). The advertised override therefore cannot validate a later
 rename. This does not block the current fixed-name migration, but it makes the script's
 documented interface misleading.
+
+Resolved in `894c8c5c`: the scan pattern is now derived from `BRAND_LEGACY`.
+
+### M-003 — Amendment 3 has no authorized release-note destination
+
+Amendment 3 requires the CEF/LEEF vendor and product change to be recorded in release
+notes (`docs/contracts/CONTRACT-001-brand-migration.md:378-383`). The available release
+records are outside the Developer's authorized scope: root and chart changelogs are
+permanently historical, the broader documentation tree is deferred except for the DCR
+compatibility page, and Amendment 1 D6 assigns `FORK-CUSTOMIZATIONS.md` reconciliation
+to the Architect. The SIEM implementation and tests are complete, so this narrow
+documentation-routing gap does not block Task B. The Architect should designate or own
+the appropriate operator release-note destination.
 
 ## Reviewed with no finding
 

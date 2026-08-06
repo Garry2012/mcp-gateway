@@ -1,10 +1,9 @@
 # EVIDENCE-001 — Brand Migration Verification
 
-Task C was not started. Amendments 1 through 4 resolved the first three review blockers.
-The baseline at `49fea8dd` found a fourth contract blocker before implementation: the
-new deployment tier reports protected prefix-qualified keys and bare deployment
-identifiers as brand text. The command output below records only checks that were
-actually run.
+Task B and Task C are complete at implementation commit `a639ff55`. Amendments 1
+through 5 resolved all four blocking review findings. The command output below records
+checks that were actually run; earlier failed baselines are retained because they show
+the stop-and-report sequence that led to the amended contract.
 
 ## Commands run
 
@@ -61,9 +60,11 @@ exit=1
 
 ### Full doctest target
 
+Development-only environment values are redacted from the recorded command.
+
 ```console
-$ JWT_SECRET_KEY=contract-review-development-secret-key-2026 \
-  AUTH_ENCRYPTION_SECRET=contract-review-encryption-secret-2026 \
+$ JWT_SECRET_KEY=REDACTED \
+  AUTH_ENCRYPTION_SECRET=REDACTED \
   ENVIRONMENT=development make doctest
 🧪 Running doctest on all modules...
 bringing up nodes...
@@ -294,35 +295,203 @@ docker-compose.with-langfuse.yml:162:      LANGFUSE_INIT_ORG_ID: ${LANGFUSE_INIT
 exit=0
 ```
 
+## Amendment 5 implementation and Task C
+
+The branch was at the requested Architect commit before implementation:
+
+```console
+$ git rev-parse HEAD
+a2c7ec6a75ec9557f2ebd37ce0b6143f6e2ce16d
+exit=0
+```
+
+### Required brand tiers
+
+These are exact result lines from the four post-implementation commands. Each command
+also ran the protected-identifier guard shown after the tier results.
+
+```console
+$ scripts/check-brand.sh ui
+PASS  [ui] Admin UI templates
+PASS  [ui] Admin UI JavaScript
+PASS  [ui] Static assets referenced by name
+BRAND CHECK PASSED
+exit=0
+
+$ scripts/check-brand.sh runtime
+PASS  [runtime] Application package (all emitted strings, descriptions, docstrings)
+PASS  [runtime] Environment template
+BRAND CHECK PASSED
+exit=0
+
+$ scripts/check-brand.sh assets
+PASS  [assets] Logo/icon image references
+BRAND CHECK PASSED
+exit=0
+
+$ scripts/check-brand.sh deploy
+PASS  [deploy] Helm chart configuration, schema and templates
+PASS  [deploy] Container and process configuration
+PASS  [deploy] Infrastructure and provisioning
+BRAND CHECK PASSED
+exit=0
+
+Protected identifiers (must still be present):
+  OK    x-contextforge-* headers (699)
+  OK    mcpContextForge Helm keys (978)
+  OK    contextforge:runtime keys (25)
+  OK    Rust crate name (20)
+```
+
+The contract-aware operator-document scan passed:
+
+```console
+PASS README.md, DEVELOPING.md, charts/*.md
+exit=0
+```
+
+The full gate remains intentionally non-zero only because the deferred documentation
+tree is included. It reported 1,029 indented legacy-brand lines under that failure:
+
+```console
+$ scripts/check-brand.sh
+PASS  [ui] Admin UI templates
+PASS  [ui] Admin UI JavaScript
+PASS  [ui] Static assets referenced by name
+PASS  [runtime] Application package (all emitted strings, descriptions, docstrings)
+PASS  [runtime] Environment template
+PASS  [docs] Top-level documentation
+FAIL  [docs] User-facing documentation tree
+PASS  [docs] Operator guides
+PASS  [deploy] Helm chart configuration, schema and templates
+PASS  [deploy] Container and process configuration
+PASS  [deploy] Infrastructure and provisioning
+PASS  [assets] Logo/icon image references
+BRAND CHECK FAILED
+indented_match_lines=1029
+exit=1
+```
+
+### Python validation
+
+The focused SIEM and configuration tests passed before the full suite. The full doctest,
+lint/docstring gate, and pytest suite then produced:
+
+```console
+$ make doctest
+1218 passed, 56 skipped, 6 warnings in 11.97s
+exit=0
+
+$ make ruff interrogate
+All checks passed!
+TOTAL: 5214 definitions, 2 missed, 5212 covered, 100.0%
+RESULT: PASSED (minimum: 100.0%, actual: 100.0%)
+exit=0
+
+$ make test
+21695 passed, 810 skipped, 2 xfailed, 492 warnings in 375.17s (0:06:15)
+exit=0
+```
+
+The first full test run exposed one stale `security.txt` assertion and otherwise
+completed successfully (21,694 passed). The assertion was migrated and the complete
+rerun above passed.
+
+### Build, configuration, and deployment syntax
+
+```console
+$ make build-ui
+✓ 68 modules transformed.
+✓ built in 4.19s
+exit=0
+
+$ make check-env
+✅ .env validated successfully with no warnings.
+exit=0
+
+$ bash -n run.sh docker-entrypoint.sh run-gunicorn.sh
+exit=0
+
+$ docker compose -f docker-compose.yml config --quiet
+exit=0
+
+$ docker compose -f docker-compose.yml -f docker-compose.with-langfuse.yml config --quiet
+exit=0
+```
+
+`make check-env` used redacted development-only values for the required secrets. Both
+Compose commands printed only warnings about an unset `KEY_FILE_PASSWORD`.
+
+The repository hygiene gate also completed successfully:
+
+```console
+$ make pre-commit
+check for added large files..............................................Passed
+check json...............................................................Passed
+check yaml...............................................................Passed
+check toml...............................................................Passed
+ruff check...............................................................Passed
+ruff format..............................................................Passed
+interrogate..............................................................Passed
+IBM detect secrets.......................................................Passed
+exit=0
+```
+
+The secret baseline regeneration reviewed 529 findings and reported no live,
+unaudited, or real secrets.
+
+### Live HTTP identity
+
+With the development server running, the login response, wordmark markup, and
+authenticated OpenAPI document returned:
+
+```console
+<title>Sign In - MCP Gateway</title>
+MCP <span class="text-blue-200">Gateway</span>
+MCP Gateway
+http_checks_exit=0
+```
+
+The first line is the login page title, the second is the rendered login wordmark
+markup, and the third is `openapi.json`'s `info.title`.
+
 ## Acceptance criteria
 
 | Criterion | Result | Evidence |
 |---|---|---|
-| `make install-dev` | PASS | Exit 0 at `49fea8dd`; UI bundle built in 5.42s. |
-| `scripts/check-brand.sh ui` | FAIL | Baseline has 9 match lines; no implementation edits made. |
-| `scripts/check-brand.sh runtime` | FAIL | Baseline has 149 match lines; no implementation edits made. |
-| `scripts/check-brand.sh assets` | FAIL | Baseline has the six expected logo references. |
-| `scripts/check-brand.sh deploy` | FAIL | Exit 1; alongside real brand text, it reports the protected Helm key and stateful deployment identifiers shown above. |
-| Protected-identifier guard | PASS | 697 headers, 965 Helm-key occurrences, 25 Redis-key occurrences, 20 crate-name occurrences. |
-| `README.md`, `DEVELOPING.md`, `charts/*.md` clean | FAIL | Baseline remains unmodified; the chart guide also contains the B-004 key-only false positive. |
-| `make ruff interrogate` | NOT RUN | Stopped on Task B contract blocker B-004. |
-| `make test` | NOT RUN | Stopped on Task B contract blocker B-004. |
-| `make doctest` | FAIL | Output above; exit 2, one stale brand assertion. |
-| `make build-ui` | NOT RUN as Task C | `make install-dev` built the bundle successfully, but the post-change acceptance run did not occur. |
-| Login title HTTP check | NOT RUN | No Task B build and no `make dev` acceptance server started. |
-| OpenAPI title HTTP check | NOT RUN | No Task B build and no `make dev` acceptance server started. |
-| Human light/dark wordmark review | NOT RUN | Wordmark was not implemented because work stopped after Task A. |
-| Human login-page visual review | NOT RUN | Wordmark was not implemented because work stopped after Task A. |
+| `make install-dev` | PASS | Exit 0; development dependencies installed and the UI bundle built. |
+| `scripts/check-brand.sh ui` | PASS | Exit 0. |
+| `scripts/check-brand.sh runtime` | PASS | Exit 0. |
+| `scripts/check-brand.sh assets` | PASS | Exit 0. |
+| `scripts/check-brand.sh deploy` | PASS | Exit 0. |
+| Protected-identifier guard | PASS | 699 headers, 978 Helm-key occurrences, 25 Redis-key occurrences, 20 crate-name occurrences. |
+| `README.md`, `DEVELOPING.md`, `charts/*.md` clean | PASS | Contract-aware scan exit 0. |
+| Full brand gate | EXPECTED FAIL | Exit 1 only for `docs/docs/**`, deferred to CONTRACT-002. |
+| `make ruff interrogate` | PASS | Exit 0; Ruff clean and interrogate 100.0%. |
+| `make test` | PASS | 21,695 passed. |
+| `make doctest` | PASS | 1,218 passed. |
+| `make build-ui` | PASS | 68 modules transformed; exit 0. |
+| Login title HTTP check | PASS | `Sign In - MCP Gateway`. |
+| OpenAPI title HTTP check | PASS | `info.title` is `MCP Gateway`. |
+| Human light/dark wordmark review | NOT VERIFIED | Requires product-owner visual judgment under CONTRACT-001 Task C. |
+| Human login-page visual review | NOT VERIFIED | Requires product-owner visual judgment under CONTRACT-001 Task C. |
 
 ## Not verified
 
-No Task B implementation changes were made after Amendment 4. Lint, the full test
-suite, the post-change UI build, live HTTP responses, and visual coherence were
-therefore not verified.
+- Human approval of the light/dark admin wordmarks and login-page visual coherence.
+- Helm rendering with the `helm` binary; it was unavailable. Chart schema and both
+  Compose configurations were validated, and the full suite skipped the three chart
+  tests that require Helm.
+- End-to-end CEF/LEEF delivery to a connected SIEM. Unit tests cover configurable
+  vendor/product values, pipe and backslash escaping, and newline removal.
+- The deferred `docs/docs/**` migration outside `docs/docs/manage/dcr.md`; CONTRACT-002
+  owns that decision.
 
 ## Findings routed back to architect
 
-Amendments 1 through 4 resolved B-001 through B-003. The deployment gate now includes
-the correct surfaces, but its suffix-only shape rule reports a protected Helm key and
-bare stateful identifiers as brand text. See `docs/contracts/REVIEW-001.md` B-004 for
-the remaining gate and compatibility decisions.
+- B-001 through B-004 were accepted and resolved by Amendments 1 through 5. Task B was
+  completed against the resulting executable gate.
+- M-003 is non-blocking: Amendment 3 requires a SIEM operator release note, but every
+  current release-note destination is historical, deferred, or assigned to the
+  Architect. `REVIEW-001.md` records the routing gap without changing an out-of-scope
+  file.
