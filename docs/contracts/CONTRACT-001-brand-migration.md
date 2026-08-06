@@ -326,6 +326,62 @@ session derivation, or cross-runtime protocol.** If the gate ever demands one, t
 gate defect — stop and escalate, exactly as was done here. Do not satisfy the gate by
 renaming such a value, and do not evade it with source-token tricks.
 
+## 6c. AMENDMENT 3 — SIEM vendor identity resolved (2026-08-06)
+
+The product owner has ruled on the escalation from Amendment 1 D2.
+
+**Organisation name: `InTimeTec`.** Implemented as a configurable setting rather than a
+literal, because this fork is heading for multi-tenant Azure deployment where tenants may
+need their own vendor identity.
+
+### Required change
+
+Both SIEM header sites in `mcpgateway/services/siem_export_service.py`:
+
+| Line | Current | Required |
+|---|---|---|
+| 1020 (CEF) | `CEF:0\|IBM\|ContextForge\|...` | vendor from new setting, product from `settings.app_name` |
+| 1029 (LEEF) | `LEEF:2.0\|IBM\|ContextForge\|...` | same |
+
+New setting in `mcpgateway/config.py`, placed with the other SIEM settings:
+
+```python
+siem_vendor_name: str = Field(
+    default="InTimeTec",
+    description="Vendor identity emitted in CEF/LEEF security event headers",
+)
+```
+
+Add the matching commented entry to `.env.example` so `make check-env` stays consistent.
+Do not hardcode `InTimeTec` at the call sites — read the setting.
+
+### Header escaping — mandatory, do not skip
+
+Hardcoded literals could never corrupt the log format. Configurable values can, so this
+becomes a correctness requirement rather than a nicety.
+
+CEF and LEEF both use `|` as the header delimiter. A vendor or product name containing
+`|` or `\` would corrupt every event line, and a newline would forge a spurious event —
+this is log injection, not just a formatting bug.
+
+**Do not reuse `_cef_escape()` for header fields.** It escapes `=` as well
+(`siem_export_service.py:1000`), which is required for extension *values* but is wrong in
+the header, where `=` is not a delimiter. It would emit a literal backslash that parsers
+render incorrectly.
+
+Add a small header-specific helper that escapes `\` and `|` and strips newlines, and
+apply it to **both** the vendor and product fields in **both** the CEF and LEEF headers.
+Note the LEEF header currently applies no escaping at all.
+
+Include a unit test covering a vendor name containing `|` and one containing a newline.
+
+### Operator note
+
+Changing CEF/LEEF vendor or product breaks existing SIEM correlation rules — filters
+matching the old values silently stop matching, leaving dashboards quiet and apparently
+healthy. No SIEM is currently connected, so this is free now and expensive later. Record
+the change in the release notes for whoever wires up a SIEM.
+
 ## 7. Out of scope
 
 - Colour, theme, or layout changes
