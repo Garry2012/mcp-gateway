@@ -205,6 +205,72 @@ Claims without command output are not evidence. If something was not run, say so
 
 ---
 
+## 6a. AMENDMENT 1 — resolution of REVIEW-001 B-001 (2026-08-06)
+
+The Developer's Task A review is **accepted in full**. Every finding was independently
+reproduced by the Architect. Two were defects in the gate itself.
+
+### Gate defects — fixed by the Architect
+
+- **Whole-line allowlist suppression.** `scan()` dropped any line containing an
+  allowlisted identifier, hiding visible branding on the same line (`README.md:30`, the
+  image alt text, sat next to an allowlisted upstream URL). Now strips allowlisted
+  *substrings* and re-tests the remainder, printing the original line.
+- **`BRAND_LEGACY` was inert.** The scan pattern is now derived from the variable, so the
+  documented override actually works.
+
+### Scope decisions
+
+**D1 — Runtime tier now scans the whole application package.** Enumerating five files
+was unsafe. `scripts/check-brand.sh` scans `mcpgateway/` entirely. This deliberately
+includes docstrings and config `description=` strings, which the review correctly showed
+are operator-visible via generated docs and the admin configuration view. Roughly 233
+lines. Prose rarely collides with upstream edits, unlike the colour-class churn that
+drove earlier scoping.
+
+**D2 — CEF/LEEF SIEM identity.** `siem_export_service.py:1020,1029` emits
+`CEF:0|IBM|ContextForge|...`.
+- *Product field* → derive from `settings.app_name`. In scope. Do not hardcode a literal.
+- *Vendor field* (`IBM`) → **out of scope, escalated to the product owner.** Emitting
+  another organisation as SIEM vendor is a factual and possibly legal question, not a
+  cosmetic one. Leave `IBM` untouched until the owner rules.
+
+Note for the owner: changing CEF vendor/product breaks existing SIEM correlation rules.
+No SIEM is currently deployed, so the cost of changing it now is zero and rises later.
+
+**D3 — Documentation split.** The review is right that omitted operator docs are a real
+gap, but they do not all carry the same cost or the same answer:
+
+| Surface | Decision | Reason |
+|---|---|---|
+| `README.md` (19 lines) | **IN SCOPE** | Front door of the product. 128 upstream commits/yr, small diff. |
+| `DEVELOPING.md`, `charts/*.md` | **IN SCOPE** | Describe our current product's operation. |
+| `docs/docs/**` (~1,300 lines) | **DEFERRED to CONTRACT-002** | 497 upstream commits/yr. Rebranding it is a permanent, heavy merge tax, and we may not ship upstream's docs site at all. Separate decision, separate cost profile. |
+| `docs/docs/architecture/adr/**` | **PERMANENTLY OUT** | Historical records of decisions upstream made under their name. Rewriting falsifies history. |
+| `docs/docs/media/kit/**` | **PERMANENTLY OUT** | Upstream's own brand/media kit. |
+| `CHANGELOG.md` | **PERMANENTLY OUT** | Historical release record. |
+
+The `docs` tier of the gate currently fails on `docs/docs/**`. Until CONTRACT-002 exists,
+**Task B is complete when `ui`, `runtime`, and `assets` tiers pass**, plus `README.md`,
+`DEVELOPING.md` and `charts/*.md`. Run tiers individually:
+
+```bash
+scripts/check-brand.sh ui
+scripts/check-brand.sh runtime
+scripts/check-brand.sh assets
+```
+
+**D4 — F-002 (DCR mixed names).** Accepted as correct. No automatic migration; existing
+client IDs and secrets stay valid. Add a short compatibility note to
+`docs/docs/manage/dcr.md` — this one file is in scope despite D3, because it documents a
+behaviour we changed.
+
+**D5 — F-001 (doctest).** In scope for Task B. Fix the expected value at
+`session_registry.py:2143`. `make doctest` must pass.
+
+**D6 — M-001 (fork record drift).** The Architect will reconcile `FORK-CUSTOMIZATIONS.md`
+after Task B lands. Not the Developer's task.
+
 ## 7. Out of scope
 
 - Colour, theme, or layout changes

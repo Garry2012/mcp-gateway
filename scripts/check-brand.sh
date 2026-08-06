@@ -17,6 +17,12 @@ set -uo pipefail
 LEGACY_BRAND="${BRAND_LEGACY:-ContextForge}"
 NEW_BRAND="${BRAND_NEW:-MCP Gateway}"
 
+# The scan pattern is DERIVED from LEGACY_BRAND so the documented override
+# actually works. Previously the pattern was hardcoded and BRAND_LEGACY only
+# affected the banner, which made the interface misleading. (REVIEW-001 M-002)
+# Matching is case-insensitive at the grep/perl call sites.
+LEGACY_RE="$LEGACY_BRAND"
+
 cd "$(dirname "$0")/.." || exit 2
 
 # ---------------------------------------------------------------------------
@@ -52,10 +58,23 @@ scan() {
   fi
 
   local hits
-  # -i on the allowlist: protected identifiers appear in several casings
-  # (x-contextforge-*, X-Contextforge-UAID-Hop, MCP-CONTEXT-FORGE).
-  hits=$(git grep -nI -E "[Cc]ontext[Ff]orge" -- "$@" 2>/dev/null \
-         | grep -viE "$ALLOW" || true)
+  # Substring-aware allowlisting.
+  #
+  # A whole-line `grep -v` is wrong here: a line can contain BOTH a protected
+  # identifier and visible legacy branding, e.g.
+  #     ![ContextForge](https://ibm.github.io/mcp-context-forge/images/x.gif)
+  # Dropping that line hides the alt text because the URL is allowlisted.
+  #
+  # Instead: strip allowlisted substrings from a copy of the line, then test
+  # whether the legacy brand still survives. Print the ORIGINAL line so the
+  # output stays actionable. (REVIEW-001 B-001)
+  hits=$(git grep -nI -iE "$LEGACY_RE" -- "$@" 2>/dev/null \
+         | ALLOW_RE="$ALLOW" LEGACY_RE="$LEGACY_RE" perl -ne '
+             my $orig = $_;
+             my $stripped = $_;
+             $stripped =~ s/$ENV{ALLOW_RE}//gi;
+             print $orig if $stripped =~ /$ENV{LEGACY_RE}/i;
+           ' || true)
 
   if [[ -n "$hits" ]]; then
     echo "${RED}FAIL${NC}  [$tier] $desc"
@@ -82,12 +101,18 @@ scan ui "Static assets referenced by name" \
   'mcpgateway/static/*.html'
 
 # --- Tier 2: identity the product asserts at runtime ------------------------
-scan runtime "Runtime product identity (config defaults, emails, MCP identity)" \
-  'mcpgateway/config.py' \
-  'mcpgateway/main.py' \
-  'mcpgateway/version.py' \
-  'mcpgateway/services/email_notification_service.py' \
-  'mcpgateway/cache/session_registry.py'
+#
+# Scans the WHOLE application package rather than an enumerated file list.
+# Enumeration proved unsafe: the previous five-file list missed CEF/LEEF SIEM
+# identity, support-bundle output, OAuth error text returned to clients, CLI
+# help, generated security.txt, and operator-visible config descriptions.
+# (REVIEW-001 B-001)
+#
+# This necessarily also catches docstrings and comments. That is accepted:
+# brand strings in prose are cheap to change and rarely collide with upstream
+# edits, unlike the colour-class churn that drove earlier scoping decisions.
+scan runtime "Application package (all emitted strings, descriptions, docstrings)" \
+  'mcpgateway/'
 
 scan runtime "Environment template" \
   '.env.example'
@@ -98,6 +123,14 @@ scan docs "Top-level documentation" \
 
 scan docs "User-facing documentation tree" \
   'docs/docs/'
+
+scan docs "Operator guides" \
+  'DEVELOPING.md' \
+  'charts/README.md' \
+  'charts/*.md'
+
+# NOTE: CHANGELOG.md is deliberately NOT scanned. It is a historical record of
+# releases made under the upstream name; rewriting it would falsify history.
 
 # --- Tier 4: logo and icon assets ------------------------------------------
 if [[ "$REQUESTED_TIER" == "all" || "$REQUESTED_TIER" == "assets" ]]; then
