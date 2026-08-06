@@ -382,6 +382,81 @@ matching the old values silently stop matching, leaving dashboards quiet and app
 healthy. No SIEM is currently connected, so this is free now and expensive later. Record
 the change in the release notes for whoever wires up a SIEM.
 
+## 6d. AMENDMENT 4 — deployment configuration in scope (2026-08-06)
+
+The Developer's third blocker is **accepted in full**, and in practical terms it is the
+highest-impact finding of the engagement: it would have defeated the entire migration on
+our actual deployment path.
+
+### What was wrong
+
+`charts/mcp-stack/values.yaml:221` sets `APP_NAME: ContextForge` as an explicit
+environment variable. An explicit env var **overrides the Python default**, so every Helm
+install — which is the Azure deployment path — would have shipped the old brand across
+OpenAPI, Swagger, MCP `serverInfo`, and the admin UI, no matter how thoroughly the
+application source was migrated. The gate would have gone green regardless.
+
+Also confirmed: `values.yaml:902` (`DCR_CLIENT_NAME_TEMPLATE`),
+`values.schema.json` defaults, `templates/NOTES.txt:71` post-install output, and
+`templates/configmap-monitoring.yaml:233,235` Grafana folder metadata.
+
+### Two further instances the review did not find
+
+Located by the Architect while generalising the finding:
+
+- `docker-compose.yml:370` — `SMTP_FROM_NAME=${SMTP_FROM_NAME:-ContextForge}`, so mail
+  from Docker deployments still identifies as ContextForge.
+- `run.sh:106` — `APP_NAME=ContextForge`.
+
+### Root cause — third instance of the same mistake
+
+Amendment 1 scoped too narrowly, Amendment 2 too broadly, and this one scoped the **wrong
+axis entirely**. All three share a cause: the gate was scoped by *where the Architect
+assumed brand text lived* rather than by *what determines what the product says at
+runtime*.
+
+Application source is only half of that. Deployment configuration is the other half, and
+it wins, because an explicit setting always beats a code default.
+
+### Fix — a deployment tier
+
+`scripts/check-brand.sh` gains a `deploy` tier covering `charts/`,
+`docker-compose*.yml`, `Containerfile`, `docker-entrypoint.sh`, `run.sh`,
+`run-gunicorn.sh`, `ansible/`, and `infra/`.
+
+The shape allowlist already draws the right line here without modification:
+
+| Form | Example | Treatment |
+|---|---|---|
+| Helm **key** | `mcpContextForge.config.APP_NAME` | exempt — identifier |
+| Helm **value** | `APP_NAME: ContextForge` | **must change** — brand text |
+
+Chart raw hits drop 931 → 93 after shape filtering, with zero false positives: the five
+remaining lines that mention a Helm key also carry genuine brand text as a value or
+label. `charts/**/CHANGELOG.md` is excluded as historical, consistent with the root
+`CHANGELOG.md`.
+
+### Revised definition of done
+
+Task B is complete when **all four** exit 0:
+
+```bash
+scripts/check-brand.sh ui
+scripts/check-brand.sh runtime
+scripts/check-brand.sh assets
+scripts/check-brand.sh deploy      # NEW
+```
+
+plus `README.md`, `DEVELOPING.md`, `charts/*.md` clean. The full run still fails on
+`docs/docs/**`, which remains deferred to CONTRACT-002.
+
+### Standing rule addition
+
+**Changing an application default is not sufficient.** Any brand value that can be set by
+deployment configuration must be changed in every place that sets it, or the default is
+dead code. When changing a default in `config.py`, grep the deployment surfaces for the
+same setting name before declaring it done.
+
 ## 7. Out of scope
 
 - Colour, theme, or layout changes

@@ -160,6 +160,32 @@ scan docs "Operator guides" \
   'charts/README.md' \
   'charts/*.md'
 
+# --- Tier 5: deployment configuration -------------------------------------
+#
+# Config that OVERRIDES the application's own defaults. Scanning the app alone
+# is not enough: charts/mcp-stack/values.yaml sets APP_NAME: ContextForge as an
+# explicit env var, which beats the Python default in every Helm install, and
+# docker-compose.yml and run.sh do the same for other settings.
+#
+# A gate that ignores these can go green while every actual deployment still
+# ships the old brand. (REVIEW-001 B-003)
+#
+# Helm KEYS (mcpContextForge.*) are identifiers and stay protected by the shape
+# allowlist. Helm VALUES (APP_NAME: ContextForge) are brand text and must change.
+scan deploy "Helm chart configuration, schema and templates" \
+  'charts/' ':(exclude)charts/**/CHANGELOG.md'
+
+scan deploy "Container and process configuration" \
+  'docker-compose*.yml' \
+  'Containerfile' \
+  'docker-entrypoint.sh' \
+  'run.sh' \
+  'run-gunicorn.sh'
+
+scan deploy "Infrastructure and provisioning" \
+  'ansible/' \
+  'infra/'
+
 # NOTE: CHANGELOG.md is deliberately NOT scanned. It is a historical record of
 # releases made under the upstream name; rewriting it would falsify history.
 
