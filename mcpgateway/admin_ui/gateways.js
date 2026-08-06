@@ -1904,7 +1904,8 @@ export const refreshToolsForSelectedGateways = async function(buttonEl) {
   await Promise.allSettled(
     realGwIds.map(async (gid) => {
       try {
-        const res = await fetch(
+        // Same CSRF requirement as the single-gateway refresh above.
+        const res = await fetchWithTimeout(
           `${window.ROOT_PATH}/gateways/${gid}/tools/refresh`,
           {
             method: "POST",
