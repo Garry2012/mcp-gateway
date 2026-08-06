@@ -79,26 +79,42 @@ explicitly what you could not verify and why.
 
 ---
 
-## 3. Blocking decision — do not start Task B until resolved
+## 3. Naming — DECIDED
 
-**The product name is not decided.**
+**The product name is `MCP Gateway`.** Confirmed by the product owner on 2026-08-06.
 
-The current value `MCP Gateway` was a working placeholder. The product owner has since
-said they want "our own better name". `MCP Gateway` is a generic descriptor, not a brand.
+This is already the value in `app_name`, `smtp_from_name`, `dcr_client_name_template`,
+and the page titles, so **no rename is required** — the existing partial work used the
+correct string. Task B is unblocked.
 
-Renaming twice costs the same as renaming once, so Task B is **gated on the name being
-fixed**. Task A is not gated — start there.
+Apply `MCP Gateway` consistently to every remaining surface. Do not spread literal brand
+strings any wider than they already are; prefer `settings.app_name` where a template or
+service can read it, so a future rename stays cheap.
 
-When the name lands, it enters the check as a single variable:
+The check defaults to this value, so it needs no argument:
 
 ```bash
-BRAND_NEW="Acme Gateway" scripts/check-brand.sh
+scripts/check-brand.sh
 ```
 
-The same string must be applied to `app_name`, `smtp_from_name`,
-`dcr_client_name_template`, page titles, and the wordmark. Do not spread literal brand
-strings any wider than they already are; prefer `settings.app_name` where a template or
-service can read it.
+### Logo and wordmark
+
+No logo asset exists for MCP Gateway. Unless the product owner supplies image files,
+implement a **text wordmark**: "MCP" in the default foreground colour, "Gateway" in the
+existing accent colour, replacing the `<img>` elements at:
+
+- `mcpgateway/templates/login.html:220-224`
+- `mcpgateway/templates/change-password-required.html:260-263`
+- `mcpgateway/templates/admin.html:246-251` (header logo and icon, light and dark
+  variants — note the icon slot is small and square; a two-word wordmark may not fit,
+  so `MCP` alone or a monogram is acceptable there)
+
+Rationale: text scales, themes for both modes without maintaining two assets, needs no
+extra HTTP request, and is trivially replaced later when a real asset exists. This is a
+reversible default chosen so the work is not blocked — not a final visual identity
+decision.
+
+Leave the `contextforge-*` image files on disk (see §4). Only the references change.
 
 ---
 
