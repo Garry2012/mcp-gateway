@@ -1,9 +1,10 @@
 # EVIDENCE-001 — Brand Migration Verification
 
-Task C was not started. Amendment 1 resolved the original Task A blocker, but the
-rewritten runtime gate exposed a second contract blocker before implementation:
-cross-language authentication and telemetry identifiers are now required to be renamed.
-The command output below records only the checks that were actually run.
+Task C was not started. Amendments 1 and 2 resolved the first two review blockers. The
+next inventory at `ce3e0ee7` found a third scope blocker before implementation: default
+Helm values override the migrated runtime with the legacy brand, while the definition of
+done scans only chart Markdown. The command output below records only checks that were
+actually run.
 
 ## Commands run
 
@@ -165,13 +166,66 @@ tests/unit/mcpgateway/middleware/test_token_scoping.py:31:    expected = hashlib
 exit=0
 ```
 
+### Amendment 2 Helm deployment inventory
+
+The required development installation completed successfully before this inventory:
+
+```console
+$ make install-dev
+✅  Virtual env already exists, skipping creation.
+Resolved 311 packages in 1.06s
+   Building mcp-contextforge-gateway @ file:///Users/garima/conductor/workspaces/mcp-gateway/pyongyang
+      Built mcp-contextforge-gateway @ file:///Users/garima/conductor/workspaces/mcp-gateway/pyongyang
+Prepared 1 package in 2.47s
+Uninstalled 1 package in 1ms
+Installed 1 package in 9ms
+⏭️  Rust builds disabled (set ENABLE_RUST_BUILD=1 to enable)
+🔨 Building Admin UI bundle...
+✓ 68 modules transformed.
+✓ built in 4.16s
+exit=0
+```
+
+The chart inventory shows active legacy defaults and live operator surfaces outside the
+gate:
+
+```console
+$ git grep -nI -E '(^|[^[:alnum:]])ContextForge([^A-Z_.:-]|$)' -- charts/mcp-stack/values.yaml charts/mcp-stack/values.schema.json charts/mcp-stack/templates
+charts/mcp-stack/templates/NOTES.txt:71:  - ContextForge    : {{ .Values.mcpContextForge.replicaCount }} replica(s) - {{ .Values.mcpContextForge.image.repository }}:{{ .Values.mcpContextForge.image.tag }}
+charts/mcp-stack/templates/NOTES.txt:137:{{- /* ════════════  ContextForge  ════════════ */}}
+charts/mcp-stack/templates/NOTES.txt:138:🔗 **ContextForge**
+charts/mcp-stack/templates/configmap-monitoring.yaml:233:      - name: ContextForge Dashboards
+charts/mcp-stack/templates/configmap-monitoring.yaml:235:        folder: ContextForge
+charts/mcp-stack/templates/deployment-mcpgateway.yaml:2:# DEPLOYMENT - ContextForge (Gateway)
+charts/mcp-stack/templates/platform/ocp/route.yaml:4:  This is the preferred way to expose ContextForge on OpenShift. The standard
+charts/mcp-stack/values.schema.json:260:              "default": "ContextForge"
+charts/mcp-stack/values.schema.json:2230:      "description": "ContextForge Gateway configuration"
+charts/mcp-stack/values.yaml:221:    APP_NAME: ContextForge            # public-facing name of the gateway
+charts/mcp-stack/values.yaml:600:      # ContextForge is a private API gateway
+charts/mcp-stack/values.yaml:870:    # SMTP_FROM_NAME: "ContextForge"
+charts/mcp-stack/values.yaml:902:    DCR_CLIENT_NAME_TEMPLATE: "ContextForge ({gateway_name})" # template for client_name in DCR requests
+exit=0
+```
+
+The active application values are injected into the deployment:
+
+```console
+$ sed -n '20,24p' charts/mcp-stack/templates/configmap-gateway.yaml
+{{- /* Iterate over every key in mcpContextForge.config */}}
+{{- range $key, $val := .Values.mcpContextForge.config }}
+  {{ $key }}: {{ $val | quote }}
+{{- end }}
+{{- end }}
+exit=0
+```
+
 ## Acceptance criteria
 
 | Criterion | Result | Evidence |
 |---|---|---|
-| `scripts/check-brand.sh` | FAIL | Amendment 1 runtime baseline above; exit 1. Task B stopped on B-002. |
-| `make ruff interrogate` | NOT RUN | Stopped on Task B contract blocker B-002. |
-| `make test` | NOT RUN | Stopped on Task B contract blocker B-002. |
+| `scripts/check-brand.sh` | FAIL | Baseline tiers remain failing; Task B stopped on B-003 before edits. |
+| `make ruff interrogate` | NOT RUN | Stopped on Task B contract blocker B-003. |
+| `make test` | NOT RUN | Stopped on Task B contract blocker B-003. |
 | `make doctest` | FAIL | Output above; exit 2, one stale brand assertion. |
 | `make build-ui` | NOT RUN as Task C | `make install-dev` built the bundle successfully, but the post-change acceptance run did not occur. |
 | Login title HTTP check | NOT RUN | No Task B build and no `make dev` acceptance server started. |
@@ -181,12 +235,12 @@ exit=0
 
 ## Not verified
 
-No Task B implementation changes were made after Amendment 1. Lint, the full test
+No Task B implementation changes were made after Amendment 2. Lint, the full test
 suite, the post-change UI build, live HTTP responses, and visual coherence were
 therefore not verified.
 
 ## Findings routed back to architect
 
-Amendment 1 resolved B-001. Its whole-package textual scan now requires changes to a
-cross-language runtime-auth derivation, stable OpenTelemetry attribute keys, and Python
-symbols. See `docs/contracts/REVIEW-001.md` B-002 for the remaining scope decision.
+Amendments 1 and 2 resolved B-001 and B-002. Default Helm values still override the
+migrated Python identity, and live Helm/Grafana templates retain the old brand outside
+the gate. See `docs/contracts/REVIEW-001.md` B-003 for the remaining scope decision.

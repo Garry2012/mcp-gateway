@@ -68,12 +68,45 @@ also catches identifiers that cannot be renamed under the contract:
   needed to alter product identity and broadens the fork delta; treating a potentially
   imported class as private would also be an unapproved API assumption.
 
-The protected-value allowlist does not cover the runtime-auth derivation or telemetry
-schema (`scripts/check-brand.sh:35`). The runtime tier therefore cannot pass without
-either weakening compatibility/security or changing the executable contract. Hiding a
-literal by splitting it across source tokens would merely evade the gate and was not
-attempted. Architect direction is required on explicit allowlisting versus a separately
-planned identifier migration, so Task B stops before implementation.
+The protected-value allowlist did not cover the runtime-auth derivation or telemetry
+schema. The runtime tier therefore could not pass without either weakening
+compatibility/security or changing the executable contract. Hiding a literal by
+splitting it across source tokens would merely evade the gate and was not attempted.
+Amendment 2 accepted and resolved this finding in commits `6e74ee21` and `ce3e0ee7` by
+allowlisting identifier shapes rather than enumerated values.
+
+### B-003 — Helm deployments override the migrated runtime with legacy brand defaults
+
+After Amendment 2, the stated definition of done scans the application, `.env.example`,
+and chart Markdown, but not deployable chart configuration or templates
+(`scripts/check-brand.sh:134-161`). A default Helm installation therefore overrides the
+migrated Python `app_name` with the old brand:
+
+- `APP_NAME: ContextForge` is active in chart values
+  (`charts/mcp-stack/values.yaml:220-224`) and every `mcpContextForge.config` entry is
+  rendered into the gateway ConfigMap as an environment variable
+  (`charts/mcp-stack/templates/configmap-gateway.yaml:20-23`). The deployed OpenAPI,
+  Swagger, MCP `serverInfo.name`, and configuration UI will consequently remain
+  `ContextForge`, even when all Task B gates pass.
+- The active DCR override remains `ContextForge ({gateway_name})`
+  (`charts/mcp-stack/values.yaml:895-903`) and is injected through the chart Secret
+  (`charts/mcp-stack/templates/secret-gateway.yaml:20-24`). This defeats the DCR default
+  and compatibility note required by Amendment 1.
+- The chart's schema and generated README still declare the old application default
+  (`charts/mcp-stack/values.schema.json:257-261`,
+  `charts/mcp-stack/README.md:220`), so hand-editing Markdown would be regenerated back
+  to the legacy value.
+- Helm post-install output and Grafana provisioning visibly retain the old product name
+  (`charts/mcp-stack/templates/NOTES.txt:70-71`,
+  `charts/mcp-stack/templates/NOTES.txt:137-138`,
+  `charts/mcp-stack/templates/configmap-monitoring.yaml:233-235`).
+
+This reproduces B-001 at the deployment layer: the executable gate can pass while the
+shipped Helm product contradicts the rebrand. Amendment 1 explicitly places only
+`charts/*.md` in scope (`docs/contracts/CONTRACT-001-brand-migration.md:241-255`), so
+changing values, schema, and templates would expand the contract. The Architect must
+either add these Helm surfaces to Task B and its gate or explicitly retain their
+upstream identity. No chart keys or values were changed pending that decision.
 
 ## Functional
 
