@@ -243,12 +243,12 @@
         <div class="flex items-center h-16 px-4 border-b border-gray-200 dark:border-gray-700 flex-shrink-0"
              :class="sidebarCollapsed ? 'justify-center' : 'justify-between'">
           <a href="{{ root_path }}/admin" class="flex items-center" x-show="!sidebarCollapsed">
-            <img src="{{ root_path }}/static/contextforge-logo.png" alt="ContextForge logo" class="h-8 dark:hidden" />
-            <img src="{{ root_path }}/static/contextforge-logo-white.png" alt="ContextForge logo" class="h-8 hidden dark:block" />
+            <span class="text-lg font-bold tracking-tight text-gray-900 dark:text-white">
+              MCP <span class="text-blue-600 dark:text-blue-400">Gateway</span>
+            </span>
           </a>
-          <button @click="sidebarCollapsed = false" class="flex items-center justify-center" x-show="sidebarCollapsed" title="Expand sidebar">
-            <img src="{{ root_path }}/static/contextforge-icon.png" alt="ContextForge icon" class="h-8 w-8 dark:hidden" />
-            <img src="{{ root_path }}/static/contextforge-icon-white.png" alt="ContextForge icon" class="h-8 w-8 hidden dark:block" />
+          <button @click="sidebarCollapsed = false" class="flex h-8 w-8 items-center justify-center" x-show="sidebarCollapsed" title="Expand sidebar">
+            <span class="text-sm font-bold text-blue-600 dark:text-blue-400" aria-label="MCP Gateway">MCP</span>
           </button>
           <button
             @click="sidebarCollapsed = !sidebarCollapsed"

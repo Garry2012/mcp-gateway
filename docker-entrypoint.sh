@@ -266,7 +266,7 @@ print_mcp_runtime_mode() {
 }
 
 build_server_command() {
-    echo "Starting ContextForge with Gunicorn + Uvicorn..."
+    echo "Starting MCP Gateway with Gunicorn + Uvicorn..."
     SERVER_CMD=(./run-gunicorn.sh "$@")
 }
 

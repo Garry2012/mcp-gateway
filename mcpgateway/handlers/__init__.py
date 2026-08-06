@@ -4,7 +4,7 @@ Copyright contributors to the MCP-CONTEXT-FORGE project
 SPDX-License-Identifier: Apache-2.0
 
 Handlers Package.
-Provides request handlers for ContextForge including:
+Provides request handlers for MCP Gateway including:
 - Sampling request handling
 """
 

@@ -3,8 +3,8 @@
 Copyright contributors to the MCP-CONTEXT-FORGE project
 SPDX-License-Identifier: Apache-2.0
 
-ContextForge Wrapper.
-MCP Client (stdio) <-> ContextForge Bridge
+MCP Gateway Wrapper.
+MCP Client (stdio) <-> MCP Gateway Bridge
 
 This module implements a wrapper stdio bridge that facilitates
 interaction between the MCP client and the MCP gateway.

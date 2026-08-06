@@ -257,7 +257,7 @@
             "APP_NAME": {
               "type": "string",
               "description": "Application name",
-              "default": "ContextForge"
+              "default": "MCP Gateway"
             },
             "APP_ROOT_PATH": {
               "type": "string",
@@ -2227,7 +2227,7 @@
           "description": "Service configuration"
         }
       },
-      "description": "ContextForge Gateway configuration"
+      "description": "MCP Gateway configuration"
     },
     "mcpFastTimeServer": {
       "type": "object",

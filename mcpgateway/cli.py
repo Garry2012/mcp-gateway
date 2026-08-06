@@ -157,7 +157,7 @@ def _handle_validate_config(path: str = ".env") -> None:
 
 def _handle_config_schema(output: Optional[str] = None) -> None:
     """
-    Export the JSON schema for ContextForge Settings.
+    Export the JSON schema for MCP Gateway Settings.
 
     This function serializes the Pydantic Settings model into a JSON Schema
     suitable for validation or documentation purposes.

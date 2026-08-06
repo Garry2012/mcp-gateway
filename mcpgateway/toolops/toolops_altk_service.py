@@ -3,7 +3,7 @@
 Copyright contributors to the MCP-CONTEXT-FORGE project
 SPDX-License-Identifier: Apache-2.0
 
-ContextForge - Main module for toolops services.
+MCP Gateway - Main module for toolops services.
 
 This module defines the different toolops services
 
@@ -76,9 +76,9 @@ LLM_PLATFORM = "OpenAIProvider - " + provider
 # IMPORTANT NOTE:
 # ---------------
 # ALTK (agent life cycle toolkit) does not support all LLM providers that are supported in ContextForge.
-# To use all ContextForge supported LLM providers we need to override the ALTK modules related to LLM inferencing.
+# To use all MCP Gateway supported LLM providers we need to override the ALTK modules related to LLM inferencing.
 # i.e; `execute_prompt` method used in different ALTK toolops modules is overrided with custom execute prompt
-# that uses ContextForge LLM inferencing modules.
+# that uses MCP Gateway LLM inferencing modules.
 
 
 #  custom execute prompt to support MCP-CF LLM providers

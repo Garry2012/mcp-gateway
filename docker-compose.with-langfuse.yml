@@ -1,4 +1,4 @@
-# ContextForge with Langfuse LLM Observability
+# MCP Gateway with Langfuse LLM Observability
 # This extends the main docker-compose.yml with Langfuse integration
 #
 # Langfuse provides: trace visualization, prompt management, evaluations,
@@ -160,9 +160,9 @@ services:
       LANGFUSE_S3_BATCH_EXPORT_ENABLED: "false"
       # ── Auto-provision org, project, and API keys on first boot ──
       LANGFUSE_INIT_ORG_ID: ${LANGFUSE_INIT_ORG_ID:-contextforge}
-      LANGFUSE_INIT_ORG_NAME: ${LANGFUSE_INIT_ORG_NAME:-ContextForge}
+      LANGFUSE_INIT_ORG_NAME: ${LANGFUSE_INIT_ORG_NAME:-MCP Gateway}
       LANGFUSE_INIT_PROJECT_ID: ${LANGFUSE_INIT_PROJECT_ID:-contextforge-gateway}
-      LANGFUSE_INIT_PROJECT_NAME: ${LANGFUSE_INIT_PROJECT_NAME:-ContextForge Gateway}
+      LANGFUSE_INIT_PROJECT_NAME: ${LANGFUSE_INIT_PROJECT_NAME:-MCP Gateway}
       LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-pk-lf-contextforge}
       LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-sk-lf-contextforge}
       LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_INIT_USER_EMAIL:-admin@example.com}
@@ -215,7 +215,7 @@ services:
 
   # ──────────────────────────────────────────────────────────────────────
   # Langfuse PostgreSQL - Separate instance for Langfuse operational data
-  # (Langfuse schema is incompatible with ContextForge's)
+  # (Langfuse schema is incompatible with MCP Gateway's)
   # ──────────────────────────────────────────────────────────────────────
   langfuse-db:
     image: docker.io/postgres:${LANGFUSE_POSTGRES_VERSION:-17}

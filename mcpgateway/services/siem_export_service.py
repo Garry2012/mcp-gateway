@@ -1017,7 +1017,9 @@ class SIEMExportService:  # pragma: no cover - covered by targeted unit tests an
             ext_parts.append(f"{key}={self._cef_escape(str(value))}")
 
         ext = " ".join(ext_parts)
-        return f"CEF:0|IBM|ContextForge|{__version__}|{signature}|{name}|{severity}|{ext}".rstrip()
+        vendor = self._siem_header_escape(settings.siem_vendor_name)
+        product = self._siem_header_escape(settings.app_name)
+        return f"CEF:0|{vendor}|{product}|{__version__}|{signature}|{name}|{severity}|{ext}".rstrip()
 
     def _to_leef(self, event: Dict[str, Any]) -> str:
         """Convert event to Log Event Extended Format (LEEF)."""
@@ -1026,7 +1028,9 @@ class SIEMExportService:  # pragma: no cover - covered by targeted unit tests an
         context = event.get("context") if isinstance(event.get("context"), dict) else {}
 
         event_id = str(event.get("event_type", "SECURITY_EVENT")).upper()
-        header = f"LEEF:2.0|IBM|ContextForge|{__version__}|{event_id}|"
+        vendor = self._siem_header_escape(settings.siem_vendor_name)
+        product = self._siem_header_escape(settings.app_name)
+        header = f"LEEF:2.0|{vendor}|{product}|{__version__}|{event_id}|"
 
         kv_fields = {
             "src": actor.get("client_ip"),
@@ -1063,6 +1067,10 @@ class SIEMExportService:  # pragma: no cover - covered by targeted unit tests an
     def _cef_escape(self, value: str) -> str:
         """Escape CEF special characters."""
         return value.replace("\\", "\\\\").replace("|", "\\|").replace("=", "\\=").replace("\n", " ")
+
+    def _siem_header_escape(self, value: str) -> str:
+        """Escape CEF/LEEF header delimiters and strip newline characters."""
+        return value.replace("\\", "\\\\").replace("|", "\\|").replace("\r", "").replace("\n", "")
 
     def _matches_filters(self, destination: Dict[str, Any], event: Dict[str, Any]) -> bool:
         """Evaluate destination filter predicates."""

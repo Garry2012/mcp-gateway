@@ -2140,7 +2140,7 @@ class SessionRegistry(SessionBackend):
             >>> result.protocol_version
             '2025-06-18'
             >>> result.server_info.name
-            'ContextForge'
+            'MCP Gateway'
             >>>
             >>> # Missing protocol version
             >>> try:

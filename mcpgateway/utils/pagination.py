@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 Pagination Utilities for ContextForge.
 
 This module provides utilities for implementing efficient pagination
-across all ContextForge endpoints, supporting both offset-based and
+across all MCP Gateway endpoints, supporting both offset-based and
 cursor-based pagination strategies.
 
 Features:

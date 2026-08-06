@@ -1,6 +1,6 @@
-# ContextForge Development Guide
+# MCP Gateway Development Guide
 
-This guide provides comprehensive information for developers working on ContextForge project.
+This guide provides comprehensive information for developers working on MCP Gateway project.
 
 ## Table of Contents
 - [Quick Start](#quick-start)
@@ -542,7 +542,7 @@ curl -X POST http://localhost:4444/gateways \
 npm install -g supergateway
 npx supergateway --stdio "uvx mcp-server-git"
 
-# Register with ContextForge
+# Register with MCP Gateway
 curl -X POST http://localhost:4444/gateways \
     -H "Authorization: Bearer $TOKEN" \
     -H "Content-Type: application/json" \
@@ -573,7 +573,7 @@ python3 -m debugpy --listen 5678 --wait-for-client -m mcpgateway
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Debug ContextForge",
+            "name": "Debug MCP Gateway",
             "type": "python",
             "request": "launch",
             "module": "mcpgateway",

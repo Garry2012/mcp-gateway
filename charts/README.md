@@ -1,6 +1,6 @@
-# ContextForge Stack - Helm Chart
+# MCP Gateway Stack - Helm Chart
 
-Deploy the full **ContextForge Stack**-ContextForge gateway, PostgreSQL, Redis, and optional PgAdmin & Redis-Commander UIs-on any Kubernetes distribution with a single Helm release. The chart lives in [`charts/mcp-stack`](https://github.com/IBM/mcp-context-forge/tree/main/charts/mcp-stack).
+Deploy the full **MCP Gateway Stack**-MCP Gateway gateway, PostgreSQL, Redis, and optional PgAdmin & Redis-Commander UIs-on any Kubernetes distribution with a single Helm release. The chart lives in [`charts/mcp-stack`](https://github.com/IBM/mcp-context-forge/tree/main/charts/mcp-stack).
 
 ---
 
@@ -31,7 +31,7 @@ High-level architecture:
           └──────────┬───────────┬──────┘
                      │/          │/
       ┌──────────────▼─────┐ ┌────▼───────────┐
-      │  ContextForge │ │ PgAdmin (opt.) │
+      │  MCP Gateway │ │ PgAdmin (opt.) │
       └─────────┬──────────┘ └────┬───────────┘
                 │                 │
    ┌────────────▼──────┐ ┌────────▼────────────┐
@@ -57,7 +57,7 @@ graph TB
 
     %% Application Tier
     subgraph "Application Layer"
-        MCPGateway[🚪 ContextForge<br/>Replicas: 2<br/>Port: 4444<br/>CPU: 100m-200m<br/>Memory: 512Mi-1024Mi]
+        MCPGateway[🚪 MCP Gateway<br/>Replicas: 2<br/>Port: 4444<br/>CPU: 100m-200m<br/>Memory: 512Mi-1024Mi]
         FastTimeServer[⏰ Fast Time Server<br/>Replicas: 2<br/>Port: 8080<br/>CPU: 25m-50m<br/>Memory: 10Mi-64Mi]
         HPA{📈 Auto Scaling<br/>Min: 2, Max: 10<br/>CPU/Memory: 90%}
     end
@@ -464,7 +464,7 @@ postgres:
 
 ### What MinIO Is Used For In This Chart
 
-MinIO is not on the normal request path for ContextForge traffic. In this chart, MinIO is used for PostgreSQL major-version upgrade backup/restore flow:
+MinIO is not on the normal request path for MCP Gateway traffic. In this chart, MinIO is used for PostgreSQL major-version upgrade backup/restore flow:
 
 1. `job-postgres-backup` (pre-upgrade hook) writes a `pg_dump` into MinIO bucket `postgres-backups`
 2. PostgreSQL upgrade init container reads the latest dump from MinIO and seeds the upgraded DB data directory
@@ -680,7 +680,7 @@ For every setting see the [full annotated `values.yaml`](https://github.com/IBM/
 
 ## Features
 
-* 🗂️ Multi-service stack - Deploys ContextForge (`n` replicas), Fast-Time-Server (`n` replicas), Postgres 17, Redis, PGAdmin 4 and Redis-Commander out of the box.
+* 🗂️ Multi-service stack - Deploys MCP Gateway (`n` replicas), Fast-Time-Server (`n` replicas), Postgres 17, Redis, PGAdmin 4 and Redis-Commander out of the box.
 * 🎛️ Idiomatic naming - All objects use helper templates (`mcp-stack.fullname`, chart labels) so release names and overrides stay collision-free.
 * 🔐 Secrets & credentials - `mcp-stack-gateway-secret` (Basic-Auth creds, JWT signing key, encryption salt, ...) and `postgres-secret` (DB user / password / database name), both injected via `envFrom`.
 * ⚙️ Config as code - `mcp-stack-gateway-config` (\~40 tunables) and `postgres-config` for the DB name.
@@ -697,7 +697,7 @@ For every setting see the [full annotated `values.yaml`](https://github.com/IBM/
 
 ## TODO / Future roadmap
 
-1. 🔄 Post-deploy hook to register MCP Servers with ContextForge
+1. 🔄 Post-deploy hook to register MCP Servers with MCP Gateway
 2. ⏳ Add startup probes for slow-booting services
 3. 🛡️ Implement Kubernetes NetworkPolicies to restrict internal traffic
 4. 📊 Expose Prometheus metrics and add scrape annotations
@@ -750,7 +750,7 @@ helm status mcp-stack -n mcp-private --show-desc
 
 ## Horizontal Pod Autoscaler (HPA) Guide
 
-Because ContextForge traffic could spike unpredictably, the chart lets you turn on a **Horizontal Pod Autoscaler** that automatically adds or removes gateway pods based on CPU / memory load.
+Because MCP Gateway traffic could spike unpredictably, the chart lets you turn on a **Horizontal Pod Autoscaler** that automatically adds or removes gateway pods based on CPU / memory load.
 
 The feature is **off by default**. Switch `hpa` to `enabled: true` in the `mcpContextForge` section of `values.yaml` to enable.
 

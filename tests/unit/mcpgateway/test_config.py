@@ -529,6 +529,7 @@ def test_settings_default_values():
         settings = Settings(environment="development", _env_file=None)
 
         assert settings.app_name == "MCP Gateway"
+        assert settings.siem_vendor_name == "InTimeTec"
         assert settings.host == "127.0.0.1"
         assert settings.port == 4444
         assert settings.database_url == "sqlite:///./mcp.db"

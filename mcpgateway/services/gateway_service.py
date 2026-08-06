@@ -2188,7 +2188,7 @@ class GatewayService(BaseService):  # pylint: disable=too-many-instance-attribut
         Args:
             db: Database session
             gateway_id: ID of the gateway to fetch tools for
-            app_user_email: ContextForge user email for token retrieval
+            app_user_email: MCP Gateway user email for token retrieval
 
         Returns:
             Dict containing capabilities, tools, resources, and prompts

@@ -79,7 +79,7 @@ def cli(
 ):
     """MCP Stack deployment tool
 
-    Deploys ContextForge + external plugins from a single YAML configuration.
+    Deploys MCP Gateway + external plugins from a single YAML configuration.
 
     By default, uses plain Python mode. Use --dagger to enable Dagger optimization.
 

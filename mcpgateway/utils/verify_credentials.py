@@ -2205,7 +2205,7 @@ def _get_sso_service(db: Session):
 
 
 async def build_external_identity(provider: SSOProvider, verified_claims: dict, token: str, db: Session) -> Optional[dict[str, Any]]:
-    """Map verified external-IdP claims to a ContextForge identity payload.
+    """Map verified external-IdP claims to a MCP Gateway identity payload.
 
     Reuses browser-SSO normalization + provisioning so role/group -> team mapping
     is identical. Team scoping uses SESSION semantics (DB authority) because an

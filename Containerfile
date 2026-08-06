@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.12
 
 ###############################################################################
-# ContextForge - OCI-compliant multi-stage container build
+# MCP Gateway - OCI-compliant multi-stage container build
 #
 # Purpose: Minimal runtime image using ubi10-minimal, supporting multiplatform
 # builds (amd64, arm64, s390x, ppc64le) with optional Rust native extensions.

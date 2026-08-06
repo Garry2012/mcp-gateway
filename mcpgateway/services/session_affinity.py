@@ -1066,7 +1066,7 @@ class SessionAffinity:
         in-process to the trusted-internal ``/_internal/mcp/rpc`` endpoint rather
         than the public ``/rpc``.
 
-        Public ``/rpc`` only understands ContextForge JWTs and cookies, so an
+        Public ``/rpc`` only understands MCP Gateway JWTs and cookies, so an
         OAuth bearer or an ``MCP_REQUIRE_AUTH=false`` public-only request would
         401 if re-authenticated there. Instead, the originating worker's
         already-validated identity rides in ``auth_context`` (the encoded

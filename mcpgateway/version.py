@@ -619,7 +619,7 @@ def _is_secret(key: str) -> bool:
         True
         >>> _is_secret("PASS_PHRASE")
         True
-        >>> # Specific ContextForge secrets
+        >>> # Specific MCP Gateway secrets
         >>> _is_secret("BASIC_AUTH_USER")
         True
         >>> _is_secret("BASIC_AUTH_PASSWORD")

@@ -601,9 +601,9 @@ class SupportBundleService:
                     zf.writestr(f"logs/{log_name}", log_content)
 
             # Add README
-            readme = f"""# ContextForge Support Bundle
+            readme = f"""# MCP Gateway Support Bundle
 
-This bundle contains diagnostic information for troubleshooting ContextForge issues.
+This bundle contains diagnostic information for troubleshooting MCP Gateway issues.
 
 ## Contents
 

@@ -4,7 +4,7 @@ Copyright contributors to the MCP-CONTEXT-FORGE project
 SPDX-License-Identifier: Apache-2.0
 
 Alembic environment configuration for database migrations.
-This module configures the Alembic migration environment for ContextForge
+This module configures the Alembic migration environment for MCP Gateway
 application. It sets up both offline and online migration modes, configures
 logging, and establishes the database connection parameters.
 

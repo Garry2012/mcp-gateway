@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 Tag validation and normalization utilities.
 This module provides validation and normalization for tags used across
-all ContextForge entities (tools, resources, prompts, servers, gateways).
+all MCP Gateway entities (tools, resources, prompts, servers, gateways).
 """
 
 # Standard

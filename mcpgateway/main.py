@@ -4,7 +4,7 @@
 Copyright contributors to the MCP-CONTEXT-FORGE project
 SPDX-License-Identifier: Apache-2.0
 
-ContextForge AI Gateway - Main FastAPI Application.
+MCP Gateway - Main FastAPI Application.
 
 This module defines the core FastAPI application for the Model Context Protocol (MCP) Gateway.
 It serves as the entry point for handling all HTTP and WebSocket traffic.
@@ -5393,7 +5393,7 @@ async def invoke_a2a_agent_jsonrpc(
     """
     Transparent A2A JSON-RPC proxy endpoint.
 
-    Accepts raw A2A JSON-RPC requests (no envelope wrapping), applies ContextForge
+    Accepts raw A2A JSON-RPC requests (no envelope wrapping), applies MCP Gateway
     governance (auth, RBAC, rate limiting, observability), and returns raw JSON-RPC
     responses. This enables standard A2A SDKs (e.g., Google ADK RemoteA2aAgent) to
     work without custom adapters.
@@ -5545,7 +5545,7 @@ async def invoke_a2a_agent_jsonrpc(
         # Extract authentication and request context (shared with /invoke endpoint)
         context = _extract_a2a_request_context(request, user)
 
-        # Wrap the JSON-RPC request in ContextForge's internal format
+        # Wrap the JSON-RPC request in MCP Gateway's internal format
         # The full JSON-RPC request becomes the parameters
         parameters = body
 

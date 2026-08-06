@@ -308,10 +308,10 @@ completion_service: CompletionService = CompletionService()
 
 
 class ContextForgeMCPServer(Server[Any]):
-    """MCP server with ContextForge extension capability advertising."""
+    """MCP server with MCP Gateway extension capability advertising."""
 
     def get_capabilities(self, notification_options: Any, experimental_capabilities: dict[str, dict[str, Any]]) -> types.ServerCapabilities:
-        """Return SDK capabilities plus enabled ContextForge MCP extensions."""
+        """Return SDK capabilities plus enabled MCP Gateway MCP extensions."""
         capabilities = super().get_capabilities(notification_options, experimental_capabilities)
         user_context = user_context_var.get()
         extensions = build_mcp_apps_capabilities(authorized=bool(user_context))
@@ -5376,7 +5376,7 @@ class _StreamableHttpAuthHandler:
         IdP-issued and delegated to :meth:`_try_oauth_access_token`. This
         routing is intentionally independent of
         ``settings.jwt_issuer_verification`` — that toggle governs how
-        ContextForge's *own* JWTs are checked and must not be allowed to
+        MCP Gateway's *own* JWTs are checked and must not be allowed to
         bypass OAuth enforcement for virtual servers with
         ``oauth_enabled=True``.
 
@@ -5487,7 +5487,7 @@ class _StreamableHttpAuthHandler:
         # ``oauth_enabled=True`` + empty/missing ``oauth_config`` is a
         # server-side misconfiguration. Returning NOT_APPLICABLE here would
         # let the caller fall through to internal JWT verification, so an
-        # internal ContextForge JWT could reach a resource that is supposed
+        # internal MCP Gateway JWT could reach a resource that is supposed
         # to require OAuth. Fail closed — same semantics as the empty
         # ``authorization_servers`` branch below.
         if not server.oauth_config:
@@ -5594,7 +5594,7 @@ class _StreamableHttpAuthHandler:
 
         user_email = user_email.strip().lower()
 
-        # Look up user in ContextForge DB — user must already exist (no auto-creation)
+        # Look up user in MCP Gateway DB — user must already exist (no auto-creation)
         # First-Party
         from mcpgateway.auth import _get_user_by_email_sync, _resolve_teams_from_db  # pylint: disable=import-outside-toplevel
 

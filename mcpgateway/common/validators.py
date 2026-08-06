@@ -3,7 +3,7 @@
 Copyright contributors to the MCP-CONTEXT-FORGE project
 SPDX-License-Identifier: Apache-2.0
 
-SecurityValidator for ContextForge
+SecurityValidator for MCP Gateway
 This module defines the `SecurityValidator` class, which provides centralized, configurable
 validation logic for user-generated content in MCP-based applications.
 
@@ -2395,7 +2395,7 @@ class SecurityValidator:
 
 
 def validate_core_url(value: str, field_name: str = "URL") -> str:
-    """Core ContextForge URL validation entry point.
+    """Core MCP Gateway URL validation entry point.
 
     This wrapper provides an explicit core-only entry point so the core
     processing path does not depend on plugin-framework validators.

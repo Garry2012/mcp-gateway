@@ -1,6 +1,6 @@
 # Ansible Deployment Playbooks
 
-[Experimental] Ansible playbooks for deploying and benchmarking ContextForge across different platforms.
+[Experimental] Ansible playbooks for deploying and benchmarking MCP Gateway across different platforms.
 
 ## Available Platforms
 

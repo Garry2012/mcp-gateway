@@ -1,11 +1,11 @@
 ---
-# OCP Deploy — helm install ContextForge stack
+# OCP Deploy — helm install MCP Gateway stack
 # Equivalent to: make ocp-deploy OCP_NS=<namespace>
 #
 # Usage:
 #   ansible-playbook ansible/ocp/playbooks/deploy.yml -i ansible/ocp/inventory/cluster.yml
 
-- name: Deploy ContextForge on OCP
+- name: Deploy MCP Gateway on OCP
   hosts: localhost
   gather_facts: false
 
@@ -17,7 +17,7 @@
       ansible.builtin.debug:
         msg: |
           ========================================
-          OCP Deploy: ContextForge stack
+          OCP Deploy: MCP Gateway stack
           ========================================
           Namespace:  {{ ocp_namespace }}
           Values:     {{ ocp_values }}
@@ -39,7 +39,7 @@
       failed_when: confirm.user_input | lower not in ['yes', 'y']
       when: not (skip_confirm | default(false) | bool)
 
-    - name: Install ContextForge Helm chart
+    - name: Install MCP Gateway Helm chart
       ansible.builtin.command:
         cmd: >
           helm install {{ ocp_namespace }} {{ ocp_chart_path }}

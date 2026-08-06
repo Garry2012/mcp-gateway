@@ -1,4 +1,4 @@
-# Simplified Phoenix Observability Stack for ContextForge
+# Simplified Phoenix Observability Stack for MCP Gateway
 #
 # Usage:
 #   Start Phoenix: docker-compose -f docker-compose.phoenix-simple.yml up -d

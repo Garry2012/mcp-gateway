@@ -3,7 +3,7 @@
 Copyright contributors to the MCP-CONTEXT-FORGE project
 SPDX-License-Identifier: Apache-2.0
 
-ContextForge Server Service
+MCP Gateway Server Service
 
 This module implements server management for the MCP Servers Catalog.
 It handles server registration, listing, retrieval, updates, activation toggling, and deletion.

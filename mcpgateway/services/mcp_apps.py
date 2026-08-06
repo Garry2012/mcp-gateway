@@ -201,7 +201,7 @@ def merge_mcp_protocol_meta(payload: Dict[str, Any]) -> None:
     """Translate MCP protocol ``_meta.ui`` into internal extension metadata.
 
     Upstream MCP servers advertise Apps metadata on protocol objects as
-    ``_meta: {"ui": ...}``, while ContextForge stores extension state as
+    ``_meta: {"ui": ...}``, while MCP Gateway stores extension state as
     ``extensionMetadata: {"io.modelcontextprotocol/ui": ...}``.
 
     The deprecated flat ``_meta["ui/resourceUri"]`` key is also honoured so that

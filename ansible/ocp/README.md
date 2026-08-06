@@ -1,6 +1,6 @@
 # Ansible Playbooks for OCP Deployment (Experimental)
 
-Deploy and benchmark ContextForge on OpenShift using Ansible playbooks. These playbooks are an alternative to the `make ocp-*` targets — both coexist and do the same thing under the hood.
+Deploy and benchmark MCP Gateway on OpenShift using Ansible playbooks. These playbooks are an alternative to the `make ocp-*` targets — both coexist and do the same thing under the hood.
 
 ## Prerequisites
 

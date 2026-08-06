@@ -347,7 +347,7 @@
   "time": {"from": "now-15m", "to": "now"},
   "timepicker": {},
   "timezone": "browser",
-  "title": "ContextForge Overview",
+  "title": "MCP Gateway Overview",
   "uid": "mcp-gateway-overview",
   "version": 1
 }

@@ -3,7 +3,7 @@
 Copyright contributors to the MCP-CONTEXT-FORGE project
 SPDX-License-Identifier: Apache-2.0
 
-Redis-backed rate limiting middleware for ContextForge API endpoints.
+Redis-backed rate limiting middleware for MCP Gateway API endpoints.
 
 This middleware provides production-ready rate limiting using Redis sorted sets
 for sliding window algorithm, with SecurityLogger integration for audit trails.

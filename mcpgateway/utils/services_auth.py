@@ -3,7 +3,7 @@
 Copyright contributors to the MCP-CONTEXT-FORGE project
 SPDX-License-Identifier: Apache-2.0
 
-mcpgateway.utils.services_auth - Authentication utilities for ContextForge
+mcpgateway.utils.services_auth - Authentication utilities for MCP Gateway
 Doctest examples
 ----------------
 >>> import os

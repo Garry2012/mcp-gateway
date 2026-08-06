@@ -3,12 +3,12 @@
 Copyright contributors to the MCP-CONTEXT-FORGE project
 SPDX-License-Identifier: Apache-2.0
 
-ContextForge AI Gateway Configuration.
-This module defines configuration settings for ContextForge AI Gateway using Pydantic.
+MCP Gateway Configuration.
+This module defines configuration settings for MCP Gateway using Pydantic.
 It loads configuration from environment variables with sensible defaults.
 
 Environment variables:
-- APP_NAME: Gateway name (default: "ContextForge")
+- APP_NAME: Gateway name (default: "MCP Gateway")
 - HOST: Host to bind to (default: "127.0.0.1")
 - PORT: Port to listen on (default: 4444)
 - DATABASE_URL: SQLite database URL (default: "sqlite:///./mcp.db")
@@ -188,7 +188,7 @@ def calculate_entropy(text: str) -> float:
 
 class Settings(BaseSettings):
     """
-    ContextForge AI Gateway configuration settings.
+    MCP Gateway configuration settings.
 
     Examples:
         >>> from mcpgateway.config import Settings
@@ -497,8 +497,8 @@ class Settings(BaseSettings):
     sso_keycloak_client_secret: Optional[SecretStr] = Field(default=None, description="Keycloak client secret")
     sso_keycloak_map_realm_roles: bool = Field(default=True, description="Map Keycloak realm roles to gateway teams")
     sso_keycloak_map_client_roles: bool = Field(default=False, description="Map Keycloak client roles to gateway RBAC")
-    sso_keycloak_role_mappings: Dict[str, str] = Field(default_factory=dict, description="Map Keycloak groups/roles to ContextForge roles (JSON: {group_or_role: role_name})")
-    sso_keycloak_default_role: Optional[str] = Field(default=None, description="Default ContextForge role for Keycloak users without role mapping")
+    sso_keycloak_role_mappings: Dict[str, str] = Field(default_factory=dict, description="Map Keycloak groups/roles to MCP Gateway roles (JSON: {group_or_role: role_name})")
+    sso_keycloak_default_role: Optional[str] = Field(default=None, description="Default MCP Gateway role for Keycloak users without role mapping")
     sso_keycloak_resolve_team_scope_to_personal_team: bool = Field(default=False, description="Resolve team-scoped Keycloak role mappings to the user's personal team")
     sso_keycloak_username_claim: str = Field(default="preferred_username", description="JWT claim for username")
 
@@ -541,7 +541,7 @@ class Settings(BaseSettings):
     sso_entra_tenant_id: Optional[str] = Field(default=None, description="Microsoft Entra ID tenant ID")
     sso_entra_groups_claim: str = Field(default="groups", description="JWT claim for EntraID groups (groups/roles)")
     sso_entra_admin_groups: Annotated[list[str], NoDecode] = Field(default_factory=list, description="EntraID groups granting platform_admin role (CSV/JSON)")
-    sso_entra_role_mappings: Dict[str, str] = Field(default_factory=dict, description="Map EntraID groups to ContextForge roles (JSON: {group_id: role_name})")
+    sso_entra_role_mappings: Dict[str, str] = Field(default_factory=dict, description="Map EntraID groups to MCP Gateway roles (JSON: {group_id: role_name})")
     sso_entra_default_role: Optional[str] = Field(default=None, description="Default role for EntraID users without group mapping (None = no role assigned)")
     sso_entra_sync_roles_on_login: bool = Field(default=True, description="Synchronize role assignments on each login")
     sso_entra_graph_api_enabled: bool = Field(default=True, description="Enable Microsoft Graph fallback for EntraID groups overage claims")
@@ -572,7 +572,7 @@ class Settings(BaseSettings):
 
     sso_generic_groups_claim: str = Field(default="groups", description="JWT claim for Generic OIDC groups (groups/roles/custom)")
     sso_generic_admin_groups: Annotated[list[str], NoDecode] = Field(default_factory=list, description="Generic OIDC groups granting platform_admin role (CSV/JSON)")
-    sso_generic_role_mappings: Dict[str, str] = Field(default_factory=dict, description="Map Generic OIDC groups to ContextForge roles (JSON: {group_id: role_name})")
+    sso_generic_role_mappings: Dict[str, str] = Field(default_factory=dict, description="Map Generic OIDC groups to MCP Gateway roles (JSON: {group_id: role_name})")
     sso_generic_default_role: Optional[str] = Field(default=None, description="Default role for Generic OIDC users without group mapping (None = no role assigned)")
     sso_generic_sync_roles_on_login: bool = Field(default=True, description="Synchronize role assignments on each login for Generic OIDC")
 
@@ -1170,8 +1170,8 @@ class Settings(BaseSettings):
     mcpgateway_catalog_cache_ttl: int = Field(default=3600, description="Catalog cache TTL in seconds")
     mcpgateway_catalog_page_size: int = Field(default=100, description="Number of catalog servers per page")
 
-    # ContextForge Bootstrap Roles In DB Configuration
-    mcpgateway_bootstrap_roles_in_db_enabled: bool = Field(default=False, description="Enable ContextForge add additional roles in db")
+    # MCP Gateway Bootstrap Roles In DB Configuration
+    mcpgateway_bootstrap_roles_in_db_enabled: bool = Field(default=False, description="Enable MCP Gateway add additional roles in db")
     mcpgateway_bootstrap_roles_in_db_file: str = Field(default="additional_roles_in_db.json", description="Path to add additional roles in db")
 
     # Elicitation support (MCP 2025-06-18)
@@ -2195,6 +2195,7 @@ class Settings(BaseSettings):
 
     # SIEM Export Configuration
     # SIEM export can run independently of DB-backed security/audit logging.
+    siem_vendor_name: str = Field(default="InTimeTec", description="Vendor identity emitted in CEF/LEEF security event headers")
     siem_export_enabled: bool = Field(default=False, description="Enable asynchronous SIEM export pipeline")
     siem_export_batch_size: int = Field(default=100, ge=1, le=1000, description="Maximum events per export batch")
     siem_export_flush_interval_seconds: int = Field(default=5, ge=1, le=60, description="Queue poll/flush interval in seconds")
@@ -3084,7 +3085,7 @@ class Settings(BaseSettings):
     well_known_robots_txt: str = """User-agent: *
 Disallow: /
 
-# ContextForge is a private API gateway
+# MCP Gateway is a private API gateway
 # Public crawling is disabled by default"""
 
     # security.txt content (optional, user-defined)
@@ -3905,7 +3906,7 @@ Disallow: /
         elif not self.mcp_client_auth_enabled and not self.trust_proxy_auth:
             logger.warning(
                 "MCP client authentication is disabled but trust_proxy_auth is not set. "
-                "This is a security risk! Set TRUST_PROXY_AUTH=true only if ContextForge "
+                "This is a security risk! Set TRUST_PROXY_AUTH=true only if MCP Gateway "
                 "is behind a trusted authentication proxy."
             )
 
