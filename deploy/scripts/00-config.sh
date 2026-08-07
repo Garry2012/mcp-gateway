@@ -50,6 +50,24 @@ APP_MAX_REPLICAS="${APP_MAX_REPLICAS:-1}"
 BRAND_NAME="${BRAND_NAME:-MCP Gateway}"
 PLATFORM_ADMIN_EMAIL="${PLATFORM_ADMIN_EMAIL:-admin@intimetec.com}"
 
+# --- OAuth / Dynamic Client Registration ------------------------------------
+# APP_DOMAIN is the gateway's own public URL. It defaults to
+# http://localhost:4444 in config.py, and OAuth callback URLs and production
+# CORS origins are both derived from it - so leaving it unset on a deployed
+# instance makes the gateway hand out localhost redirect URIs.
+# Resolved from the live app when not supplied.
+APP_DOMAIN="${APP_DOMAIN:-}"
+
+# Upstream MCP servers the gateway may dynamically register itself with.
+# DCR_ALLOWED_ISSUERS is an allowlist and is fail-closed: an issuer absent from
+# it is refused. Keep this OUT of a local .env - it makes tests in
+# tests/unit/mcpgateway/services/test_dcr_service.py fail, because they use
+# https://as.example.com as a fixture issuer and expect a different error.
+DCR_ENABLED="${DCR_ENABLED:-true}"
+DCR_AUTO_REGISTER_ON_MISSING_CREDENTIALS="${DCR_AUTO_REGISTER_ON_MISSING_CREDENTIALS:-true}"
+DCR_ALLOWED_ISSUERS="${DCR_ALLOWED_ISSUERS:-[\"https://sun-tv-7006933048.zohomcp.com.au\"]}"
+DCR_TOKEN_ENDPOINT_AUTH_METHOD="${DCR_TOKEN_ENDPOINT_AUTH_METHOD:-client_secret_post}"
+
 # Key Vault secret names. Values are never stored in this repo.
 KV_JWT_SECRET="${KV_JWT_SECRET:-mcpgw-jwt-secret}"
 KV_ENC_SECRET="${KV_ENC_SECRET:-mcpgw-auth-encryption-secret}"
