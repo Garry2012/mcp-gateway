@@ -58,6 +58,21 @@ strategy is based on.
 
 Upstream velocity is roughly 4 commits per day.
 
+Re-measured over the 90 days preceding 2026-08-07, for the files touched by the
+observability fixes (divergence 3):
+
+| File | Upstream commits / 90d | Our change | Conflict risk |
+|---|---|---|---|
+| `templates/observability_partial.html` | 2 | 434 lines replaced by 1 | Low frequency, high cost if it hits |
+| `templates/observability_{metrics,tools,prompts,resources}.html` | 1 each | script block removed, `x-data` renamed | Low |
+| `admin_ui/tabs.js` | 4 | 14 lines | Low |
+| `admin_ui/alpine-setup.js` | 3 | 10 lines | Low |
+| `templates/admin.html` | 26 | 14 lines (Roots menu only) | Moderate frequency, tiny surface |
+| `services/tool_service.py` | 20 | 29 lines in two hunks | Moderate frequency, tiny surface |
+
+The two high-churn files carry deliberately small, localised hunks. The large rewrite
+sits in the file upstream touches about twice a quarter, which is the trade we wanted.
+
 ### login.html is the hot spot
 
 Of the last 8 upstream commits to `login.html`, **6 modified lines 7-13** — the
@@ -113,6 +128,86 @@ in `tailwind.config.js` rather than rewriting the roughly 1,629 utility class us
 new `brand-*` scale. Upstream modified color classes in `admin.html` 94 times in 12
 months, so a rename would conflict on nearly every sync, whereas `tailwind.config.js`
 was touched twice all year.
+
+### 3. Observability admin UI — CSP-safe Alpine fixes
+
+Status: **implemented**, and submitted upstream as
+[#6126](https://github.com/IBM/mcp-context-forge/pull/6126) (Closes #6055) and
+[#6127](https://github.com/IBM/mcp-context-forge/pull/6127) (Closes #6054).
+If both merge, this divergence disappears on the next sync.
+
+These are **bug fixes to upstream code**, not customisations. Every defect was verified
+present in `upstream/main`; our fork had never touched `tabs.js` or any observability
+template beforehand.
+
+#### The constraint that causes all of it
+
+The admin UI bundles the **CSP-safe Alpine build** (`@alpinejs/csp`, see
+`admin_ui/alpine-setup.js:1`). Its expression parser is far stricter than the default
+build, and — critically — **it fails silently**: the component initialises as `{}` with
+no exception, so the symptom is a blank panel making no network request, which reads as
+a backend problem.
+
+Established empirically in a browser, not from documentation:
+
+| Form | CSP build |
+|---|---|
+| `{ a: 1, cfg: { x: 2 } }` — plain data, nested | parses |
+| property access, method calls, ternary, comparison, concat, index (in directives) | fine |
+| `{ a: 1, greet() {…} }` — any function inside an inline `x-data` | **whole object fails** |
+| `x-data="createFoo()"` where the factory is on `window` | **fails** |
+| `x-data="overflowMenu('table')"` where the name **is registered** | fine — the call form is not the problem |
+| optional chaining `a?.b` | **fails** — `Unexpected token: PUNCTUATION "."` |
+| template literal `` `${a} ${b}` `` | **fails** — `Unexpected token: OPERATOR` |
+
+Note `Alpine.evaluate()` uses a *different* code path from directive compilation and
+reports false negatives. Trust the live console error count, not a probe built on it.
+
+#### What changed
+
+- `observability_partial.html` — the ~420-line inline `x-data` moved to
+  `admin_ui/components/observability-dashboard.js`, registered via `Alpine.data()`.
+  The old `x-init` body became the component's `init()`.
+- `observability_{metrics,tools,prompts,resources}.html` — same treatment; their
+  `window.createXController` factories became registered components.
+- 12 optional-chaining and 10 template-literal directives rewritten to supported forms.
+- `tabs.js` — `window.chartRegistry` corrected to `window.Admin.chartRegistry`.
+- `admin.html` — Roots overflow menu: the `:style` template literal and three
+  `window.Admin?.viewRoot?.()` handlers, which silently disabled View/Edit/Export.
+
+#### Resolving a conflict here
+
+If upstream edits `observability_partial.html`, the merge is mechanical:
+
+1. Keep our one-line `<div … x-data="observabilityDashboard">`. Never restore an inline
+   object literal — it will silently break the panel again.
+2. Port upstream's **markup** changes into the template body as normal.
+3. Port upstream's **JavaScript** changes into
+   `admin_ui/components/observability-dashboard.js`, not the template.
+4. If upstream's new markup uses `?.` or a template literal in a directive, rewrite it:
+   `a?.b || 'x'` becomes `a && a.b ? a.b : 'x'`, and `` `${a} ${b}` `` becomes
+   `a + ' ' + b`.
+5. Run `pytest tests/unit/mcpgateway/test_template_alpine_csp.py` — it will name the
+   file and line of anything still unsupported.
+
+The same applies to the four sub-view templates and their component files.
+
+#### The guard tests are the safety net
+
+`tests/unit/mcpgateway/test_template_alpine_csp.py` fails the build if any of these
+reappear. Since upstream still writes in the pre-CSP style, **expect these tests to fail
+on some future merge** — that is the intended behaviour, not a broken test. A loud
+failure beats a silently blank dashboard. Fix the merged code, do not weaken the guard.
+
+Each guard was verified to fail on the pre-fix code, so they are known to be capable of
+failing rather than merely green today.
+
+#### Merge reality check
+
+A dry-run merge of `upstream/main` on 2026-08-07 (2 commits ahead) was **clean, zero
+conflicts**, with all fixes intact and all guard tests passing. Merge often — small
+frequent merges are cheap; `admin.html` at 26 commits a quarter is not something to let
+accumulate.
 
 ## Conventions for future divergences
 
