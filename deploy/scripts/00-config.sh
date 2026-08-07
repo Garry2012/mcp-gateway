@@ -80,7 +80,17 @@ OTEL_CAPTURE_OUTPUT_SPANS="${OTEL_CAPTURE_OUTPUT_SPANS:-tool.invoke}"
 # Container app.
 APP_NAME_AZ="${APP_NAME_AZ:-mcp-gateway}"
 IMAGE_REPO="${IMAGE_REPO:-mcp-gateway}"
-IMAGE_TAG="${IMAGE_TAG:-v1}"
+# The tag MUST be unique per build. It was previously the fixed, mutable "v1",
+# which made redeploys silently do nothing: `az containerapp update --image
+# <repo>:v1` produces a template identical to the deployed one, and in Single
+# revision mode Container Apps only rolls a new revision when the template
+# changes. The build succeeded, the tag moved to the new digest, every script
+# exited 0, and the old replica kept serving - with the smoke test passing
+# against it, because those assertions only check the brand and cannot tell two
+# post-rebrand builds apart.
+# Defaulting to the commit SHA makes each deploy a distinct template, so a new
+# revision always rolls and the running image is traceable to a commit.
+IMAGE_TAG="${IMAGE_TAG:-$(git -C "$ROOT_DIR" rev-parse --short HEAD 2>/dev/null || echo latest)}"
 IMAGE="${REGISTRY}/${IMAGE_REPO}:${IMAGE_TAG}"
 APP_PORT="${APP_PORT:-4444}"
 APP_CPU="${APP_CPU:-1.0}"
