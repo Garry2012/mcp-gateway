@@ -54,6 +54,29 @@ DB_MAX_OVERFLOW="${DB_MAX_OVERFLOW:-5}"
 # Keep roughly 2 workers per CPU, and raise APP_MEMORY before raising this.
 GUNICORN_WORKERS="${GUNICORN_WORKERS:-2}"
 
+# --- Observability -----------------------------------------------------------
+# Off by default in config.py. Enabling it writes traces/spans to Postgres
+# (observability_traces / observability_spans) and needs no collector, no key,
+# and no external service - the Admin UI reads them straight from the DB.
+#
+# Tracing is scoped by observability_include_paths, which is an ALLOWLIST
+# (/rpc, /sse, /message, /mcp, /a2a). Page loads and static assets are never
+# traced, so the extra DB load is proportional to tool calls, not to traffic.
+# Each traced request opens several short-lived sessions of its own (issue
+# #3883), so raise DB_POOL_SIZE with this if call volume grows.
+OBSERVABILITY_ENABLED="${OBSERVABILITY_ENABLED:-true}"
+
+# Payload capture. INERT unless OTLP export is also configured: the DB span at
+# tool_service.py:5314 writes a fixed attribute set (name, id, integration_type,
+# gateway_id, arguments_count, has_headers) and never includes payloads. Only
+# the OpenTelemetry span at tool_service.py:5351 honours these, and it needs
+# OTEL_ENABLE_OBSERVABILITY plus an OTLP endpoint (e.g. Langfuse) to go
+# anywhere. Set here so payload capture works the moment an exporter is wired.
+# Note output capture is gated on `success` (tool_service.py:6777), so FAILED
+# calls capture no output even with an exporter attached.
+OTEL_CAPTURE_INPUT_SPANS="${OTEL_CAPTURE_INPUT_SPANS:-tool.invoke}"
+OTEL_CAPTURE_OUTPUT_SPANS="${OTEL_CAPTURE_OUTPUT_SPANS:-tool.invoke}"
+
 # Container app.
 APP_NAME_AZ="${APP_NAME_AZ:-mcp-gateway}"
 IMAGE_REPO="${IMAGE_REPO:-mcp-gateway}"
