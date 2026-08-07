@@ -125,6 +125,95 @@ def test_observability_dashboard_is_registered():
     assert "Alpine.data('observabilityDashboard'" in setup, "observabilityDashboard is referenced by the template but never registered in alpine-setup.js"
 
 
+_DIRECTIVE = r'(?:x-[a-z:.-]+|@[a-z:.-]+|:[a-z-]+)\s*=\s*"([^"]*)"'
+
+
+def _directive_values(text: str):
+    """Yield ``(line_number, directive_source)`` for Alpine directives outside ``<script>``.
+
+    Args:
+        text: Template source.
+
+    Yields:
+        Tuples of line number and the directive's expression text.
+    """
+    stripped = re.sub(r"<script\b.*?</script>", lambda m: "\n" * m.group(0).count("\n"), text, flags=re.S)
+    for match in re.finditer(_DIRECTIVE, stripped):
+        yield stripped.count("\n", 0, match.start()) + 1, match.group(1)
+
+
+@pytest.mark.parametrize("template", _templates(), ids=lambda p: p.name)
+def test_directives_avoid_unsupported_syntax(template: Path):
+    """Directives must avoid syntax the CSP expression parser cannot compile.
+
+    Optional chaining raises ``Unexpected token: PUNCTUATION "."`` because the
+    parser reads ``?`` and then meets ``.``. Template literals raise
+    ``Unexpected token: OPERATOR "`"``. Both abort the directive silently from
+    the user's point of view - the bound element simply never updates.
+
+    Property access, method calls, ternaries, comparisons, string concatenation
+    and indexing are all supported, so these rewrite cleanly:
+    ``a?.b || 'x'`` becomes ``a && a.b ? a.b : 'x'``, and ```${a} ${b}``` becomes
+    ``a + ' ' + b``.
+
+    Args:
+        template: Template file under test.
+    """
+    offenders = []
+    for line_no, expr in _directive_values(template.read_text(encoding="utf-8", errors="replace")):
+        if "?." in expr:
+            offenders.append(f"line {line_no}: optional chaining in {expr[:70]!r}")
+        elif "`" in expr:
+            offenders.append(f"line {line_no}: template literal in {expr[:70]!r}")
+
+    assert not offenders, f"{template.name}: " + "; ".join(offenders)
+
+
+def _registered_components() -> set:
+    """Return component names registered through ``Alpine.data()``.
+
+    Returns:
+        Set of registered component names.
+    """
+    names = set()
+    for js in ALPINE_SETUP.parent.rglob("*.js"):
+        names |= set(re.findall(r"Alpine\.data\(\s*['\"]([A-Za-z_$][\w$]*)['\"]", js.read_text(encoding="utf-8", errors="replace")))
+    return names
+
+
+@pytest.mark.parametrize("template", _templates(), ids=lambda p: p.name)
+def test_x_data_names_resolve_to_registered_components(template: Path):
+    """A named ``x-data`` must resolve to a component registered with ``Alpine.data()``.
+
+    The CSP build looks the name up in Alpine's component registry; it does not
+    evaluate arbitrary global expressions. The call form is fine - both
+    ``x-data="overflowMenu"`` and ``x-data="overflowMenu('table')"`` work,
+    including with arguments - but only when the name is registered.
+
+    The four observability sub-views used ``x-data="createToolsController()"``
+    with the factory merely assigned to ``window``. That failed as
+    ``Undefined variable: createToolsController``, initialised the component
+    empty, and left each view blank with no error surfaced to the user.
+
+    Args:
+        template: Template file under test.
+    """
+    text = template.read_text(encoding="utf-8", errors="replace")
+    registered = _registered_components()
+    offenders = []
+    for match in re.finditer(r'x-data\s*=\s*"([^"]*)"', text):
+        value = match.group(1).strip()
+        if value.startswith("{"):
+            continue  # plain object literals are covered by the inline-function test
+        name = re.match(r"^([A-Za-z_$][\w$]*)", value)
+        if not name:
+            continue
+        if name.group(1) not in registered:
+            offenders.append(f"line {text.count(chr(10), 0, match.start()) + 1}: {name.group(1)!r}")
+
+    assert not offenders, f"{template.name}: x-data names not registered via Alpine.data(): " + "; ".join(offenders)
+
+
 def test_chart_registry_is_not_read_from_window_root():
     """The chart registry lives on ``Admin``, not on ``window`` directly.
 
