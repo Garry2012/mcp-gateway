@@ -266,7 +266,11 @@ COPY mcpgateway/tools/builder/__init__.py /app/mcpgateway/tools/builder/__init__
 COPY mcpgateway/tools/builder/build_hooks.py /app/mcpgateway/tools/builder/build_hooks.py
 COPY --from=rust-builder /build/native-extension-wheels/ /tmp/local-native-extension-wheels/
 COPY --from=wheels /wheels /tmp/wheels
-COPY --chmod=0755 scripts/verify-native-extensions.py /tmp/verify-native-extensions.py
+# NOTE: split from `COPY --chmod=` so the image builds on the CLASSIC Docker
+# builder as well as BuildKit. Azure ACR Tasks uses the classic builder and
+# fails with "the --chmod option requires BuildKit".
+COPY scripts/verify-native-extensions.py /tmp/verify-native-extensions.py
+RUN chmod 0755 /tmp/verify-native-extensions.py
 
 # ----------------------------------------------------------------------------
 # Create and populate virtual environment
@@ -339,7 +343,9 @@ COPY run.sh /app/
 #   - gunicorn config + mcp catalog (rare/occasional)
 #   - mcpgateway/ + plugins/ (change most often)
 # ----------------------------------------------------------------------------
-COPY --chmod=0755 run-gunicorn.sh docker-entrypoint.sh run.sh /app/
+# See note above: classic-builder compatible form of `COPY --chmod=`.
+COPY run-gunicorn.sh docker-entrypoint.sh run.sh /app/
+RUN chmod 0755 /app/run-gunicorn.sh /app/docker-entrypoint.sh /app/run.sh
 COPY gunicorn.config.py mcp-catalog.yml /app/
 COPY mcpgateway/ /app/mcpgateway/
 COPY plugins/ /app/plugins/
