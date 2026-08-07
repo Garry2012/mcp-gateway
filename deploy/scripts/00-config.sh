@@ -35,6 +35,16 @@ PG_TIER="${PG_TIER:-Burstable}"
 PG_STORAGE_GB="${PG_STORAGE_GB:-32}"
 PG_VERSION="${PG_VERSION:-16}"
 
+# Connection pool sizing MUST be matched to the server tier. config.py defaults
+# to db_pool_size=200 + db_max_overflow=10, but a Burstable B1ms server allows
+# max_connections=50 in total. Left at the default the app exhausts the server
+# and every other client is refused with:
+#   "remaining connection slots are reserved for roles with the SUPERUSER attribute"
+# Budget ~20 for the app, leaving headroom for admin tools and health probes.
+# Raise these in step with the tier (see docs: >50 req/s wants a larger SKU).
+DB_POOL_SIZE="${DB_POOL_SIZE:-20}"
+DB_MAX_OVERFLOW="${DB_MAX_OVERFLOW:-5}"
+
 # Container app.
 APP_NAME_AZ="${APP_NAME_AZ:-mcp-gateway}"
 IMAGE_REPO="${IMAGE_REPO:-mcp-gateway}"
