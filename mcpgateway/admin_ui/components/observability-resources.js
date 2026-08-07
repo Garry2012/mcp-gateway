@@ -1,0 +1,564 @@
+/**
+ * Resources view for the observability dashboard.
+ *
+ * Registered through Alpine.data() rather than assigned to window and invoked
+ * as x-data="createResourcesController()". The admin UI bundles the CSP-safe Alpine
+ * build, whose x-data resolves a bare name against the registered component
+ * registry - it does not evaluate arbitrary global expressions. The call form
+ * therefore failed with "Undefined variable: createResourcesController", the
+ * component initialised empty, and the view rendered blank without raising.
+ */
+export function observabilityResources() {
+
+  return {
+    timeRange: 24,
+    limit: 20,
+    charts: {},
+    loading: false,
+    error: null,
+    autoRefreshInterval: null,
+    summaryCards: {
+      slowest: null,
+      mostErrorProne: null,
+      mostUsed: null,
+      overallHealth: 'good'
+    },
+
+    /**
+     * Destroy all Chart.js instances to prevent canvas reuse errors
+     */
+    destroyAllCharts() {
+      // Use global registry for centralized cleanup
+      Admin.chartRegistry.destroyByPrefix('resources-');
+      this.charts = {};
+    },
+
+    /**
+     * Cleanup resources on component destroy
+     */
+    cleanup() {
+      this.destroyAllCharts();
+      this.stopAutoRefresh();
+      if (this.leaveHandler) {
+        document.removeEventListener('observability:leave', this.leaveHandler);
+      }
+    },
+
+    /**
+     * Stop auto-refresh interval
+     */
+    stopAutoRefresh() {
+      if (this.autoRefreshInterval) {
+        clearInterval(this.autoRefreshInterval);
+        this.autoRefreshInterval = null;
+      }
+    },
+
+    async init() {
+      // Clean up any existing charts first
+      this.destroyAllCharts();
+
+      await this.loadAllMetrics();
+      this.startAutoRefresh();
+
+      // Listen for tab leave event to stop auto-refresh and cleanup
+      this.leaveHandler = () => {
+        console.log('Resources: received observability:leave event, stopping auto-refresh');
+        this.cleanup();
+      };
+      document.addEventListener('observability:leave', this.leaveHandler);
+
+      // Cleanup on page unload as fallback
+      window.addEventListener('beforeunload', () => this.cleanup());
+    },
+    async loadAllMetrics() {
+      this.loading = true;
+      this.error = null;
+      try {
+        await Promise.all([
+          this.loadResourceUsage(),
+          this.loadResourcePerformance(),
+          this.loadResourceSlowness(),
+          this.loadResourceErrorProne(),
+        ]);
+      } catch (e) {
+        console.error('Failed to load resource metrics:', e);
+        this.error = e.message;
+      } finally {
+        this.loading = false;
+      }
+    },
+    async loadResourceUsage() {
+      const response = await fetch(
+        `${window.ROOT_PATH || ''}/admin/observability/resources/usage?hours=${this.timeRange}&limit=${this.limit}`
+      );
+      if (!response.ok) throw new Error('Failed to load resource usage');
+      const data = await response.json();
+      this.renderResourceUsageChart(data);
+
+      // Update most used card
+      if (data.resources && data.resources.length > 0) {
+        this.summaryCards.mostUsed = {
+          name: data.resources[0].resource_uri,
+          value: data.resources[0].count,
+          metric: 'fetches'
+        };
+      }
+    },
+    async loadResourcePerformance() {
+      const response = await fetch(
+        `${window.ROOT_PATH || ''}/admin/observability/resources/performance?hours=${this.timeRange}&limit=${this.limit}`
+      );
+      if (!response.ok) throw new Error('Failed to load resource performance');
+      const data = await response.json();
+      this.renderResourcePerformanceTable(data);
+
+      // Update slowest resource card
+      if (data.resources && data.resources.length > 0) {
+        const slowest = [...data.resources].sort((a, b) => b.p95 - a.p95)[0];
+        this.summaryCards.slowest = {
+          name: slowest.resource_uri,
+          value: slowest.p95,
+          metric: 'ms (p95)'
+        };
+      }
+    },
+    async loadResourceSlowness() {
+      const response = await fetch(
+        `${window.ROOT_PATH || ''}/admin/observability/resources/performance?hours=${this.timeRange}&limit=10`
+      );
+      if (!response.ok) throw new Error('Failed to load resource slowness');
+      const data = await response.json();
+      this.renderResourceSlownessChart(data);
+    },
+    async loadResourceErrorProne() {
+      const response = await fetch(
+        `${window.ROOT_PATH || ''}/admin/observability/resources/errors?hours=${this.timeRange}&limit=10`
+      );
+      if (!response.ok) throw new Error('Failed to load resource errors');
+      const data = await response.json();
+      this.renderResourceErrorProneChart(data);
+
+      // Update most error-prone card and overall health
+      if (data.resources && data.resources.length > 0) {
+        const mostErrorProne = [...data.resources].sort((a, b) => b.error_rate - a.error_rate)[0];
+        this.summaryCards.mostErrorProne = {
+          name: mostErrorProne.resource_uri,
+          value: mostErrorProne.error_rate,
+          metric: '% errors'
+        };
+
+        // Calculate overall health
+        const avgErrorRate = data.resources.reduce((sum, r) => sum + r.error_rate, 0) / data.resources.length;
+        if (avgErrorRate < 5) {
+          this.summaryCards.overallHealth = 'good';
+        } else if (avgErrorRate < 20) {
+          this.summaryCards.overallHealth = 'warning';
+        } else {
+          this.summaryCards.overallHealth = 'critical';
+        }
+      } else {
+        this.summaryCards.overallHealth = 'good';
+      }
+    },
+    renderResourceUsageChart(data) {
+      const canvas = document.getElementById('resourceUsageChart');
+      if (!canvas) return;
+
+      // Check if canvas is visible before rendering
+      if (canvas.offsetParent === null) {
+        console.warn('resourceUsageChart canvas is hidden, deferring render');
+        return;
+      }
+
+      // Destroy existing chart via global registry
+      Admin.chartRegistry.destroy('resources-usage');
+
+      // Handle empty data
+      if (!data.resources || data.resources.length === 0) {
+        const ctx = canvas.getContext('2d');
+        if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
+        return;
+      }
+
+      requestAnimationFrame(() => {
+        try {
+          // Double-check visibility after animation frame
+          if (canvas.offsetParent === null) {
+            console.warn('resourceUsageChart canvas became hidden, aborting render');
+            return;
+          }
+
+          // Verify canvas is still in DOM and get valid context
+          const ctx = canvas.getContext('2d');
+          if (!ctx) {
+            console.error('Failed to get 2d context for resourceUsageChart');
+            return;
+          }
+
+          const defaults = getChartDefaults();
+          const chart = new Chart(ctx, {
+            type: 'bar',
+            data: {
+              labels: data.resources.map(r => r.resource_uri),
+              datasets: [
+                {
+                  label: 'Fetch Count',
+                  data: data.resources.map(r => r.count),
+                  backgroundColor: 'rgba(34, 197, 94, 0.6)',
+                  borderColor: '#22c55e',
+                  borderWidth: 1,
+                },
+              ],
+            },
+            options: {
+              indexAxis: 'y',
+              responsive: true,
+              maintainAspectRatio: false,
+              plugins: {
+                title: {
+                  display: true,
+                  text: `Resource Fetch Frequency (Last ${this.timeRange}h)`,
+                  color: defaults.titleColor,
+                },
+                legend: {
+                  display: false,
+                },
+                tooltip: {
+                  callbacks: {
+                    label: function (context) {
+                      const resource = data.resources[context.dataIndex];
+                      return [
+                        `Fetches: ${resource.count}`,
+                        `Percentage: ${resource.percentage}%`
+                      ];
+                    },
+                  },
+                },
+              },
+              scales: {
+                x: {
+                  beginAtZero: true,
+                  title: {
+                    display: true,
+                    text: 'Number of Fetches',
+                    color: defaults.titleColor,
+                  },
+                  ticks: {
+                    color: defaults.tickColor,
+                  },
+                  grid: {
+                    color: defaults.gridColor,
+                  },
+                },
+                y: {
+                  ticks: {
+                    color: defaults.tickColor,
+                  },
+                  grid: {
+                    color: defaults.gridColor,
+                  },
+                },
+              },
+            },
+          });
+          // Register with global registry
+          Admin.chartRegistry.register('resources-usage', chart);
+          this.charts.resourceUsage = chart;
+        } catch (e) {
+          console.error('Failed to create resource usage chart:', e);
+        }
+      });
+    },
+    renderResourcePerformanceTable(data) {
+      const tbody = document.querySelector('#resourcePerformanceTable tbody');
+      if (!tbody) return;
+
+      tbody.innerHTML = data.resources
+        .map(
+          (resource, idx) => `
+            <tr class="hover:bg-gray-50 dark:hover:bg-gray-700/50">
+              <td class="px-4 py-2 text-sm text-gray-700 dark:text-gray-400">${idx + 1}</td>
+              <td class="px-4 py-2 text-sm font-mono text-gray-900 dark:text-gray-200">${resource.resource_uri}</td>
+              <td class="px-4 py-2 text-sm text-gray-600 dark:text-gray-400">${resource.count}</td>
+              <td class="px-4 py-2 text-sm text-orange-600 dark:text-orange-400 font-medium">${resource.avg_duration_ms} ms</td>
+              <td class="px-4 py-2 text-sm text-green-600 dark:text-green-400">${resource.min_duration_ms} ms</td>
+              <td class="px-4 py-2 text-sm text-blue-600 dark:text-blue-400">${resource.p50} ms</td>
+              <td class="px-4 py-2 text-sm text-indigo-600 dark:text-indigo-400">${resource.p90} ms</td>
+              <td class="px-4 py-2 text-sm text-purple-600 dark:text-purple-400">${resource.p95} ms</td>
+              <td class="px-4 py-2 text-sm text-pink-600 dark:text-pink-400">${resource.p99} ms</td>
+              <td class="px-4 py-2 text-sm text-red-600 dark:text-red-400">${resource.max_duration_ms} ms</td>
+            </tr>
+          `
+        )
+        .join('');
+    },
+    renderResourceSlownessChart(data) {
+      const canvas = document.getElementById('resourceSlownessChart');
+      if (!canvas) return;
+
+      // Check if canvas is visible before rendering
+      if (canvas.offsetParent === null) {
+        console.warn('resourceSlownessChart canvas is hidden, deferring render');
+        return;
+      }
+
+      // Destroy existing chart via global registry
+      Admin.chartRegistry.destroy('resources-slowness');
+
+      // Handle empty data
+      if (!data.resources || data.resources.length === 0) {
+        const ctx = canvas.getContext('2d');
+        if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
+        return;
+      }
+
+      // Sort by p95 descending and take top 10
+      const sortedResources = [...data.resources]
+        .sort((a, b) => b.p95 - a.p95)
+        .slice(0, 10);
+
+      requestAnimationFrame(() => {
+        try {
+          // Double-check visibility after animation frame
+          if (canvas.offsetParent === null) {
+            console.warn('resourceSlownessChart canvas became hidden, aborting render');
+            return;
+          }
+
+          // Verify canvas is still in DOM and get valid context
+          const ctx = canvas.getContext('2d');
+          if (!ctx) {
+            console.error('Failed to get 2d context for resourceSlownessChart');
+            return;
+          }
+
+          const defaults = getChartDefaults();
+          const chart = new Chart(ctx, {
+            type: 'bar',
+            data: {
+              labels: sortedResources.map(r => r.resource_uri),
+              datasets: [
+                {
+                  label: 'p95 Latency (ms)',
+                  data: sortedResources.map(r => r.p95),
+                  backgroundColor: 'rgba(239, 68, 68, 0.6)',
+                  borderColor: '#ef4444',
+                  borderWidth: 1,
+                },
+                {
+                  label: 'p50 Latency (ms)',
+                  data: sortedResources.map(r => r.p50),
+                  backgroundColor: 'rgba(34, 197, 94, 0.6)',
+                  borderColor: '#22c55e',
+                  borderWidth: 1,
+                },
+              ],
+            },
+            options: {
+              indexAxis: 'y',
+              responsive: true,
+              maintainAspectRatio: false,
+              plugins: {
+                title: {
+                  display: true,
+                  text: `Top 10 Slowest Resources (Last ${this.timeRange}h)`,
+                  color: defaults.titleColor,
+                },
+                legend: {
+                  display: true,
+                  position: 'top',
+                  labels: {
+                    color: defaults.color,
+                  },
+                },
+                tooltip: {
+                  callbacks: {
+                    label: function (context) {
+                      const resource = sortedResources[context.dataIndex];
+                      return [
+                        `${context.dataset.label}: ${context.parsed.x} ms`,
+                        `Avg: ${resource.avg_duration_ms} ms`,
+                        `Max: ${resource.max_duration_ms} ms`,
+                        `Fetches: ${resource.count}`
+                      ];
+                    },
+                  },
+                },
+              },
+              scales: {
+                x: {
+                  beginAtZero: true,
+                  title: {
+                    display: true,
+                    text: 'Latency (ms)',
+                    color: defaults.titleColor,
+                  },
+                  ticks: {
+                    color: defaults.tickColor,
+                  },
+                  grid: {
+                    color: defaults.gridColor,
+                  },
+                },
+                y: {
+                  ticks: {
+                    color: defaults.tickColor,
+                  },
+                  grid: {
+                    color: defaults.gridColor,
+                  },
+                },
+              },
+            },
+          });
+          // Register with global registry
+          Admin.chartRegistry.register('resources-slowness', chart);
+          this.charts.resourceSlowness = chart;
+        } catch (e) {
+          console.error('Failed to create resource slowness chart:', e);
+        }
+      });
+    },
+    renderResourceErrorProneChart(data) {
+      const canvas = document.getElementById('resourceErrorProneChart');
+      if (!canvas) return;
+
+      // Check if canvas is visible before rendering
+      if (canvas.offsetParent === null) {
+        console.warn('resourceErrorProneChart canvas is hidden, deferring render');
+        return;
+      }
+
+      // Destroy existing chart via global registry
+      Admin.chartRegistry.destroy('resources-errorprone');
+
+      // Handle empty data
+      if (!data.resources || data.resources.length === 0) {
+        const ctx = canvas.getContext('2d');
+        if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
+        return;
+      }
+
+      // Sort by error_rate descending and take top 10
+      const sortedResources = [...data.resources]
+        .filter(r => r.error_rate > 0)
+        .sort((a, b) => b.error_rate - a.error_rate)
+        .slice(0, 10);
+
+      if (sortedResources.length === 0) {
+        const ctx = canvas.getContext('2d');
+        if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
+        const parent = canvas.parentElement;
+        if (parent) {
+          // Use safe DOM manipulation instead of innerHTML with static content
+          parent.textContent = '';
+          const p = document.createElement('p');
+          p.className = 'text-center text-emerald-500 p-8';
+          p.textContent = '✓ No errors found - all resources fetched successfully!';
+          parent.appendChild(p);
+        }
+        return;
+      }
+
+      requestAnimationFrame(() => {
+        try {
+          // Double-check visibility after animation frame
+          if (canvas.offsetParent === null) {
+            console.warn('resourceErrorProneChart canvas became hidden, aborting render');
+            return;
+          }
+
+          // Verify canvas is still in DOM and get valid context
+          const ctx = canvas.getContext('2d');
+          if (!ctx) {
+            console.error('Failed to get 2d context for resourceErrorProneChart');
+            return;
+          }
+
+          const defaults = getChartDefaults();
+          const chart = new Chart(ctx, {
+            type: 'bar',
+            data: {
+              labels: sortedResources.map(r => r.resource_uri),
+              datasets: [
+                {
+                  label: 'Error Rate (%)',
+                  data: sortedResources.map(r => r.error_rate),
+                  backgroundColor: 'rgba(239, 68, 68, 0.6)',
+                  borderColor: '#ef4444',
+                  borderWidth: 1,
+                },
+              ],
+            },
+            options: {
+              indexAxis: 'y',
+              responsive: true,
+              maintainAspectRatio: false,
+              plugins: {
+                title: {
+                  display: true,
+                  text: `Top 10 Error-Prone Resources (Last ${this.timeRange}h)`,
+                  color: defaults.titleColor,
+                },
+                legend: {
+                  display: false,
+                },
+                tooltip: {
+                  callbacks: {
+                    label: function (context) {
+                      const resource = sortedResources[context.dataIndex];
+                      return [
+                        `Error Rate: ${resource.error_rate}%`,
+                        `Errors: ${resource.error_count}`,
+                        `Total: ${resource.total_count}`,
+                        `Success: ${resource.total_count - resource.error_count}`
+                      ];
+                    },
+                  },
+                },
+              },
+              scales: {
+                x: {
+                  beginAtZero: true,
+                  max: 100,
+                  title: {
+                    display: true,
+                    text: 'Error Rate (%)',
+                    color: defaults.titleColor,
+                  },
+                  ticks: {
+                    color: defaults.tickColor,
+                  },
+                  grid: {
+                    color: defaults.gridColor,
+                  },
+                },
+                y: {
+                  ticks: {
+                    color: defaults.tickColor,
+                  },
+                  grid: {
+                    color: defaults.gridColor,
+                  },
+                },
+              },
+            },
+          });
+          // Register with global registry
+          Admin.chartRegistry.register('resources-errorprone', chart);
+          this.charts.resourceErrorProne = chart;
+        } catch (e) {
+          console.error('Failed to create resource error-prone chart:', e);
+        }
+      });
+    },
+    startAutoRefresh() {
+      this.stopAutoRefresh();
+      this.autoRefreshInterval = setInterval(() => this.loadAllMetrics(), 60000);
+    },
+    async applyFilters() {
+      await this.loadAllMetrics();
+    },
+  };
+}

@@ -5679,20 +5679,38 @@ class ToolService(BaseService):
                             response.raise_for_status()
                         except httpx.HTTPStatusError:
                             # Non-2xx response — parse body (may be HTML, plain text, XML, etc.)
+                            parsed_json_body = True
                             try:
                                 result = response.json()
                             except (json.JSONDecodeError, orjson.JSONDecodeError, UnicodeDecodeError, AttributeError) as e:
                                 result = _handle_json_parse_error(response, e, is_error_response=True)
+                                parsed_json_body = False
                             if "error" in result:
                                 error_val = result["error"]
                             elif "response_text" in result:
                                 error_val = f"HTTP {response.status_code}: {result['response_text']}"
                             else:
-                                error_val = f"HTTP {response.status_code}"
+                                # The upstream returned a well-formed JSON error that simply does
+                                # not use a key named "error" - Twilio's {"code", "message",
+                                # "more_info"} shape, for example. Falling through to a bare
+                                # "HTTP <status>" here discarded the only explanation of the
+                                # failure, leaving callers to reproduce the request against the
+                                # upstream API by hand to find out what went wrong. Note the
+                                # perverse asymmetry this fixes: an unparseable body was already
+                                # surfaced via "response_text" above, so being well-behaved was
+                                # what made an upstream's error invisible.
+                                error_val = f"HTTP {response.status_code}: {orjson.dumps(result).decode()}"
+                            error_structured_content = {"status_code": response.status_code}
+                            if parsed_json_body:
+                                # Only the upstream's own parsed JSON is attached. The
+                                # non-JSON path already surfaces its content through
+                                # "response_text", so wrapping that synthetic dict here
+                                # would add nothing and change an established shape.
+                                error_structured_content["body"] = result
                             tool_result = ToolResult(
                                 content=[TextContent(type="text", text=error_val if isinstance(error_val, str) else orjson.dumps(error_val).decode())],
                                 is_error=True,
-                                structured_content={"status_code": response.status_code},
+                                structured_content=error_structured_content,
                             )
                             # Don't mark as successful — success remains False
 
@@ -6774,7 +6792,10 @@ class ToolService(BaseService):
                 if span:
                     set_span_attribute(span, "success", success)
                     set_span_attribute(span, "duration.ms", duration_ms)
-                    if success and tool_result and is_output_capture_enabled("tool.invoke"):
+                    # Capture the result on failure as well as success. Gating this on
+                    # `success` meant the one case worth inspecting - a call that went
+                    # wrong - was the only case that recorded nothing.
+                    if tool_result and is_output_capture_enabled("tool.invoke"):
                         set_span_attribute(span, "langfuse.observation.output", serialize_trace_payload(tool_result))
 
                 # ═══════════════════════════════════════════════════════════════════════════
