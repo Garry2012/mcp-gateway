@@ -279,7 +279,7 @@ appVersion: "0.9.0"     # Application version
 
 ### Resources
 
-- **Documentation**: [ContextForge Docs](https://ibm.github.io/mcp-context-forge/)
+- **Documentation**: [MCP Gateway Docs](https://ibm.github.io/mcp-context-forge/)
 - **Helm Documentation**: [https://helm.sh/docs/](https://helm.sh/docs/)
 - **Kubernetes Documentation**: [https://kubernetes.io/docs/](https://kubernetes.io/docs/)
 
@@ -287,7 +287,7 @@ appVersion: "0.9.0"     # Application version
 
 - **Issues**: [GitHub Issues](https://github.com/IBM/mcp-context-forge/issues)
 - **Discussions**: [GitHub Discussions](https://github.com/IBM/mcp-context-forge/discussions)
-- **Main Project**: [ContextForge](https://github.com/IBM/mcp-context-forge)
+- **Main Project**: [MCP Gateway](https://github.com/IBM/mcp-context-forge)
 
 ### Common Issues
 
@@ -298,8 +298,8 @@ appVersion: "0.9.0"     # Application version
 
 ## Thank You
 
-Your contributions help make the MCP ContextForge Stack easier to deploy and manage for everyone. We appreciate your time and effort in improving this project!
+Your contributions help make the MCP Gateway Stack easier to deploy and manage for everyone. We appreciate your time and effort in improving this project!
 
 ---
 
-*This document is based on the [ContextForge](https://github.com/IBM/mcp-context-forge) project and follows established open-source contribution practices.*
+*This document is based on the [MCP Gateway](https://github.com/IBM/mcp-context-forge) project and follows established open-source contribution practices.*

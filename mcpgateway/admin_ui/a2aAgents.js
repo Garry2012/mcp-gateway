@@ -771,7 +771,7 @@ export const testA2AAgent = async function (agentId, agentName, endpointUrl) {
     }
     if (queryInput) {
       // Reset to default value
-      queryInput.value = "Hello from ContextForge Admin UI test!";
+      queryInput.value = "Hello from MCP Gateway Admin UI test!";
     }
     if (resultDiv) {
       resultDiv.classList.add("hidden");
@@ -828,7 +828,7 @@ export const handleA2ATestSubmit = async function (e) {
     const agentId = safeGetElement("a2a-test-agent-id")?.value;
     const query =
       safeGetElement("a2a-test-query")?.value ||
-      "Hello from ContextForge Admin UI test!";
+      "Hello from MCP Gateway Admin UI test!";
 
     if (!agentId) {
       throw new Error("Agent ID is missing");

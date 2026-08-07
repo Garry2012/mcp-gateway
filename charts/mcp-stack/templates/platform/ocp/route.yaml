@@ -1,7 +1,7 @@
 {{- /*
   OpenShift Route — provides external access via OCP's built-in HAProxy router.
 
-  This is the preferred way to expose ContextForge on OpenShift. The standard
+  This is the preferred way to expose MCP Gateway on OpenShift. The standard
   ingress.yaml (Kubernetes Ingress) can achieve the same result on OCP, but
   requires additional configuration for TLS re-encrypt, serving certificates,
   and NGINX backend routing. This template provides direct control over

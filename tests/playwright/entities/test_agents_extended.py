@@ -888,7 +888,7 @@ class TestA2ATestModal:
 
         # Verify default text
         value = query_textarea.input_value()
-        assert "Hello from ContextForge Admin UI test!" in value, f"Expected default query text, got '{value}'"
+        assert "Hello from MCP Gateway Admin UI test!" in value, f"Expected default query text, got '{value}'"
 
         _close_test_modal(agents_page)
 

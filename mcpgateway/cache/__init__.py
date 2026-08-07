@@ -4,7 +4,7 @@ Copyright contributors to the MCP-CONTEXT-FORGE project
 SPDX-License-Identifier: Apache-2.0
 
 Cache Package.
-Provides caching components for ContextForge including:
+Provides caching components for MCP Gateway including:
 - Resource content caching
 - Session registry for MCP connections
 - GlobalConfig caching for passthrough headers

@@ -10,7 +10,7 @@ for OAuth access tokens before they are forwarded to upstream MCP servers.
 Validation is advisory — the upstream MCP server remains the authoritative validator.
 
 Tokens are issued by external Identity Providers (Entra ID, Keycloak, etc.) and
-ContextForge does NOT possess their signing keys, so JWT signatures are not verified.
+MCP Gateway does NOT possess their signing keys, so JWT signatures are not verified.
 Opaque (non-JWT) tokens are handled gracefully.
 """
 

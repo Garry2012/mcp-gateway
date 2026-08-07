@@ -217,7 +217,7 @@ class TokenStorageService:
         Args:
             gateway_id: ID of the gateway
             user_id: OAuth provider user ID
-            app_user_email: ContextForge user email (required)
+            app_user_email: MCP Gateway user email (required)
             access_token: Access token from OAuth provider
             refresh_token: Refresh token from OAuth provider (optional)
             expires_in: Token expiration time in seconds, or None if the provider does not specify expiration
@@ -318,7 +318,7 @@ class TokenStorageService:
 
         Args:
             gateway_id: ID of the gateway.
-            app_user_email: ContextForge user email.
+            app_user_email: MCP Gateway user email.
 
         Returns:
             Tuple of ``(learned_aud, learned_iss)``. Either element may be ``None`` if
@@ -335,11 +335,11 @@ class TokenStorageService:
             return (None, None)
 
     async def get_user_token(self, gateway_id: str, app_user_email: str, threshold_seconds: int = 300) -> Optional[str]:
-        """Get a valid access token for a specific ContextForge user, refreshing if necessary.
+        """Get a valid access token for a specific MCP Gateway user, refreshing if necessary.
 
         Args:
             gateway_id: ID of the gateway
-            app_user_email: ContextForge user email (required)
+            app_user_email: MCP Gateway user email (required)
             threshold_seconds: Seconds before expiry to consider token expired
 
         Returns:
@@ -410,7 +410,7 @@ class TokenStorageService:
             # Refuse refresh on a private gateway whose owner is not the token
             # owner (PR #4341 invariant): prevents OAuth secret leakage when a
             # gateway's ownership / visibility changes after token issuance.
-            # The token owner is ``app_user_email`` (ContextForge user), not
+            # The token owner is ``app_user_email`` (MCP Gateway user), not
             # the OAuth provider's ``user_id``. Public and team gateways are
             # not gated here — their RBAC enforcement happens at the call
             # sites that issue refreshes.
@@ -600,7 +600,7 @@ class TokenStorageService:
 
         Args:
             gateway_id: ID of the gateway
-            app_user_email: ContextForge user email
+            app_user_email: MCP Gateway user email
 
         Returns:
             Token information dictionary or None if not found
@@ -634,7 +634,7 @@ class TokenStorageService:
 
             return {
                 "user_id": token_record.user_id,  # OAuth provider user ID
-                "app_user_email": token_record.app_user_email,  # ContextForge user
+                "app_user_email": token_record.app_user_email,  # MCP Gateway user
                 "token_type": token_record.token_type,
                 "expires_at": token_record.expires_at.isoformat() if token_record.expires_at else None,
                 "scopes": token_record.scopes,
@@ -652,7 +652,7 @@ class TokenStorageService:
 
         Args:
             gateway_id: ID of the gateway
-            app_user_email: ContextForge user email
+            app_user_email: MCP Gateway user email
 
         Returns:
             True if tokens were revoked successfully

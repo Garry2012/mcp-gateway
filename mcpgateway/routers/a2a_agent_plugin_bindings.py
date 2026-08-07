@@ -230,9 +230,9 @@ async def delete_a2a_agent_plugin_bindings_by_reference(
 ) -> A2AAgentPluginBindingListResponse:
     """Delete all bindings associated with an external reference ID.
 
-    Intended for use by external systems that need to remove all ContextForge
+    Intended for use by external systems that need to remove all MCP Gateway
     bindings tied to one of their own reference objects without knowing the
-    internal ContextForge UUIDs.
+    internal MCP Gateway UUIDs.
 
     Returns the deleted records (empty list if none matched — not an error).
 

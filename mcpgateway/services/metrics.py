@@ -3,7 +3,7 @@
 Copyright contributors to the MCP-CONTEXT-FORGE project
 SPDX-License-Identifier: Apache-2.0
 
-ContextForge Metrics Service.
+MCP Gateway Metrics Service.
 
 This module provides comprehensive Prometheus metrics instrumentation for ContextForge.
 It configures and exposes HTTP metrics including request counts, latencies, response sizes,

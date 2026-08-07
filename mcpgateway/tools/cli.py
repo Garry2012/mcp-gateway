@@ -4,7 +4,7 @@ Copyright contributors to the MCP-CONTEXT-FORGE project
 SPDX-License-Identifier: Apache-2.0
 
 cforge CLI ─ command line tools for building and deploying the
-ContextForge AI Gateway and its plugins.
+MCP Gateway and its plugins.
 
 This module is exposed as a **console-script** via:
 
@@ -41,7 +41,7 @@ import typer
 # First-Party
 import mcpgateway.tools.builder.cli as builder
 
-app = typer.Typer(help="Command line tools for building, deploying, and interacting with ContextForge AI Gateway")
+app = typer.Typer(help="Command line tools for building, deploying, and interacting with MCP Gateway")
 
 app.add_typer(plugins.app, name="plugin", help="Manage the plugin lifecycle")
 app.add_typer(builder.app, name="gateway", help="Manage the building and deployment of the gateway")

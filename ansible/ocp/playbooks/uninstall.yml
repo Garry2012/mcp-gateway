@@ -1,11 +1,11 @@
 ---
-# OCP Uninstall — remove the ContextForge Helm release
+# OCP Uninstall — remove the MCP Gateway Helm release
 # Equivalent to: make ocp-uninstall OCP_NS=<namespace>
 #
 # Usage:
 #   ansible-playbook ansible/ocp/playbooks/uninstall.yml -i ansible/ocp/inventory/cluster.yml
 
-- name: Uninstall ContextForge Helm release
+- name: Uninstall MCP Gateway Helm release
   hosts: localhost
   gather_facts: false
 
@@ -17,7 +17,7 @@
       ansible.builtin.debug:
         msg: |
           ========================================
-          OCP Uninstall: ContextForge Helm release
+          OCP Uninstall: MCP Gateway Helm release
           ========================================
           Namespace: {{ ocp_namespace }}
           Release:   {{ ocp_namespace }}

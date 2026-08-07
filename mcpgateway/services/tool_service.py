@@ -1556,7 +1556,7 @@ class ToolService(BaseService):
         This method is one of **three** output-schema validation layers the
         gateway relies on. Understanding where each fires — and, crucially,
         where each is *skipped* — is essential when reasoning about
-        ContextForge #4202 (https://github.com/IBM/mcp-context-forge/issues/4202)
+        MCP Gateway #4202 (https://github.com/IBM/mcp-context-forge/issues/4202)
         and its successors. See
         ``docs/docs/architecture/tool-invocation-and-validation.md`` for the
         full flow diagram; a summary follows.
@@ -1594,7 +1594,7 @@ class ToolService(BaseService):
            — a known gap tracked alongside the option-B pipeline unification
            refactor (see the issue below). Rules when Validator B does run:
            - Skip when ``is_error=True`` or ``isError=True`` — the
-             ContextForge #4202 fix. Without this early return the gateway
+             MCP Gateway #4202 fix. Without this early return the gateway
              would clobber the upstream's original error message with a
              schema-mismatch dict.
            - Require ``structured_content`` to be a JSON object when
@@ -4752,7 +4752,7 @@ class ToolService(BaseService):
             name: Tool name to re-invoke.
             arguments: Tool arguments to forward.
             request_headers: Original request headers.
-            app_user_email: ContextForge user email for OAuth.
+            app_user_email: MCP Gateway user email for OAuth.
             user_email: User email for authorization.
             token_teams: Team IDs from JWT token.
             server_id: Virtual server ID for scoping.
@@ -4822,7 +4822,7 @@ class ToolService(BaseService):
             arguments: Tool arguments.
             request_headers (Optional[Dict[str, str]], optional): Headers from the request to pass through.
                 Defaults to None.
-            app_user_email (Optional[str], optional): ContextForge user email for OAuth token retrieval.
+            app_user_email (Optional[str], optional): MCP Gateway user email for OAuth token retrieval.
                 Required for OAuth-protected gateways.
             user_email (Optional[str], optional): User email for authorization checks.
                 None = unauthenticated request.
@@ -7549,7 +7549,7 @@ class ToolService(BaseService):
             input_schema={
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "User query", "default": "Hello from ContextForge Admin UI test!"},
+                    "query": {"type": "string", "description": "User query", "default": "Hello from MCP Gateway Admin UI test!"},
                 },
                 "required": ["query"],
             },

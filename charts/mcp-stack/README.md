@@ -4,7 +4,7 @@
 
 A full-stack Helm chart for IBM's **Model Context Protocol (MCP) Gateway
 & Registry - Context-Forge**.  It bundles:
-  - ContextForge application (HTTP / WebSocket server)
+  - MCP Gateway application (HTTP / WebSocket server)
   - PostgreSQL database with persistent storage
   - Redis cache for sessions & completions
   - Optional PgAdmin and Redis-Commander web UIs
@@ -217,7 +217,7 @@ For detailed guidance on resource limits and process management, see `docs/docs/
 | mcpContextForge.config.GUNICORN_PRELOAD_APP | string | `"true"` |  |
 | mcpContextForge.config.GUNICORN_DEV_MODE | string | `"false"` |  |
 | mcpContextForge.config.DISABLE_ACCESS_LOG | string | `"true"` |  |
-| mcpContextForge.config.APP_NAME | string | `"ContextForge"` |  |
+| mcpContextForge.config.APP_NAME | string | `"MCP Gateway"` |  |
 | mcpContextForge.config.HOST | string | `"0.0.0.0"` |  |
 | mcpContextForge.config.PORT | string | `"4444"` |  |
 | mcpContextForge.config.APP_ROOT_PATH | string | `""` |  |
@@ -574,7 +574,7 @@ For detailed guidance on resource limits and process management, see `docs/docs/
 | mcpContextForge.config.HTTPX_HTTP2_ENABLED | string | `"false"` |  |
 | mcpContextForge.config.HTTPX_ADMIN_READ_TIMEOUT | string | `"30.0"` |  |
 | mcpContextForge.config.WELL_KNOWN_ENABLED | string | `"true"` |  |
-| mcpContextForge.config.WELL_KNOWN_ROBOTS_TXT | string | `"User-agent: *\nDisallow: /\n\n# ContextForge is a private API gateway\n# Public crawling is disabled by default\n"` |  |
+| mcpContextForge.config.WELL_KNOWN_ROBOTS_TXT | string | `"User-agent: *\nDisallow: /\n\n# MCP Gateway is a private API gateway\n# Public crawling is disabled by default\n"` |  |
 | mcpContextForge.config.WELL_KNOWN_SECURITY_TXT | string | `""` |  |
 | mcpContextForge.config.WELL_KNOWN_SECURITY_TXT_ENABLED | string | `"false"` |  |
 | mcpContextForge.config.WELL_KNOWN_CUSTOM_FILES | string | `"{}"` |  |
@@ -795,7 +795,7 @@ For detailed guidance on resource limits and process management, see `docs/docs/
 | mcpContextForge.secret.SMTP_USER | string | `""` |  |
 | mcpContextForge.secret.SMTP_PASSWORD | string | `""` |  |
 | mcpContextForge.secret.SMTP_FROM_EMAIL | string | `""` |  |
-| mcpContextForge.secret.SMTP_FROM_NAME | string | `"ContextForge"` |  |
+| mcpContextForge.secret.SMTP_FROM_NAME | string | `"MCP Gateway"` |  |
 | mcpContextForge.secret.SMTP_USE_TLS | string | `"true"` |  |
 | mcpContextForge.secret.SMTP_USE_SSL | string | `"false"` |  |
 | mcpContextForge.secret.SMTP_TIMEOUT_SECONDS | string | `"15"` |  |
@@ -813,7 +813,7 @@ For detailed guidance on resource limits and process management, see `docs/docs/
 | mcpContextForge.secret.DCR_ALLOWED_ISSUERS | string | `"[]"` |  |
 | mcpContextForge.secret.DCR_TOKEN_ENDPOINT_AUTH_METHOD | string | `"client_secret_basic"` |  |
 | mcpContextForge.secret.DCR_METADATA_CACHE_TTL | string | `"3600"` |  |
-| mcpContextForge.secret.DCR_CLIENT_NAME_TEMPLATE | string | `"ContextForge ({gateway_name})"` |  |
+| mcpContextForge.secret.DCR_CLIENT_NAME_TEMPLATE | string | `"MCP Gateway ({gateway_name})"` |  |
 | mcpContextForge.secret.DCR_REQUEST_REFRESH_TOKEN_WHEN_UNSUPPORTED | string | `"false"` |  |
 | mcpContextForge.secret.OAUTH_DISCOVERY_ENABLED | string | `"true"` |  |
 | mcpContextForge.secret.OAUTH_PREFERRED_CODE_CHALLENGE_METHOD | string | `"S256"` |  |

@@ -1,4 +1,4 @@
-# Nginx Caching Proxy for ContextForge
+# Nginx Caching Proxy for MCP Gateway
 
 High-performance reverse proxy with CDN-like caching capabilities for ContextForge. Provides intelligent caching for static assets, API responses, and schema endpoints with minimal configuration.
 
@@ -437,7 +437,7 @@ docker-compose restart nginx
          │ http://gateway:4444
          ▼
 ┌─────────────────┐
-│  ContextForge    │
+│  MCP Gateway    │
 │  (FastAPI)      │
 └─────────────────┘
 ```

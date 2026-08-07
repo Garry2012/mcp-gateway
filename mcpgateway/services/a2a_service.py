@@ -2678,7 +2678,7 @@ class A2AAgentService(BaseService):
             _validate_uaid_endpoint_domain(endpoint, operation_context="cross-gateway routing")
 
             # Construct URL based on protocol (endpoint is now validated).
-            # ContextForge-to-ContextForge federation: target the receiving
+            # ContextForge-to-MCP Gateway federation: target the receiving
             # gateway's existing public invoke route so the UAID is routed
             # through the same `is_uaid()` branch on the other side.
             #

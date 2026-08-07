@@ -117,7 +117,7 @@ async def execute_tool_nl_testcases(tool_nl_test_input: ToolNLTestInput, db: Ses
 
     Args:
         tool_nl_test_input: NL test case format input to run test cases with agent , it contains\
-            - tool_id: Tool ID in ContextForge\
+            - tool_id: Tool ID in MCP Gateway\
             - tool_nl_test_cases: List of natural language test cases (utteances) for testing MCP tool with the agent
         db: DB session to connect with database
 

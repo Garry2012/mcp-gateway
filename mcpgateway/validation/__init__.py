@@ -4,7 +4,7 @@ Copyright contributors to the MCP-CONTEXT-FORGE project
 SPDX-License-Identifier: Apache-2.0
 
 Validation Package.
-Provides validation components for ContextForge including:
+Provides validation components for MCP Gateway including:
 - JSON-RPC request/response validation
 - Tag validation and normalization
 """

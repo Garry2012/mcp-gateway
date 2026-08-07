@@ -4,7 +4,7 @@ Copyright contributors to the MCP-CONTEXT-FORGE project
 SPDX-License-Identifier: Apache-2.0
 
 Environment configuration validation script.
-This module provides validation for ContextForge environment configuration files,
+This module provides validation for MCP Gateway environment configuration files,
 including security checks for weak passwords, default secrets, and invalid settings.
 
 Usage:

@@ -196,7 +196,7 @@ class TestAuthEmailNotificationService:
         assert result is True
         call_args = send_mock.await_args[0]
         assert call_args[0] == "alice@example.com"
-        assert "Reset your ContextForge password" == call_args[1]
+        assert "Reset your MCP Gateway password" == call_args[1]
         assert "alice" in call_args[2]
 
     @pytest.mark.asyncio

@@ -1,9 +1,9 @@
 apiVersion: 1
 
 providers:
-  - name: 'ContextForge Dashboards'
+  - name: 'MCP Gateway Dashboards'
     orgId: 1
-    folder: 'ContextForge'
+    folder: 'MCP Gateway'
     type: file
     disableDeletion: false
     updateIntervalSeconds: 30

@@ -4,7 +4,7 @@
 Copyright contributors to the MCP-CONTEXT-FORGE project
 SPDX-License-Identifier: Apache-2.0
 
-ContextForge AI Gateway - Main FastAPI Application.
+MCP Gateway - Main FastAPI Application.
 
 This module defines the core FastAPI application for the Model Context Protocol (MCP) Gateway.
 It serves as the entry point for handling all HTTP and WebSocket traffic.
@@ -1461,7 +1461,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
     # Initialize logging service FIRST to ensure all logging goes to dual output
     await logging_service.initialize()
-    logger.info("Starting ContextForge services")
+    logger.info("Starting MCP Gateway services")
 
     # Wait for the database to be ready, then run bootstrap (alembic + seed).
     # This used to run at module-import time, which made every test that
@@ -1934,7 +1934,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         except Exception as e:
             logger.debug(f"Error stopping runtime-mode coordinator: {e}")
 
-        logger.info("Shutting down ContextForge services")
+        logger.info("Shutting down MCP Gateway services")
         # await stop_streamablehttp()
         # Build service list conditionally
         services_to_shutdown: List[Any] = [
@@ -2080,7 +2080,7 @@ async def setup_passthrough_headers():
 app = FastAPI(
     title=settings.app_name,
     version=__version__,
-    description="ContextForge AI Gateway — an AI gateway, registry, and proxy for MCP, A2A, and REST/gRPC APIs. Exposes a unified control plane with centralized governance, discovery, and observability. Optimizes agent and tool calling, and supports plugins.",
+    description="MCP Gateway — an AI gateway, registry, and proxy for MCP, A2A, and REST/gRPC APIs. Exposes a unified control plane with centralized governance, discovery, and observability. Optimizes agent and tool calling, and supports plugins.",
     root_path=settings.app_root_path,
     lifespan=lifespan,
     default_response_class=ORJSONResponse,  # Use orjson for high-performance JSON serialization
@@ -5393,7 +5393,7 @@ async def invoke_a2a_agent_jsonrpc(
     """
     Transparent A2A JSON-RPC proxy endpoint.
 
-    Accepts raw A2A JSON-RPC requests (no envelope wrapping), applies ContextForge
+    Accepts raw A2A JSON-RPC requests (no envelope wrapping), applies MCP Gateway
     governance (auth, RBAC, rate limiting, observability), and returns raw JSON-RPC
     responses. This enables standard A2A SDKs (e.g., Google ADK RemoteA2aAgent) to
     work without custom adapters.
@@ -5545,7 +5545,7 @@ async def invoke_a2a_agent_jsonrpc(
         # Extract authentication and request context (shared with /invoke endpoint)
         context = _extract_a2a_request_context(request, user)
 
-        # Wrap the JSON-RPC request in ContextForge's internal format
+        # Wrap the JSON-RPC request in MCP Gateway's internal format
         # The full JSON-RPC request becomes the parameters
         parameters = body
 

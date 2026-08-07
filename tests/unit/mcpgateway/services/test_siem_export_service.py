@@ -79,6 +79,31 @@ def test_cef_and_leef_formatting(monkeypatch):
     assert "correlationId=corr-1" in leef
 
 
+@pytest.mark.parametrize(
+    ("vendor", "product", "escaped_vendor", "escaped_product"),
+    [
+        ("In|TimeTec", "MCP|Gateway", r"In\|TimeTec", r"MCP\|Gateway"),
+        ("InTime\nTec", "MCP\r\nGateway", "InTimeTec", "MCPGateway"),
+        (r"In\TimeTec", r"MCP\Gateway", r"In\\TimeTec", r"MCP\\Gateway"),
+    ],
+)
+def test_cef_and_leef_escape_configured_header_identity(monkeypatch, vendor, product, escaped_vendor, escaped_product):
+    monkeypatch.setattr(svc.settings, "siem_vendor_name", vendor)
+    monkeypatch.setattr(svc.settings, "app_name", product)
+    service = svc.SIEMExportService()
+    event = {"event_type": "security_test"}
+
+    cef = service._to_cef(event)  # pylint: disable=protected-access
+    leef = service._to_leef(event)  # pylint: disable=protected-access
+
+    assert cef.startswith(f"CEF:0|{escaped_vendor}|{escaped_product}|")
+    assert leef.startswith(f"LEEF:2.0|{escaped_vendor}|{escaped_product}|")
+    assert "\n" not in cef
+    assert "\r" not in cef
+    assert "\n" not in leef
+    assert "\r" not in leef
+
+
 @pytest.mark.asyncio
 async def test_add_destination_respects_allowlist(monkeypatch):
     monkeypatch.setattr(svc.settings, "siem_export_enabled", False)

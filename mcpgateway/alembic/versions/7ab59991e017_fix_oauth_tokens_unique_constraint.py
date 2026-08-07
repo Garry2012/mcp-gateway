@@ -10,7 +10,7 @@ idx_oauth_gateway_user on (gateway_id, app_user_email), but failed to drop the
 original UniqueConstraint 'unique_gateway_user' on (gateway_id, user_id).
 
 This causes multi-user OAuth flows to fail because the old constraint prevents
-multiple ContextForge users from storing tokens for the same OAuth provider user.
+multiple MCP Gateway users from storing tokens for the same OAuth provider user.
 
 This migration:
 1. Drops the old UniqueConstraint 'unique_gateway_user' on (gateway_id, user_id)
@@ -163,7 +163,7 @@ def downgrade() -> None:
                 f"Cannot downgrade migration 7ab59991e017: "
                 f"{len(duplicate_check)} duplicate (gateway_id, user_id) pairs exist.\n\n"
                 f"This is expected after the upgrade enabled multi-user OAuth support. "
-                f"Multiple ContextForge users can now store tokens for the same OAuth provider user.\n\n"
+                f"Multiple MCP Gateway users can now store tokens for the same OAuth provider user.\n\n"
                 f"Duplicate pairs found:\n{duplicate_details}\n\n"
                 f"To downgrade, you must manually resolve these duplicates first.\n"
                 f"See docs/docs/manage/dcr.md for resolution steps:\n"

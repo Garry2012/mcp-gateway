@@ -1,7 +1,7 @@
 {
   "realm": "mcp-gateway",
   "enabled": true,
-  "displayName": "ContextForge Development Realm",
+  "displayName": "MCP Gateway Development Realm",
   "loginWithEmailAllowed": true,
   "duplicateEmailsAllowed": false,
   "verifyEmail": false,
@@ -11,15 +11,15 @@
     "realm": [
       {
         "name": "gateway-admin",
-        "description": "Maps to platform_admin in ContextForge"
+        "description": "Maps to platform_admin in MCP Gateway"
       },
       {
         "name": "gateway-developer",
-        "description": "Maps to developer in ContextForge"
+        "description": "Maps to developer in MCP Gateway"
       },
       {
         "name": "gateway-viewer",
-        "description": "Maps to viewer in ContextForge"
+        "description": "Maps to viewer in MCP Gateway"
       }
     ]
   },
@@ -46,7 +46,7 @@
   "clients": [
     {
       "clientId": "mcp-gateway",
-      "name": "ContextForge",
+      "name": "MCP Gateway",
       "description": "Preconfigured docker-compose client for local SSO testing",
       "enabled": true,
       "protocol": "openid-connect",

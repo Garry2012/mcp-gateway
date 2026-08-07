@@ -7,7 +7,7 @@
 
   PURPOSE
   -------
-  Embeds the ContextForge admin UI inside an <iframe> and runs a suite of
+  Embeds the MCP Gateway admin UI inside an <iframe> and runs a suite of
   JavaScript assertions in the HOST page to verify that:
 
     1. The innerHTML guard (PR #3129) strips inline onclick attributes.
@@ -20,7 +20,7 @@
   This file MUST be served from the same origin as the admin UI so that the
   host page can access the iframe's DOM (same-origin policy).
 
-  1. Start the ContextForge server:
+  1. Start the MCP Gateway server:
        make dev          # http://localhost:8000
        # or
        make serve        # http://localhost:4444
@@ -244,7 +244,7 @@
   <iframe
     id="admin-frame"
     sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals"
-    title="ContextForge Admin UI (iframe test target)">
+    title="MCP Gateway Admin UI (iframe test target)">
   </iframe>
 </div>
 

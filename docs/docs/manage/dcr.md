@@ -1,6 +1,6 @@
 # Dynamic Client Registration (DCR)
 
-Dynamic Client Registration (DCR) is an OAuth 2.0 extension that enables automatic client registration without manual configuration. This guide explains how to configure and use DCR with ContextForge for streamable HTTP servers.
+Dynamic Client Registration (DCR) is an OAuth 2.0 extension that enables automatic client registration without manual configuration. This guide explains how to configure and use DCR with MCP Gateway for streamable HTTP servers.
 
 ## Overview
 
@@ -41,7 +41,7 @@ MCPGATEWAY_DCR_DEFAULT_SCOPES="mcp:read"                 # Default scopes to req
 MCPGATEWAY_DCR_ALLOWED_ISSUERS=""                        # Optional allowlist of issuer URLs (empty = allow any)
 MCPGATEWAY_DCR_TOKEN_ENDPOINT_AUTH_METHOD="client_secret_basic" # Auth method: client_secret_basic or client_secret_post
 MCPGATEWAY_DCR_METADATA_CACHE_TTL=3600                   # AS metadata cache TTL in seconds (default: 1 hour)
-MCPGATEWAY_DCR_CLIENT_NAME_TEMPLATE="ContextForge ({gateway_name})" # Client name template for registration
+MCPGATEWAY_DCR_CLIENT_NAME_TEMPLATE="MCP Gateway ({gateway_name})" # Client name template for registration
 MCPGATEWAY_DCR_REQUEST_REFRESH_TOKEN_WHEN_UNSUPPORTED=false       # Request refresh_token when AS omits grant_types_supported
 
 # OAuth Settings (used by DCR)
@@ -88,7 +88,7 @@ POST https://auth.example.com/register
 Content-Type: application/json
 
 {
-  "client_name": "ContextForge (GitHub MCP)",
+  "client_name": "MCP Gateway (GitHub MCP)",
   "redirect_uris": ["https://gateway.example.com/oauth/callback"],
   "grant_types": ["authorization_code"],
   "response_types": ["code"],
@@ -109,6 +109,13 @@ The AS responds with registered credentials:
 ```
 
 Gateway stores these in the `registered_oauth_clients` table (encrypted).
+
+!!! note "Client-name compatibility"
+    Existing registrations retain the `client_name` stored by the authorization
+    server, while new registrations use the current
+    `MCPGATEWAY_DCR_CLIENT_NAME_TEMPLATE`. This mixed display state does not affect
+    authentication: existing client IDs and secrets remain valid. Recreate a
+    registration only when you intentionally want its displayed client name updated.
 
 !!! note "Refresh Token Behavior"
     By default, `refresh_token` is only requested if the AS metadata explicitly includes `"refresh_token"` in `grant_types_supported`. This prevents DCR failures with strict AS servers. To request `refresh_token` when AS metadata omits `grant_types_supported`, set `MCPGATEWAY_DCR_REQUEST_REFRESH_TOKEN_WHEN_UNSUPPORTED=true`.
@@ -131,12 +138,12 @@ graph LR
     HyprMCP[HyprContextForge]
     Dex[Dex]
     IdP[Federated IdP<br/>GitHub/Google/LDAP]
-    ContextForge[ContextForge]
+    MCPGateway[MCP Gateway]
 
     Client --> HyprMCP
     HyprMCP --> Dex
     Dex -.-> IdP
-    HyprMCP --> ContextForge
+    HyprMCP --> MCPGateway
 ```
 
 ---
@@ -268,7 +275,7 @@ CREATE TABLE oauth_tokens (
     id VARCHAR(36) PRIMARY KEY,
     gateway_id VARCHAR(36) NOT NULL,
     user_id VARCHAR(255) NOT NULL,              -- OAuth provider identity
-    app_user_email VARCHAR(255) NOT NULL,       -- ContextForge user identity
+    app_user_email VARCHAR(255) NOT NULL,       -- MCP Gateway user identity
     access_token TEXT NOT NULL,
     refresh_token TEXT,
     token_type VARCHAR(50),
@@ -285,7 +292,7 @@ CREATE TABLE oauth_tokens (
 !!! note "Index Redundancy"
     Earlier versions created a separate unique index `idx_oauth_gateway_user` on `(gateway_id, app_user_email)`, but migration `7ab59991e017` removes it as redundant—the `UNIQUE` constraint already creates an index automatically.
 
-Historical note: older deployments used `unique_gateway_user` on `(gateway_id, user_id)`. That constraint was removed because multiple ContextForge users can legitimately map to the same upstream OAuth provider `user_id`.
+Historical note: older deployments used `unique_gateway_user` on `(gateway_id, user_id)`. That constraint was removed because multiple MCP Gateway users can legitimately map to the same upstream OAuth provider `user_id`.
 
 ---
 
@@ -296,7 +303,7 @@ Historical note: older deployments used `unique_gateway_user` on `(gateway_id, u
 
 ### Prerequisites
 
-Migration 7ab59991e017 enables multi-user OAuth support, allowing multiple ContextForge users to store tokens for the same OAuth provider `user_id`. If you need to downgrade, you must first resolve any duplicate `(gateway_id, user_id)` pairs.
+Migration 7ab59991e017 enables multi-user OAuth support, allowing multiple MCP Gateway users to store tokens for the same OAuth provider `user_id`. If you need to downgrade, you must first resolve any duplicate `(gateway_id, user_id)` pairs.
 
 ### Step 1: Check for Duplicates
 
@@ -348,7 +355,7 @@ WHERE id IN (
 
 #### Option B: Keep Specific User's Token
 
-Keep tokens for a specific ContextForge user (e.g., admin):
+Keep tokens for a specific MCP Gateway user (e.g., admin):
 
 ```sql
 DELETE FROM oauth_tokens
@@ -396,7 +403,7 @@ alembic downgrade c9f8e7d6a4b3
 
 After downgrading:
 
-- Only ONE ContextForge user can store tokens per OAuth provider `user_id` per gateway
+- Only ONE MCP Gateway user can store tokens per OAuth provider `user_id` per gateway
 - If multiple users need access to the same gateway, they must use different OAuth provider accounts
 - Users whose tokens were removed will need to re-authorize
 

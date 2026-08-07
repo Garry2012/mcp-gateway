@@ -3,8 +3,8 @@
 Copyright contributors to the MCP-CONTEXT-FORGE project
 SPDX-License-Identifier: Apache-2.0
 
-Admin UI Routes for ContextForge AI Gateway.
-This module contains all the administrative UI endpoints for ContextForge AI Gateway.
+Admin UI Routes for MCP Gateway.
+This module contains all the administrative UI endpoints for MCP Gateway.
 It provides a comprehensive interface for managing servers, tools, resources,
 prompts, gateways, and roots through RESTful API endpoints. The module handles
 all aspects of CRUD operations for these entities, including creation,
@@ -2276,7 +2276,7 @@ async def get_overview_partial(
     """Render the overview dashboard partial HTML template.
 
     This endpoint returns a rendered HTML partial containing an architecture
-    diagram showing ContextForge inputs (Virtual Servers), middleware (Plugins),
+    diagram showing MCP Gateway inputs (Virtual Servers), middleware (Plugins),
     and outputs (A2A Agents, Gateways, Tools, etc.) along with key metrics.
 
     Args:
@@ -16628,7 +16628,7 @@ async def admin_test_a2a_agent(
         agent = await a2a_service.get_agent(db, agent_id, user_email=invoke_user_email, token_teams=token_teams)
 
         # Parse request body to get user-provided query
-        default_message = "Hello from ContextForge Admin UI test!"
+        default_message = "Hello from MCP Gateway Admin UI test!"
         try:
             body = await _read_request_json(request)
             # Use 'or' to also handle empty string queries

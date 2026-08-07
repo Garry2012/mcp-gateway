@@ -3,7 +3,7 @@
 Copyright contributors to the MCP-CONTEXT-FORGE project
 SPDX-License-Identifier: Apache-2.0
 
-Plugin service for managing and querying ContextForge plugins.
+Plugin service for managing and querying MCP Gateway plugins.
 This module provides a service layer for accessing plugin information,
 statistics, and configuration from the PluginManager.
 """

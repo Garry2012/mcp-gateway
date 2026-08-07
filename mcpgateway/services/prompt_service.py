@@ -388,7 +388,7 @@ class PromptService(BaseService):
             meta_data: Optional metadata dict forwarded as ``_meta`` in the upstream MCP request.
 
         Returns:
-            Prompt result normalized into ContextForge models.
+            Prompt result normalized into MCP Gateway models.
 
         Raises:
             PromptError: If the gateway prompt cannot be fetched.

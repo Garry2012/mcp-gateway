@@ -3,7 +3,7 @@
 Copyright contributors to the MCP-CONTEXT-FORGE project
 SPDX-License-Identifier: Apache-2.0
 
-Signal handlers for ContextForge Gateway.
+Signal handlers for MCP Gateway.
 
 Provides SIGHUP handling for certificate rotation without restart.
 """
