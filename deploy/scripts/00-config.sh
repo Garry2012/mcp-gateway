@@ -45,6 +45,15 @@ PG_VERSION="${PG_VERSION:-16}"
 DB_POOL_SIZE="${DB_POOL_SIZE:-20}"
 DB_MAX_OVERFLOW="${DB_MAX_OVERFLOW:-5}"
 
+# Gunicorn workers MUST be set explicitly. run-gunicorn.sh otherwise computes
+# `nproc * 2 + 1` (capped at 16), and `nproc` inside a container reports the
+# HOST's CPU count, not the cgroup limit set by --cpu. On a 1 CPU / 2Gi
+# container that spawns up to 16 workers, each loading the full application,
+# and the container OOMs in a crash loop:
+#     Worker (pid:280) was sent SIGKILL! Perhaps out of memory?
+# Keep roughly 2 workers per CPU, and raise APP_MEMORY before raising this.
+GUNICORN_WORKERS="${GUNICORN_WORKERS:-2}"
+
 # Container app.
 APP_NAME_AZ="${APP_NAME_AZ:-mcp-gateway}"
 IMAGE_REPO="${IMAGE_REPO:-mcp-gateway}"
