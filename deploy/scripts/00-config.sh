@@ -35,6 +35,25 @@ PG_TIER="${PG_TIER:-Burstable}"
 PG_STORAGE_GB="${PG_STORAGE_GB:-32}"
 PG_VERSION="${PG_VERSION:-16}"
 
+# Connection pool sizing MUST be matched to the server tier. config.py defaults
+# to db_pool_size=200 + db_max_overflow=10, but a Burstable B1ms server allows
+# max_connections=50 in total. Left at the default the app exhausts the server
+# and every other client is refused with:
+#   "remaining connection slots are reserved for roles with the SUPERUSER attribute"
+# Budget ~20 for the app, leaving headroom for admin tools and health probes.
+# Raise these in step with the tier (see docs: >50 req/s wants a larger SKU).
+DB_POOL_SIZE="${DB_POOL_SIZE:-20}"
+DB_MAX_OVERFLOW="${DB_MAX_OVERFLOW:-5}"
+
+# Gunicorn workers MUST be set explicitly. run-gunicorn.sh otherwise computes
+# `nproc * 2 + 1` (capped at 16), and `nproc` inside a container reports the
+# HOST's CPU count, not the cgroup limit set by --cpu. On a 1 CPU / 2Gi
+# container that spawns up to 16 workers, each loading the full application,
+# and the container OOMs in a crash loop:
+#     Worker (pid:280) was sent SIGKILL! Perhaps out of memory?
+# Keep roughly 2 workers per CPU, and raise APP_MEMORY before raising this.
+GUNICORN_WORKERS="${GUNICORN_WORKERS:-2}"
+
 # Container app.
 APP_NAME_AZ="${APP_NAME_AZ:-mcp-gateway}"
 IMAGE_REPO="${IMAGE_REPO:-mcp-gateway}"
@@ -49,6 +68,24 @@ APP_MAX_REPLICAS="${APP_MAX_REPLICAS:-1}"
 # Product identity (see FORK-CUSTOMIZATIONS.md).
 BRAND_NAME="${BRAND_NAME:-MCP Gateway}"
 PLATFORM_ADMIN_EMAIL="${PLATFORM_ADMIN_EMAIL:-admin@intimetec.com}"
+
+# --- OAuth / Dynamic Client Registration ------------------------------------
+# APP_DOMAIN is the gateway's own public URL. It defaults to
+# http://localhost:4444 in config.py, and OAuth callback URLs and production
+# CORS origins are both derived from it - so leaving it unset on a deployed
+# instance makes the gateway hand out localhost redirect URIs.
+# Resolved from the live app when not supplied.
+APP_DOMAIN="${APP_DOMAIN:-}"
+
+# Upstream MCP servers the gateway may dynamically register itself with.
+# DCR_ALLOWED_ISSUERS is an allowlist and is fail-closed: an issuer absent from
+# it is refused. Keep this OUT of a local .env - it makes tests in
+# tests/unit/mcpgateway/services/test_dcr_service.py fail, because they use
+# https://as.example.com as a fixture issuer and expect a different error.
+DCR_ENABLED="${DCR_ENABLED:-true}"
+DCR_AUTO_REGISTER_ON_MISSING_CREDENTIALS="${DCR_AUTO_REGISTER_ON_MISSING_CREDENTIALS:-true}"
+DCR_ALLOWED_ISSUERS="${DCR_ALLOWED_ISSUERS:-[\"https://sun-tv-7006933048.zohomcp.com.au\"]}"
+DCR_TOKEN_ENDPOINT_AUTH_METHOD="${DCR_TOKEN_ENDPOINT_AUTH_METHOD:-client_secret_post}"
 
 # Key Vault secret names. Values are never stored in this repo.
 KV_JWT_SECRET="${KV_JWT_SECRET:-mcpgw-jwt-secret}"
