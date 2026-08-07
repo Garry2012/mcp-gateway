@@ -49,7 +49,7 @@ Container Apps, not AKS. See `deploy/README.md` for the "why" and the traps.
 - [x] Scripted, idempotent, re-runnable: `deploy/scripts/00`–`04`
 - [x] Secrets via Key Vault `keyvaultref` + UAMI — no credential in repo, CLI history, or app config
 - [x] Postgres Flexible Server `vcare-mcpgw-db`, password rotated
-- [x] `04-smoke.sh` — 6 assertions against real HTTP, all green
+- [x] `04-smoke.sh` — 7 assertions against real HTTP, all green
 
 ### Three container-constraint bugs found in production
 
@@ -65,6 +65,31 @@ Each is now pinned in `deploy/scripts/00-config.sh` **with the reason in a comme
 Also: `Containerfile` — two `COPY --chmod=0755` split into `COPY` + `RUN chmod`.
 ACR's classic builder has no BuildKit; **without this the image will not build at all.**
 `02-build-images.sh` guards against the pattern coming back via an upstream merge.
+
+### A fourth: the deploy that silently did nothing
+
+`IMAGE_TAG` was the fixed, mutable tag `v1`. Redeploying the same tag produces a container
+app template identical to the deployed one, and in Single revision mode Container Apps only
+rolls a revision when the template changes. So the ACR build succeeded, the tag moved to the
+new digest, all three scripts exited `0` — and the old replica kept serving:
+
+```
+revision mcp-gateway--0000005   created 04:41:13Z
+image tag v1 (sha256:8d86d7bd)  pushed  07:18:12Z   # 2h37m AFTER the replica started
+```
+
+The smoke test could not catch it: its stale-image guards assert on the brand in the login
+page, which cannot tell two post-rebrand builds apart. All six checks passed against the
+stale image and declared success.
+
+`IMAGE_TAG` now defaults to the short commit SHA, so every deploy is a distinct template and
+the running image is traceable to a commit. `04-smoke.sh` gained assertion #0: a revision
+that is both **active and Running** must be serving the image this deploy built. It reads the
+revision, not the app template — the app template reflects desired state the moment
+`az containerapp update` returns, so it reports the new image while the old revision is still
+answering, and stays green even if the new revision provisions then crashes.
+
+Both directions were verified against the live deployment; `IMAGE_TAG=v1` now exits 1.
 
 ### Still open
 
@@ -91,6 +116,72 @@ First real federated backend. Proves the DCR + OAuth path end to end.
 **not** in a local `.env` — putting it there breaks
 `tests/unit/mcpgateway/services/test_dcr_service.py` (9 failures), which uses
 `https://as.example.com` as a fixture issuer and expects a different error.
+
+---
+
+## Observability ✅ ENABLED AND WORKING
+
+`OBSERVABILITY_ENABLED=true` on Azure. Traces and spans persist to Postgres and the Admin UI
+reads them from there — **no collector, no key, no external service**. Set in
+`deploy/scripts/00-config.sh` so a redeploy cannot silently drop it.
+
+Tracing is scoped by `observability_include_paths`, an **allowlist** covering `/rpc`, `/sse`,
+`/message`, `/mcp`, `/a2a`. Page loads and static assets are never traced, so DB load tracks
+tool calls rather than traffic.
+
+### The UI was completely broken, and it was not obvious
+
+The backend wrote traces correctly the whole time. The panel rendered blank and made **no
+network request at all**, which reads as a backend or data problem. Root cause: the admin UI
+bundles the CSP-safe Alpine build (`@alpinejs/csp`), whose expression parser is far stricter
+than the default build — and **it fails silently**, initialising a component as `{}` without
+raising.
+
+Established empirically in the browser (`Alpine.evaluate` uses a *different* code path than
+directive compilation and reports false negatives — trust the live error count, not a probe):
+
+| Form | CSP build |
+|---|---|
+| `{ a: 1, cfg: { x: 2 } }` — plain data, nested | parses |
+| property access, method calls, ternary, comparison, concat, index | fine in directives |
+| `{ a: 1, greet() {…} }` — any function in an inline `x-data` | **whole object fails** |
+| `x-data="createFooController()"` where the factory is on `window` | **fails** — see below |
+| optional chaining `a?.b` | **fails** — `Unexpected token: PUNCTUATION "."` |
+| template literal `` `${a} ${b}` `` | **fails** — `Unexpected token: OPERATOR` |
+
+`x-data` resolves names against the `Alpine.data()` registry and never evaluates globals. The
+call form itself is fine — `overflowMenu('table')` works, arguments and all — but only for a
+**registered** name.
+
+Six templates were affected. Fixes: five controllers moved to `admin_ui/components/` and
+registered; 12 optional-chaining and 10 template-literal directives rewritten; `tabs.js` read
+`window.chartRegistry` where `app.js` defines `Admin.chartRegistry`, and the resulting
+TypeError escaped the tab-switch handler ("Failed to switch to <name> tab").
+
+Measured on a headless browser, before → after: **page errors 47 → 0**, trace rows 1 → 6,
+and the `/traces` request fires for the first time. Verified against Azure too: **13 checks,
+0 failures**.
+
+`tests/unit/mcpgateway/test_template_alpine_csp.py` pins all of it — no inline `x-data` may
+contain a function, no directive may use optional chaining or template literals, `x-data`
+names must resolve to a registered component, `window.chartRegistry` must not be read, and
+templates may not link stylesheets that are not shipped. **Every guard was verified to fail
+on the pre-fix code**, not merely to pass today. That matters because all these defects were
+invisible failures, and because upstream still writes in the pre-CSP style.
+
+### What tracing does and does not give you
+
+A trace records `tool.name`, `integration_type`, timing, `success`, and `arguments_count` —
+**the count, not the arguments**. Payload capture (`OTEL_CAPTURE_INPUT_SPANS`) is set but
+**inert**: there are two separate span writes, and only the OpenTelemetry one honours it.
+
+| Where | Attributes | Destination |
+|---|---|---|
+| `tool_service.py:5315` | hardcoded six fields, never payloads | Postgres → Admin UI |
+| `tool_service.py:5351` | adds `user.email`, `team.scope`, payloads when enabled | OTLP exporter only |
+
+So the built-in UI will **never** show arguments regardless of configuration. That gap is
+Milestone 3.
 
 ---
 
@@ -121,17 +212,38 @@ if we end up writing our own docs. Do not start without an explicit decision.
 
 ---
 
-## Milestone 3 — Tool call visibility — NOT STARTED
+## Milestone 3 — Tool call visibility — NOT STARTED (now the top priority)
 
 Requirement: see every tool an agent calls, with arguments and results.
+This is the original ask, and it is still unmet — observability gives you *that* a call
+happened and how long it took, never *what was in it*.
 
-Today: payloads are visible at the plugin boundary (`tool_pre_invoke`/`tool_post_invoke`)
-but never persisted. `tool_metrics` stores timing only; `trace_tool_invocation` redacts
-`password|token|key|secret` and keeps only status_code + response_size.
+Ground already established, so Gate 0 does not start from zero:
 
-- [ ] Gate 0 — scope: retention, storage, replay in/out
-- [ ] Gate 1 — design as a **plugin**, not a core change
-- [ ] Build: capture plugin with `correlation_id`, configurable redaction (`full_capture` for dev)
+- The DB span (`tool_service.py:5315`) writes a **hardcoded** attribute list and can never
+  carry payloads. The Admin UI reads only this. Widening it is the shortest path to the
+  requirement.
+- The OTel span (`:5351`) does honour `OTEL_CAPTURE_INPUT_SPANS` / `OTEL_CAPTURE_OUTPUT_SPANS`
+  (both already set to `tool.invoke`), but only reaches an OTLP backend such as Langfuse —
+  which means an external service and a key.
+- Output capture was gated on `success`, so failed calls — the ones worth inspecting —
+  recorded nothing. **Fixed**; the gate is gone.
+- `trace_tool_invocation()` (`observability_service.py:722`) is the purpose-built helper and
+  has **zero production call sites**. Its docstring stores only status_code + response_size.
+- Payloads are visible at the plugin boundary (`tool_pre_invoke`/`tool_post_invoke`) but
+  nothing persists them.
+- Redaction already exists: `serialize_trace_payload` / `sanitize_trace_attribute_value` in
+  `utils/trace_redaction.py`. Reuse it; do not write another.
+
+- [ ] Gate 0 — scope: retention, storage, replay in/out. Decide **DB span vs Langfuse** first;
+      everything else follows from that one choice
+- [ ] Gate 1 — design as a **plugin** where possible, not a core change
+- [ ] Build: capture with `correlation_id`, configurable redaction (`full_capture` for dev)
+
+A worked example of why this matters: diagnosing a failing Twilio tool took an hour and
+direct API calls, because the gateway reported `HTTP 400` and discarded the upstream's
+`{"code":21910,"message":…}`. That specific discard is now fixed, but the general case —
+"what arguments did the agent actually send?" — is exactly this milestone.
 
 ---
 
@@ -167,11 +279,51 @@ For `.secrets.baseline` conflicts always take `main`'s version.
 
 Confining the brand delta to as few files as possible is what keeps this cheap. Do not spread it.
 
+### Every bug we fixed is upstream's, not ours
+
+Verified against `upstream/main` file-by-file. Our fork had **never** touched `tabs.js` or any
+observability template before these fixes; the only prior change to `tool_service.py` was
+docstring brand text. Most are unreachable until `OBSERVABILITY_ENABLED=true`, which defaults
+to false — that is why upstream has not hit them.
+
+| Our fix | Upstream issue |
+|---|---|
+| Dashboard blank (inline `x-data` + CSP) | **#6054** open — same file, same lines, no PR |
+| `window.chartRegistry` tab-switch failure | **#6055** open — cites `tabs.js:357-360`, no PR |
+| REST error body discarded | **#6027** open — has open **PR #6043**, different approach |
+| `auth-animations.css` 404 | **#5999** open, no PR |
+| Sub-views blank (`createXController` under CSP) | **unreported** — #3966/#3967 fixed the same *symptom* pre-CSP; PR #5111's CSP migration regressed it in a way that fix cannot cover |
+| Optional chaining / template literals in directives | **unreported** — #5155 fixed only the Roots `x-data` wrapper; the dead View/Edit/Export buttons and the `:style` binding are still live upstream |
+| Output capture gated on `success` | **unreported** |
+
+- [ ] Decide whether to upstream. No matched issue has a merged fix, so nothing is redundant.
+      #6054/#6055 were filed by a third party two days before our fixes and are file-line
+      accurate — **link to them, do not file duplicates**. #6027 needs reconciling against
+      PR #6043, which enumerates `error`/`errors`/`message`/`detail` envelopes with a
+      truncated raw-body fallback where we serialise the parsed body into
+      `structured_content["body"]`.
+
+Until this is upstreamed, expect recurring merge friction: upstream keeps writing these
+templates in the pre-CSP style, and our guard tests will fail the merge. That is the intended
+behaviour — a loud failure beats a silently blank dashboard — but it is ongoing cost.
+
+**Correction to an earlier claim:** `auth-animations.css` was described in commit
+`ca685d1a3` as having "never existed in this repo or upstream". Wrong — it existed and was
+deleted in `9dfdcf545` during the Tailwind migration, leaving the `<link>` tags orphaned.
+
 ### Housekeeping
 
 - [x] Delete merged branches — remote is now `main` only. All were verified as zero-unique-commit
       ancestors of `main` before deletion.
 - [ ] Rotate the local `:55040` dev instance password (was pasted into a chat transcript)
+- [ ] Rotate the Twilio auth token, or split the accounts. `send_payment_link` on Azure reuses
+      the credential from tool-control's DB, so both deployments now share one token and
+      rotating it in Twilio breaks both.
+
+The `send_payment_link` template `intimetec_mock_paymentlink` builds its own button URL as
+`https://buy.stripe.com/{{1}}`, so variable `1` is a **suffix only** — a full URL gets
+concatenated and rejected. `To` must carry the `whatsapp:` prefix or Twilio returns `21910`
+("From and To should be of the same channel"). Both mistakes surface only as `HTTP 400`.
 
 `gh` had no default repo in this clone and resolved to `IBM/mcp-context-forge`, so a PR was
 nearly opened against upstream. Now pinned with `gh repo set-default Garry2012/mcp-gateway`.
