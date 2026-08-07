@@ -169,9 +169,13 @@ Confining the brand delta to as few files as possible is what keeps this cheap. 
 
 ### Housekeeping
 
-- [ ] Delete merged branches: `feature/ui-rebrand-mcp-gateway`, `feat/azure-deploy-scripts`,
-      `chore/merge-upstream`
+- [x] Delete merged branches — remote is now `main` only. All were verified as zero-unique-commit
+      ancestors of `main` before deletion.
 - [ ] Rotate the local `:55040` dev instance password (was pasted into a chat transcript)
+
+`gh` had no default repo in this clone and resolved to `IBM/mcp-context-forge`, so a PR was
+nearly opened against upstream. Now pinned with `gh repo set-default Garry2012/mcp-gateway`.
+A fresh clone will need that again — or pass `--repo Garry2012/mcp-gateway` explicitly.
 
 ---
 
