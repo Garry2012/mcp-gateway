@@ -368,6 +368,7 @@ exclude = ["build", ".venv", ".cache", "tests/async/profiles"]
 ignore = [
     "docs/**",
     "tests/**",
+    "deploy/**",
     ".github/**",
     "Makefile",
     "mcpgateway/admin_ui/**",

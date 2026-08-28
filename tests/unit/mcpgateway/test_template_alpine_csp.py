@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Guard admin templates against CSP-incompatible Alpine ``x-data`` declarations.
-
-Copyright 2025
+"""Location: ./tests/unit/mcpgateway/test_template_alpine_csp.py
+Copyright contributors to the MCP-CONTEXT-FORGE project
 SPDX-License-Identifier: Apache-2.0
 
+Guard admin templates against CSP-incompatible Alpine ``x-data`` declarations.
 The admin UI bundles the CSP-safe Alpine build (``@alpinejs/csp``, imported in
 ``mcpgateway/admin_ui/alpine-setup.js``). Its expression parser accepts object
 literals made of plain data only. A single function - method shorthand
