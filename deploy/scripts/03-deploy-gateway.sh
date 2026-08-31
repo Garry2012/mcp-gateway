@@ -40,10 +40,10 @@ if [ -z "$RESOLVED_APP_DOMAIN" ]; then
 fi
 
 ENV_VARS=(
-  "JWT_SECRET_KEY=secretref:jwt-secret"
-  "AUTH_ENCRYPTION_SECRET=secretref:enc-secret"
-  "DATABASE_URL=secretref:db-url"
-  "PLATFORM_ADMIN_PASSWORD=secretref:admin-password"
+  "JWT_SECRET_KEY=secretref:jwt-secret"  # pragma: allowlist secret
+  "AUTH_ENCRYPTION_SECRET=secretref:enc-secret"  # pragma: allowlist secret
+  "DATABASE_URL=secretref:db-url"  # pragma: allowlist secret
+  "PLATFORM_ADMIN_PASSWORD=secretref:admin-password"  # pragma: allowlist secret
   "PLATFORM_ADMIN_EMAIL=${PLATFORM_ADMIN_EMAIL}"
   "APP_NAME=${BRAND_NAME}"
   "HOST=0.0.0.0"

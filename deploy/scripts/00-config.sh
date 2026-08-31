@@ -116,15 +116,15 @@ APP_DOMAIN="${APP_DOMAIN:-}"
 # tests/unit/mcpgateway/services/test_dcr_service.py fail, because they use
 # https://as.example.com as a fixture issuer and expect a different error.
 DCR_ENABLED="${DCR_ENABLED:-true}"
-DCR_AUTO_REGISTER_ON_MISSING_CREDENTIALS="${DCR_AUTO_REGISTER_ON_MISSING_CREDENTIALS:-true}"
+DCR_AUTO_REGISTER_ON_MISSING_CREDENTIALS="${DCR_AUTO_REGISTER_ON_MISSING_CREDENTIALS:-true}"  # pragma: allowlist secret
 DCR_ALLOWED_ISSUERS="${DCR_ALLOWED_ISSUERS:-[\"https://sun-tv-7006933048.zohomcp.com.au\"]}"
 DCR_TOKEN_ENDPOINT_AUTH_METHOD="${DCR_TOKEN_ENDPOINT_AUTH_METHOD:-client_secret_post}"
 
 # Key Vault secret names. Values are never stored in this repo.
-KV_JWT_SECRET="${KV_JWT_SECRET:-mcpgw-jwt-secret}"
-KV_ENC_SECRET="${KV_ENC_SECRET:-mcpgw-auth-encryption-secret}"
+KV_JWT_SECRET="${KV_JWT_SECRET:-mcpgw-jwt-secret}"  # pragma: allowlist secret
+KV_ENC_SECRET="${KV_ENC_SECRET:-mcpgw-auth-encryption-secret}"  # pragma: allowlist secret
 KV_DB_URL="${KV_DB_URL:-mcpgw-database-url}"
-KV_ADMIN_PASSWORD="${KV_ADMIN_PASSWORD:-mcpgw-platform-admin-password}"
+KV_ADMIN_PASSWORD="${KV_ADMIN_PASSWORD:-mcpgw-platform-admin-password}"  # pragma: allowlist secret
 
 # --- Base images -------------------------------------------------------------
 # MUST be passed explicitly to `az acr build`. The Containerfile declares

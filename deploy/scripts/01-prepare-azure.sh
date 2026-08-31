@@ -41,7 +41,7 @@ if az postgres flexible-server show -n "$PG_SERVER" -g "$RESOURCE_GROUP" -o none
   ok "already exists"
   PG_PASSWORD=""
 else
-  PG_PASSWORD="$(python3 -c "import secrets,string; a=string.ascii_letters+string.digits; print('Mg'+''.join(secrets.choice(a) for _ in range(28)))")"
+  PG_PASSWORD="$(python3 -c "import secrets,string; a=string.ascii_letters+string.digits; print('Mg'+''.join(secrets.choice(a) for _ in range(28)))")"  # pragma: allowlist secret
   # NOTE: the CLI echoes the password in its creation output. Redirected to
   # /dev/null so it does not land in terminal scrollback or CI logs.
   az postgres flexible-server create \

@@ -145,6 +145,7 @@ from mcpgateway.schemas import (
     CursorPaginatedServersResponse,
     CursorPaginatedToolsResponse,
     GatewayCreate,
+    GatewayImpactPreview,
     GatewayRead,
     GatewayRefreshResponse,
     GatewayUpdate,
@@ -180,7 +181,15 @@ from mcpgateway.services.content_security import ContentPatternError, ContentSiz
 from mcpgateway.services.dataplane_publisher import DataplanePublisherService
 from mcpgateway.services.email_auth_service import EmailAuthService
 from mcpgateway.services.export_service import ExportError, ExportService
-from mcpgateway.services.gateway_service import GatewayConnectionError, GatewayDuplicateConflictError, GatewayError, GatewayLookupConflictError, GatewayNameConflictError, GatewayNotFoundError
+from mcpgateway.services.gateway_service import (
+    GatewayConnectionError,
+    GatewayCredentialError,
+    GatewayDuplicateConflictError,
+    GatewayError,
+    GatewayLookupConflictError,
+    GatewayNameConflictError,
+    GatewayNotFoundError,
+)
 from mcpgateway.services.import_service import ConflictStrategy, ImportConflictError
 from mcpgateway.services.import_service import ImportError as ImportServiceError
 from mcpgateway.services.import_service import ImportService, ImportValidationError
@@ -219,10 +228,11 @@ from mcpgateway.utils.csp_nonce import get_csp_nonce_from_request
 from mcpgateway.utils.error_formatter import ErrorFormatter, sanitize_validation_error_for_log, should_expose_error_details
 from mcpgateway.utils.header_filtering import filter_sensitive_headers as _filter_sensitive_headers
 from mcpgateway.utils.internal_http import internal_loopback_base_url, internal_loopback_verify
+from mcpgateway.utils.jq_runner import shutdown_jq_pool, start_jq_pool
 from mcpgateway.utils.metadata_capture import MetadataCapture
 from mcpgateway.utils.orjson_response import ORJSONResponse
 from mcpgateway.utils.passthrough_headers import set_global_passthrough_headers
-from mcpgateway.utils.paths import resolve_root_path
+from mcpgateway.utils.paths import replace_api_path_alias, resolve_root_path
 from mcpgateway.utils.redis_client import close_redis_client, get_redis_client, is_redis_available
 from mcpgateway.utils.redis_isready import wait_for_redis_ready
 from mcpgateway.utils.retry_manager import ResilientHttpClient
@@ -1468,6 +1478,13 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     await logging_service.initialize()
     logger.info("Starting MCP Gateway services")
 
+    # Start the sandboxed jq worker pool before any service that might invoke
+    # tool response filters is initialised. A failure here (BrokenProcessPool,
+    # TimeoutError, or OSError from the sandbox warm-up on Linux/subprocess
+    # mode) is a hard startup failure and must propagate rather than letting
+    # the gateway boot with a broken or absent sandbox.
+    start_jq_pool()
+
     # Wait for the database to be ready, then run bootstrap (alembic + seed).
     # This used to run at module-import time, which made every test that
     # imported mcpgateway.main pay for a real DB probe and migration check.
@@ -2035,6 +2052,9 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
         # Close Redis client last (after all services that use it)
         await close_redis_client()
+
+        # Shut down the sandboxed jq worker pool
+        shutdown_jq_pool()
 
         logger.info("Shutdown complete")
 
@@ -3058,12 +3078,16 @@ class AdminAuthMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
+_SERVER_MCP_PATH_RE = re.compile(r"/servers/([^/]+)/mcp/?")
+
+
 class MCPPathRewriteMiddleware:
     """
     Middleware that rewrites paths ending with '/mcp' to '/mcp/', after performing authentication.
 
     - Rewrites exact '/mcp' to '/mcp/' so Starlette's mount does not emit a 307 redirect.
-    - Rewrites paths like '/servers/<server_id>/mcp' to '/mcp/'.
+    - Rewrites '/servers/<server_id>/mcp' and
+      '/v1/virtual-servers/<server_id>/mcp' to '/mcp/'.
     - Keeps ASGI ``raw_path`` aligned with rewritten paths when present.
     - Only exact '/mcp' and server-scoped MCP transport paths are rewritten.
     - Authentication is performed before any path rewriting.
@@ -3190,20 +3214,22 @@ class MCPPathRewriteMiddleware:
             >>> scope["path"]
             '/mcp/'
         """
-        # Auth check first
-        auth_ok = await streamable_http_auth(scope, receive, send)
-        if not auth_ok:
-            return
-
         original_path = scope.get("path", "")
-        scope["modified_path"] = original_path
 
         # Strip root_path prefix before pattern matching.
         # In reverse proxy deployments, scope["path"] may contain the full path
         # including the proxy prefix (e.g., "/dev/mcp-gateway/service/gateway/servers/123/mcp").
-        # We need to strip this prefix to correctly match the /servers/ pattern.
+        # We need to strip this prefix to correctly match server-scoped patterns.
         root_path = (scope.get("root_path") or settings.app_root_path or "").rstrip("/")
         app_path = _normalize_scope_path(original_path, root_path)
+        internal_app_path = replace_api_path_alias(app_path)
+
+        # Authenticate against the app-relative internal path without changing
+        # the shared ASGI scope. The original scope remains available for
+        # headers, root_path, and response URL construction.
+        auth_ok = await streamable_http_auth(scope, receive, send, request_path=internal_app_path)
+        if not auth_ok:
+            return
 
         # Update modified_path to the app-relative path (without root_path prefix).
         # This ensures streamablehttp_transport can extract server_id via regex (#4266).
@@ -3217,24 +3243,34 @@ class MCPPathRewriteMiddleware:
                 await self.application(scope, receive, send)
                 return
             if app_path.endswith("/mcp") or (app_path.endswith("/mcp/") and app_path != "/mcp/"):
-                # SECURITY: Only rewrite recognised MCP paths — /servers/{id}/mcp.
+                # SECURITY: Only rewrite recognised MCP paths — /servers/{id}/mcp
+                # and its versioned product-language alias
+                # /v1/virtual-servers/{id}/mcp.
                 # Arbitrary prefixes (e.g. /foo/mcp) must NOT be rewritten to
                 # /mcp/ as that would expose the global MCP transport under
                 # undocumented aliases, broadening the externally reachable
                 # route surface.
-                if app_path.startswith("/servers/"):
+                if internal_app_path.startswith("/servers/"):
                     # Validate that a non-empty server_id segment is present.
                     # Without this check, paths like /servers//mcp (empty ID)
                     # would be rewritten and silently fall through (#3891).
-                    _srv_match = re.match(r"/servers/([^/]+)/mcp", app_path)
-                    if not _srv_match:
-                        response = ORJSONResponse({"detail": "Invalid server identifier"}, status_code=404)
-                        await response(scope, receive, send)
-                        return
+                    _srv_match = _SERVER_MCP_PATH_RE.fullmatch(internal_app_path)
                 else:
-                    # Not a /servers/ path — do not rewrite, pass through
+                    # Not a recognised server-scoped path — do not rewrite.
                     await self.application(scope, receive, send)
                     return
+
+                if not _srv_match:
+                    response = ORJSONResponse({"detail": "Invalid server identifier"}, status_code=404)
+                    await response(scope, receive, send)
+                    return
+
+                if internal_app_path != app_path:
+                    # Downstream Python and Rust MCP transports extract the
+                    # server ID from the canonical /servers/{id}/mcp shape.
+                    # Preserve that scoped identity while rewriting the public
+                    # alias to the shared /mcp/ mount.
+                    scope["modified_path"] = internal_app_path
                 # Rewrite to /mcp/ and continue through middleware (lets CORSMiddleware handle preflight)
                 # Preserve root_path prefix when rewriting
                 self._apply_mcp_rewrite(scope, root_path)
@@ -3547,10 +3583,10 @@ protocol_router = APIRouter(prefix="/protocol", tags=["Protocol"])
 tool_router = APIRouter(prefix="/tools", tags=["Tools"])
 resource_router = APIRouter(prefix="/resources", tags=["Resources"])
 prompt_router = APIRouter(prefix="/prompts", tags=["Prompts"])
-gateway_router = APIRouter(prefix="/gateways", tags=["Gateways"])
+gateway_router = APIRouter(tags=["Gateways"])
 root_router = APIRouter(prefix="/roots", tags=["Roots"])
 utility_router = APIRouter(tags=["Utilities"])
-server_router = APIRouter(prefix="/servers", tags=["Servers"])
+server_router = APIRouter(tags=["Servers"])
 metrics_router = APIRouter(prefix="/metrics", tags=["Metrics"])
 tag_router = APIRouter(prefix="/tags", tags=["Tags"])
 export_import_router = APIRouter(tags=["Export/Import"])
@@ -4585,7 +4621,12 @@ async def sse_endpoint(request: Request, server_id: str, db: Session = Depends(g
 
 @server_router.post("/{server_id}/message")
 @require_permission("servers.use")
-async def message_endpoint(request: Request, server_id: str = Depends(require_valid_server), user=Depends(get_current_user_with_permissions)):
+async def message_endpoint(
+    request: Request,
+    server_id: str,
+    _server_exists: str = Depends(require_valid_server),
+    user=Depends(get_current_user_with_permissions),
+):
     """
     Handles incoming messages for a specific server.
 
@@ -7368,6 +7409,8 @@ async def register_gateway(
     except Exception as ex:
         if isinstance(ex, PermissionError):
             return ORJSONResponse(content={"message": str(ex)}, status_code=status.HTTP_403_FORBIDDEN)
+        if isinstance(ex, GatewayCredentialError):
+            return ORJSONResponse(content={"message": str(ex)}, status_code=status.HTTP_422_UNPROCESSABLE_CONTENT)
         if isinstance(ex, GatewayConnectionError):
             return ORJSONResponse(content={"message": str(ex)}, status_code=status.HTTP_502_BAD_GATEWAY)
         if isinstance(ex, ValueError):
@@ -7411,6 +7454,39 @@ async def get_gateway(gateway_id: str, request: Request, db: Session = Depends(g
         gateway = await gateway_service.get_gateway(db, gateway_id, user_email=auth_user_email, token_teams=auth_token_teams)
         _enforce_scoped_resource_access(request, db, user, f"/gateways/{gateway_id}")
         return gateway
+    except GatewayLookupConflictError as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    except GatewayNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+
+
+@gateway_router.get("/{gateway_id}/impact-preview", response_model=GatewayImpactPreview)
+@require_permission("gateways.read")
+async def get_gateway_impact_preview(
+    gateway_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user_with_permissions),
+) -> GatewayImpactPreview:
+    """Preview visible virtual servers affected by deleting a gateway.
+
+    Args:
+        gateway_id: Gateway ID, exact name, or slug.
+        request: Incoming request used for scoped access validation.
+        db: Database session.
+        user: Authenticated user.
+
+    Returns:
+        Layer-1-scoped virtual server IDs and names.
+
+    Raises:
+        HTTPException: 404 if the gateway is missing or hidden; 409 for an ambiguous identifier.
+    """
+    try:
+        auth_user_email, auth_token_teams = get_scoped_resource_access_context(request, user)
+        preview = await gateway_service.get_gateway_impact_preview(db, gateway_id, user_email=auth_user_email, token_teams=auth_token_teams)
+        _enforce_scoped_resource_access(request, db, user, f"/gateways/{preview.gateway_id}")
+        return preview
     except GatewayLookupConflictError as e:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
     except GatewayNotFoundError as e:
@@ -7471,6 +7547,8 @@ async def update_gateway(
             return ORJSONResponse(content={"message": str(ex)}, status_code=403)
         if isinstance(ex, GatewayNotFoundError):
             return ORJSONResponse(content={"message": "Gateway not found"}, status_code=status.HTTP_404_NOT_FOUND)
+        if isinstance(ex, GatewayCredentialError):
+            return ORJSONResponse(content={"message": str(ex)}, status_code=status.HTTP_422_UNPROCESSABLE_CONTENT)
         if isinstance(ex, GatewayConnectionError):
             return ORJSONResponse(content={"message": str(ex)}, status_code=status.HTTP_502_BAD_GATEWAY)
         if isinstance(ex, ValueError):
@@ -7585,12 +7663,18 @@ async def refresh_gateway_tools(
         _enforce_scoped_resource_access(request, db, user, f"/gateways/{gateway_id}")
 
         user_email = get_user_email(user)
+        # Build user_context for Vault token path selection on authorization_code gateways.
+        # Uses jwt_teams_claim for session tokens so admin bypass doesn't erase team scope.
+        from mcpgateway.routers.oauth_router import _build_user_context  # pylint: disable=import-outside-toplevel
+
+        user_context = _build_user_context(user)
         result = await gateway_service.refresh_gateway_manually(
             gateway_id=gateway_id,
             include_resources=include_resources,
             include_prompts=include_prompts,
             user_email=user_email,
             request_headers=dict(request.headers),
+            user_context=user_context,
         )
         return GatewayRefreshResponse(gateway_id=gateway_id, **result)
     except GatewayNotFoundError as e:
@@ -10408,6 +10492,7 @@ async def _execute_rpc_tools_call(
                     app_user_email=oauth_user_email,
                     user_email=auth_user_email,
                     token_teams=auth_token_teams,
+                    jwt_teams_claim=getattr(request.state, "jwt_teams_claim", None),
                     server_id=server_id,
                     plugin_context_table=plugin_context_table,
                     plugin_global_context=plugin_global_context,
@@ -10636,6 +10721,7 @@ async def _handle_app_bridge_tools_call(db: Session, request: Request, app_sessi
             app_user_email=requester_email,
             user_email=tool_user_email,
             token_teams=token_teams,
+            jwt_teams_claim=getattr(request.state, "jwt_teams_claim", None),
             server_id=app_session.server_id,
             plugin_context_table=getattr(request.state, "plugin_context_table", None),
             plugin_global_context=getattr(request.state, "plugin_global_context", None),
@@ -10954,6 +11040,7 @@ async def handle_internal_mcp_tools_call_resolve(request: Request):
             app_user_email=get_user_email(user),
             user_email=auth_user_email,
             token_teams=auth_token_teams,
+            jwt_teams_claim=getattr(request.state, "jwt_teams_claim", None),
             server_id=server_id,
             plugin_global_context=plugin_global_context,
             plugin_context_table=plugin_context_table,
@@ -11729,6 +11816,7 @@ async def _handle_rpc_authenticated(request: Request, db: Session, user):
                     app_user_email=oauth_user_email,
                     user_email=auth_user_email,
                     token_teams=auth_token_teams,
+                    jwt_teams_claim=getattr(request.state, "jwt_teams_claim", None),
                     server_id=server_id,
                     plugin_context_table=plugin_context_table,
                     plugin_global_context=plugin_global_context,
@@ -12854,8 +12942,9 @@ app.include_router(utility_router)
 # RFC well-known endpoints (/.well-known/*)
 app.include_router(well_known_router)
 
-# Per-server well-known endpoints (/servers/{id}/.well-known/*)
+# Per-server well-known endpoints and their versioned product-language aliases.
 app.include_router(server_well_known_router, prefix="/servers")
+app.include_router(server_well_known_router, prefix="/v1/virtual-servers")
 
 # OpenAPI schema generation (/v1/tools/generate-schemas-from-openapi)
 # prefix="/v1/tools" is hardcoded in the router — not versioned via v1_router to avoid /v1/v1/tools
@@ -12870,6 +12959,22 @@ try:
     logger.info("OAuth router included")
 except ImportError:
     logger.debug("OAuth router not available")
+
+# Vault OAuth router (conditionally registered when OAUTH_TOKEN_BACKEND=vault)
+if settings.oauth_token_backend == "vault":  # nosec B105 - config discriminator, not a password
+    try:
+        # First-Party
+        from mcpgateway.routers.vault_router import vault_router  # pylint: disable=import-outside-toplevel
+
+        app.include_router(vault_router)
+        logger.info(
+            "Vault OAuth router included (oauth_token_backend=vault, vault_addr=%s)",
+            settings.vault_addr,
+        )
+    except ImportError as e:
+        logger.error("Vault OAuth router not available: %s", e)
+else:
+    logger.debug("Vault OAuth router skipped (oauth_token_backend=%s)", settings.oauth_token_backend)
 
 # A2A agent plugin bindings router
 try:
