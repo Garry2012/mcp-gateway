@@ -174,6 +174,9 @@ COPY --chown=1001:1001 package.json package-lock.json* ./
 COPY --chown=1001:1001 tailwind.config.js postcss.config.js ./
 COPY --chown=1001:1001 mcpgateway/templates/ ./mcpgateway/templates/
 COPY --chown=1001:1001 mcpgateway/static/ ./mcpgateway/static/
+# admin_ui/*.js is a Tailwind content source (see tailwind.config.js); it must be
+# present in this stage or its utility classes are purged from the production bundle.
+COPY --chown=1001:1001 mcpgateway/admin_ui/ ./mcpgateway/admin_ui/
 
 # Install dependencies and build CSS
 RUN npm ci && \
