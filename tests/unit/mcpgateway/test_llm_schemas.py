@@ -258,6 +258,31 @@ class TestHealthCheckSchemas:
         assert check.error == "Connection refused"
 
 
+class TestReasoningEffortField:
+    """Tests for the reasoning_effort field exposed by OpenAI-family providers."""
+
+    def test_openai_family_expose_optional_reasoning_effort(self):
+        """openai, openai_compatible, and azure_openai expose an optional reasoning_effort select."""
+        from mcpgateway.llm_provider_configs import get_provider_config
+
+        for provider_type in ("openai", "openai_compatible", "azure_openai"):
+            provider_def = get_provider_config(provider_type)
+            field = next((f for f in provider_def.config_fields if f.name == "reasoning_effort"), None)
+            assert field is not None, f"{provider_type} missing reasoning_effort field"
+            assert field.required is False
+            assert field.field_type == "select"
+            values = {opt["value"] for opt in field.options}
+            assert "none" in values
+            assert {"minimal", "low", "medium", "high"}.issubset(values)
+
+    def test_non_openai_provider_has_no_reasoning_effort(self):
+        """Providers that do not use the OpenAI request shape do not expose the field."""
+        from mcpgateway.llm_provider_configs import get_provider_config
+
+        anthropic_def = get_provider_config("anthropic")
+        assert all(f.name != "reasoning_effort" for f in anthropic_def.config_fields)
+
+
 class TestValidateProviderConfig:
     """Tests for validate_provider_config method."""
 

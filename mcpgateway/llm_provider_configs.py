@@ -207,6 +207,41 @@ class ProviderConfigDefinition(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Shared field factories
+# ---------------------------------------------------------------------------
+
+
+def _reasoning_effort_field() -> ProviderFieldDefinition:
+    """Build the reasoning-effort field shared by OpenAI-family providers.
+
+    Reasoning models (e.g. the GPT-5 family) apply a server-side reasoning
+    effort by default. Some upstream endpoints reject function tools while a
+    reasoning effort is active on the ``/v1/chat/completions`` endpoint, so
+    exposing this control lets operators set ``none`` to keep tool calling
+    working. Leaving it unset preserves the provider's default behaviour.
+
+    Returns:
+        ProviderFieldDefinition: A fresh definition instance for the field.
+    """
+    return ProviderFieldDefinition(
+        name="reasoning_effort",
+        label="Reasoning Effort",
+        field_type="select",
+        required=False,
+        help_text=(
+            "Reasoning effort for reasoning-capable models. Set to 'none' if the endpoint rejects function tools while reasoning is active. Leave unselected to use the provider's own setting."
+        ),
+        options=[
+            {"value": "none", "label": "None (required for tools on some reasoning models)"},
+            {"value": "minimal", "label": "Minimal"},
+            {"value": "low", "label": "Low"},
+            {"value": "medium", "label": "Medium"},
+            {"value": "high", "label": "High"},
+        ],
+    )
+
+
+# ---------------------------------------------------------------------------
 # Provider Configuration Registry
 # ---------------------------------------------------------------------------
 
@@ -222,7 +257,7 @@ PROVIDER_CONFIGS: Dict[str, ProviderConfigDefinition] = {
         requires_api_base=True,
         api_base_default="https://api.openai.com/v1",
         api_base_help="Default: https://api.openai.com/v1",
-        config_fields=[],
+        config_fields=[_reasoning_effort_field()],
     ),
     "azure_openai": ProviderConfigDefinition(
         provider_type="azure_openai",
@@ -260,6 +295,7 @@ PROVIDER_CONFIGS: Dict[str, ProviderConfigDefinition] = {
                 placeholder="2024-02-15-preview",
                 help_text="Azure OpenAI API version",
             ),
+            _reasoning_effort_field(),
         ],
     ),
     "anthropic": ProviderConfigDefinition(
@@ -445,7 +481,7 @@ PROVIDER_CONFIGS: Dict[str, ProviderConfigDefinition] = {
         requires_api_base=True,
         api_base_default="http://localhost:8080/v1",
         api_base_help="Base URL of your OpenAI-compatible server",
-        config_fields=[],
+        config_fields=[_reasoning_effort_field()],
     ),
     "cohere": ProviderConfigDefinition(
         provider_type="cohere",

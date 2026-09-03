@@ -263,7 +263,8 @@ async def test_chat_non_streaming_response(monkeypatch):
 @pytest.mark.asyncio
 async def test_chat_service_disconnect_cleanup(monkeypatch):
     chatcfg = svc.MCPClientConfig(
-        mcp_server=svc.MCPServerConfig(url="https://x", transport="sse"), llm=svc.LLMConfig(provider="openai", config=svc.OpenAIConfig(api_key="ak", model="gpt-4"))  # pragma: allowlist secret
+        mcp_server=svc.MCPServerConfig(url="https://x", transport="sse"),
+        llm=svc.LLMConfig(provider="openai", config=svc.OpenAIConfig(api_key="ak", model="gpt-4")),  # pragma: allowlist secret
     )  # pragma: allowlist secret
     service = svc.MCPChatService(chatcfg)
     service._client = AsyncMock()
@@ -393,6 +394,54 @@ def test_gateway_provider_openai_compatible(monkeypatch):
     gateway = svc.GatewayProvider(svc.GatewayConfig(model="gpt-4"))
     llm = gateway.get_llm(model_type="completion")
     assert llm is not None
+
+
+def test_gateway_provider_openai_reasoning_effort_forwarded(monkeypatch):
+    """A configured reasoning_effort is forwarded to the OpenAI chat client."""
+    _patch_gateway_llms(monkeypatch)
+    model, provider = _make_model_and_provider("openai", config={"reasoning_effort": "none"}, api_base="https://api")
+    _patch_gateway_session(monkeypatch, model, provider)
+    monkeypatch.setattr("mcpgateway.utils.services_auth.decode_auth", lambda _v: {"api_key": "decoded"})
+
+    gateway = svc.GatewayProvider(svc.GatewayConfig(model="gpt-4"))
+    llm = gateway.get_llm(model_type="chat")
+    assert llm.kwargs["reasoning_effort"] == "none"
+
+
+def test_gateway_provider_openai_compatible_reasoning_effort_forwarded(monkeypatch):
+    """reasoning_effort works on the openai_compatible branch too."""
+    _patch_gateway_llms(monkeypatch)
+    model, provider = _make_model_and_provider("openai_compatible", config={"reasoning_effort": "low"}, api_base="https://compat")
+    _patch_gateway_session(monkeypatch, model, provider)
+    monkeypatch.setattr("mcpgateway.utils.services_auth.decode_auth", lambda _v: "decoded")
+
+    gateway = svc.GatewayProvider(svc.GatewayConfig(model="gpt-4"))
+    llm = gateway.get_llm(model_type="chat")
+    assert llm.kwargs["reasoning_effort"] == "low"
+
+
+def test_gateway_provider_openai_reasoning_effort_absent_by_default(monkeypatch):
+    """Without config, reasoning_effort is not sent (backward compatible)."""
+    _patch_gateway_llms(monkeypatch)
+    model, provider = _make_model_and_provider("openai", config={}, api_base="https://api")
+    _patch_gateway_session(monkeypatch, model, provider)
+    monkeypatch.setattr("mcpgateway.utils.services_auth.decode_auth", lambda _v: {"api_key": "decoded"})
+
+    gateway = svc.GatewayProvider(svc.GatewayConfig(model="gpt-4"))
+    llm = gateway.get_llm(model_type="chat")
+    assert "reasoning_effort" not in llm.kwargs
+
+
+def test_gateway_provider_openai_empty_reasoning_effort_not_forwarded(monkeypatch):
+    """An empty reasoning_effort (UI 'Default' option) is treated as unset."""
+    _patch_gateway_llms(monkeypatch)
+    model, provider = _make_model_and_provider("openai", config={"reasoning_effort": ""}, api_base="https://api")
+    _patch_gateway_session(monkeypatch, model, provider)
+    monkeypatch.setattr("mcpgateway.utils.services_auth.decode_auth", lambda _v: {"api_key": "decoded"})
+
+    gateway = svc.GatewayProvider(svc.GatewayConfig(model="gpt-4"))
+    llm = gateway.get_llm(model_type="chat")
+    assert "reasoning_effort" not in llm.kwargs
 
 
 def test_gateway_provider_azure_openai(monkeypatch):
