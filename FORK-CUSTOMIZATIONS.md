@@ -136,6 +136,13 @@ Status: **implemented**, and submitted upstream as
 [#6127](https://github.com/IBM/mcp-context-forge/pull/6127) (Closes #6054).
 If both merge, this divergence disappears on the next sync.
 
+**Upstream status, checked 2026-09-03: both still OPEN and unreviewed.** Opened
+2026-08-07, no activity since; `reviewDecision: REVIEW_REQUIRED`, zero reviews and
+zero comments on either. Both are `MERGEABLE` but `BLOCKED` pending a reviewer.
+Plan on carrying this divergence indefinitely rather than assuming it lands — the
+guard tests below are what keep it safe across syncs. Re-check the PR status when
+updating this file rather than trusting this line.
+
 These are **bug fixes to upstream code**, not customisations. Every defect was verified
 present in `upstream/main`; our fork had never touched `tabs.js` or any observability
 template beforehand.
@@ -208,6 +215,69 @@ A dry-run merge of `upstream/main` on 2026-08-07 (2 commits ahead) was **clean, 
 conflicts**, with all fixes intact and all guard tests passing. Merge often — small
 frequent merges are cheap; `admin.html` at 26 commits a quarter is not something to let
 accumulate.
+
+### 4. RBAC: team-scoped admins can reach the Admin UI
+
+Status: **implemented** in this fork (PR #16). **Not yet submitted upstream.**
+
+This is a **bug fix to upstream code**, not a customisation. It is also a
+documentation contradiction, which makes it a strong upstream candidate:
+`docs/docs/manage/rbac.md` lists `admin.dashboard` / `admin.overview` as
+`team_admin`'s first two permissions, and
+`docs/docs/architecture/multitenancy.md` states the Admin UI uses
+"permission-based rendering" — yet a user whose only admin-bearing role is
+team-scoped was rejected with `403 Admin privileges required`.
+
+#### Cause
+
+`AdminAuthMiddleware` calls `PermissionService.has_admin_permission()` with the
+`team_id` parsed from the request query string. The bare `/admin` entry point
+carries no `team_id`, so `team_id is None`, and `_get_user_roles()` then returns
+only global, personal and `scope_id=NULL` team roles. A `team_admin` assigned to
+a specific team is excluded, so no `admin.*` permission is found. The `?team_id=`
+path already worked — only the bare entry point was missed, and the code comment
+calls the no-team branch "(original behavior)", suggesting an incomplete
+migration when multi-tenancy was layered on.
+
+#### What changed
+
+`mcpgateway/services/permission_service.py` — `has_admin_permission()` now passes
+`include_all_teams=True` when no team context is supplied, so the user's real
+team roles are considered.
+
+Safe because both guards already existed in `_get_user_roles()`:
+
+- **Personal-team roles stay excluded** under `include_all_teams`. Every user is
+  auto-granted `team_admin` on their personal team, so including them would give
+  every user admin-UI access.
+- **`token_teams` narrowing still applies**, so public-only tokens
+  (`token_teams=[]`) gain no team roles.
+
+Blast radius is small: `has_admin_permission()` has only two callers, both
+admin-UI access (`main.py` middleware, and the login-page redirect in
+`admin.py`). The separate `check_admin_permission()` — used by
+`require_admin_permission()`, which guards e.g.
+`POST /admin/gateways/{id}/transfer-ownership` — is **unchanged** and requires
+`admin.system_config` / `admin.user_management` / `admin.security_audit` / `*`,
+not `admin.dashboard`.
+
+#### Deliberate consequence
+
+`viewer` and `developer` also carry `admin.dashboard`, so **any** team member can
+now open the Admin UI, not just team admins. That matches the documented
+permission-based rendering, and was verified: a throwaway `viewer` on a team
+reached the console, saw only that team's gateways (not another tenant's), and
+was refused every write, every admin surface (`observability`, `admin/logs`,
+`admin/users/search`), member management, and ownership transfer — all 403.
+
+#### Resolving a conflict here
+
+If upstream edits `has_admin_permission()`, keep the `include_all_teams=(team_id
+is None)` argument. Do **not** "simplify" it back to a bare call — that silently
+restores the 403 for every team-scoped admin. The regression tests in
+`tests/unit/mcpgateway/services/test_permission_service.py` (four cases: widened
+lookup, team-scoped lookup, denial without `admin.*`, public-only token) will
+fail loudly if it is removed.
 
 ## Conventions for future divergences
 
