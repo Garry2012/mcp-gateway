@@ -16,6 +16,7 @@
 
 import { describe, test, expect, vi, beforeEach } from "vitest";
 import { JSDOM } from "jsdom";
+import { observabilityDashboard } from "../../../mcpgateway/admin_ui/components/observability-dashboard.js";
 
 /**
  * Replica of window.__obsExecAndStrip from observability_partial.html.
@@ -365,5 +366,30 @@ describe("Alpine.mutateDom + initTree injection pattern", () => {
     expect(initTreeCalls).toHaveLength(1);
     expect(container.querySelector(".tools-dashboard")).not.toBeNull();
     expect(container.querySelector("script")).toBeNull();
+  });
+});
+
+
+describe("observability trace filters", () => {
+  test("clear filters removes tool selection and restores HTTP/time defaults", () => {
+    const dashboard = observabilityDashboard();
+    dashboard.refreshTraces = vi.fn();
+    Object.assign(dashboard, { toolName: "interview_get_definition", timeRange: "1h", statusFilter: "error", selectedQueryId: "saved", nameSearch: "old", userEmail: "fixture@example.com" });
+    dashboard.clearFilters();
+    expect(dashboard.getCurrentFilterConfig()).toEqual({ timeRange: "24h", statusFilter: "all", minDuration: "", maxDuration: "", httpMethod: "", userEmail: "", nameSearch: "", attributeSearch: "", toolName: "" });
+    expect(dashboard.selectedQueryId).toBe("");
+    expect(dashboard.refreshTraces).toHaveBeenCalledOnce();
+  });
+});
+
+
+describe("observability request totals", () => {
+  test("statistics use the selected time range", () => {
+    const dashboard = observabilityDashboard();
+    vi.stubGlobal("htmx", { ajax: vi.fn() });
+    dashboard.timeRange = "1h";
+    dashboard.refreshStats();
+    expect(htmx.ajax).toHaveBeenCalledWith("GET", expect.stringContaining("/admin/observability/stats?hours=1"), expect.any(Object));
+    vi.unstubAllGlobals();
   });
 });

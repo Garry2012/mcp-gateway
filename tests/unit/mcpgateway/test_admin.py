@@ -16712,7 +16712,7 @@ async def test_get_observability_traces_with_filters(monkeypatch, mock_request, 
     trace_query.filter.return_value = trace_query
     trace_query.order_by.return_value = trace_query
     trace_query.limit.return_value = trace_query
-    trace_query.all.return_value = [SimpleNamespace(trace_id="t1")]
+    trace_query.all.return_value = [SimpleNamespace(trace_id="t1", attributes={}, http_url="/rpc")]
 
     span_query = MagicMock()
     span_query.filter.return_value = span_query
@@ -16722,7 +16722,7 @@ async def test_get_observability_traces_with_filters(monkeypatch, mock_request, 
 
     span_query.subquery.return_value = SimpleNamespace(c=SimpleNamespace(trace_id=column("trace_id")))
 
-    mock_db.query.side_effect = [trace_query, span_query]
+    mock_db.query.side_effect = [trace_query, span_query, MagicMock()]
     monkeypatch.setattr("mcpgateway.admin.get_db", lambda: iter([mock_db]))
 
     response = await get_observability_traces(

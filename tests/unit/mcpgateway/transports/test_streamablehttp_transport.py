@@ -18008,3 +18008,86 @@ async def test_list_tools_sso_admin_gets_admin_bypass_at_service_layer(monkeypat
     await list_tools()
 
     assert called["args"] == (None, None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sink", ["start_span", "end_span", "record_tool_metric", "record_server_metric"])
+@pytest.mark.parametrize("is_error", [False, True])
+@pytest.mark.parametrize("server_id", ["observed-server", "default_server_id", None])
+async def test_direct_proxy_telemetry_failure_preserves_raw_result(monkeypatch, sink, is_error, server_id):
+    """Exercise the real service so recording failures cannot reach the transport error handler."""
+    # Standard
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+
+    # Third-Party
+    from mcp import types
+
+    # First-Party
+    from mcpgateway.services import tool_service as module
+
+    gateway = SimpleNamespace(id="observed-gateway", gateway_mode="direct_proxy", url="http://upstream/mcp", passthrough_headers=[], slug="observed")
+    tool = SimpleNamespace(id="observed-tool", name="observed-echo", original_name="echo")
+    db = MagicMock()
+
+    def execute(statement):
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = gateway if statement.column_descriptions[0]["entity"] is module.DbGateway else tool
+        return result
+
+    db.execute.side_effect = execute
+
+    @contextmanager
+    def fresh_session():
+        yield db
+
+    @asynccontextmanager
+    async def request_session():
+        yield db
+
+    @asynccontextmanager
+    async def streamable_client(*_args, **_kwargs):
+        yield ("read", "write", None)
+
+    expected = types.CallToolResult(content=[types.TextContent(type="text", text="original")], structuredContent={"value": 42}, _meta={"source": "fixture"}, isError=is_error)
+    session = AsyncMock()
+    session.call_tool.return_value = expected
+    session_cm = AsyncMock()
+    session_cm.__aenter__.return_value = session
+    session_cm.__aexit__.return_value = False
+    observations = MagicMock()
+    metrics = MagicMock()
+    getattr(observations if sink in {"start_span", "end_span"} else metrics, sink).side_effect = RuntimeError("fixture telemetry failure")
+    user = {"email": "user@test.com", "teams": ["team1"], "is_admin": False, "is_authenticated": True}
+    monkeypatch.setattr(tr, "_get_request_context_or_default", AsyncMock(return_value=(server_id, {"x-context-forge-gateway-id": gateway.id}, user)))
+    monkeypatch.setattr(tr, "get_db", request_session)
+    monkeypatch.setattr(tr, "_check_scoped_permission", Mock(return_value=True))
+    monkeypatch.setattr(tr, "_check_streamable_permission", AsyncMock(return_value=True))
+    monkeypatch.setattr(tr, "check_gateway_access", AsyncMock(return_value=True))
+    monkeypatch.setattr(tr, "logger", MagicMock())
+    monkeypatch.setattr(module, "fresh_db_session", fresh_session)
+    monkeypatch.setattr(module, "streamablehttp_client", streamable_client)
+    monkeypatch.setattr(module, "ClientSession", Mock(return_value=session_cm))
+    monkeypatch.setattr(module, "ObservabilityService", Mock(return_value=observations))
+    monkeypatch.setattr(module, "metrics_buffer", metrics)
+    monkeypatch.setattr(module, "check_gateway_access", AsyncMock(return_value=True))
+    monkeypatch.setattr(module, "build_gateway_auth_headers", Mock(return_value={}))
+    monkeypatch.setattr(module, "build_identity_headers", Mock(return_value={}))
+    monkeypatch.setattr(module, "build_identity_meta", Mock(return_value=None))
+    monkeypatch.setattr(module.settings, "mcpgateway_direct_proxy_enabled", True)
+    monkeypatch.setattr(module.settings, "observability_enabled", True)
+    trace_token = module.current_trace_id.set("fixture-trace")
+    try:
+        result = await tr.call_tool("observed-echo", {"value": 42})
+    finally:
+        module.current_trace_id.reset(trace_token)
+    assert result is expected
+    tr.logger.error.assert_not_called()
+    session.call_tool.assert_awaited_once_with(name="echo", arguments={"value": 42})
+    metrics.record_tool_metric.assert_called_once()
+    if server_id == "observed-server":
+        metrics.record_server_metric.assert_called_once()
+        assert metrics.record_server_metric.call_args.kwargs["server_id"] == server_id
+    else:
+        metrics.record_server_metric.assert_not_called()
+        assert observations.start_span.call_args.kwargs["attributes"]["server.id"] is None

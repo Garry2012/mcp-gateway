@@ -212,6 +212,7 @@ from mcpgateway.utils.paths import resolve_root_path as _resolve_root_path
 from mcpgateway.utils.security_cookies import clear_auth_cookie, CookieTooLargeError, set_auth_cookie
 from mcpgateway.utils.services_auth import encode_auth
 from mcpgateway.utils.sqlalchemy_modifier import json_contains_tag_expr
+from mcpgateway.utils.trace_redaction import sanitize_trace_text
 from mcpgateway.utils.validate_signature import sign_data
 from mcpgateway.utils.verify_credentials import verify_jwt_token_cached
 
@@ -18637,7 +18638,7 @@ async def get_observability_stats(request: Request, hours: int = Query(24, ge=1,
     """
     db = next(get_db())
     try:
-        cutoff_time = datetime.now() - timedelta(hours=hours)
+        cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
 
         # Consolidate multiple count queries into a single aggregated select
         # Filter by start_time first (uses index), then aggregate by status
@@ -18664,6 +18665,61 @@ async def get_observability_stats(request: Request, hours: int = Query(24, ge=1,
             db.commit()  # Commit read-only transaction to avoid implicit rollback
         finally:
             db.close()
+
+
+def _summarize_observability_traces(db: Session, traces: list[ObservabilityTrace]) -> dict[str, dict[str, Any]]:
+    """Build display summaries using at most two queries for the whole trace page.
+
+    Args:
+        db: Authorized observability query session.
+        traces: Already filtered traces to display.
+
+    Returns:
+        Tool outcomes and current server names, keyed by trace ID. Missing identity
+        remains unknown; HTTP success is never treated as proof of tool success.
+    """
+    summaries: dict[str, dict[str, Any]] = {}
+    server_ids: set[str] = set()
+    for trace in traces:
+        attributes = trace.attributes or {}
+        route = attributes.get("http.route") or trace.http_url
+        path = urllib.parse.urlsplit(route).path if isinstance(route, str) else ""
+        parts = path.strip("/").split("/")
+        ids = {parts[1]} if len(parts) >= 3 and parts[0] == "servers" and parts[1] != "default_server_id" else set()
+        summaries[trace.trace_id] = {"tools": [], "server_ids": ids, "servers": [], "outcome": "No recorded call", "status": "none"}
+        server_ids.update(ids)
+    if not summaries:
+        return summaries
+    spans = db.query(ObservabilitySpan).filter(ObservabilitySpan.trace_id.in_(summaries), ObservabilitySpan.name == "tool.invoke").order_by(ObservabilitySpan.start_time).all()
+    for span in spans:
+        summary = summaries[span.trace_id]
+        attrs = span.attributes or {}
+        summary["tools"].append(
+            {
+                "name": attrs.get("tool.name") or span.resource_name or "Unnamed tool",
+                "original_name": attrs.get("tool.original_name"),
+                "mode": attrs.get("tool.execution_mode"),
+                "status": span.status,
+                "duration_ms": span.duration_ms,
+                "failure_reason": attrs.get("tool.failure_reason"),
+                "status_message": sanitize_trace_text(span.status_message)[:2000] if span.status_message else None,
+            }
+        )
+        server_id = attrs.get("server.id")
+        if isinstance(server_id, str) and server_id and server_id != "default_server_id":
+            summary["server_ids"].add(server_id)
+            server_ids.add(server_id)
+    names = {server_id: name for server_id, name in db.query(DbServer.id, DbServer.name).filter(DbServer.id.in_(server_ids)).all()} if server_ids else {}
+    for summary in summaries.values():
+        summary["servers"] = [{"id": server_id, "name": names.get(server_id, "Unavailable server")} for server_id in sorted(summary["server_ids"])]
+        statuses = [tool["status"] for tool in summary["tools"]]
+        if "error" in statuses:
+            summary.update(outcome="Failed", status="error")
+        elif statuses and any(status != "ok" for status in statuses):
+            summary.update(outcome="In progress", status="unset")
+        elif statuses:
+            summary.update(outcome="Succeeded", status="ok")
+    return summaries
 
 
 @admin_router.get("/observability/traces", response_class=HTMLResponse)
@@ -18710,7 +18766,7 @@ async def get_observability_traces(
         # Parse time range
         time_map = {"1h": 1, "6h": 6, "24h": 24, "7d": 168}
         hours = time_map.get(time_range, 24)
-        cutoff_time = datetime.now() - timedelta(hours=hours)
+        cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
 
         query = db.query(ObservabilityTrace).filter(ObservabilityTrace.start_time >= cutoff_time)
 
@@ -18749,7 +18805,10 @@ async def get_observability_traces(
                 db.query(ObservabilitySpan.trace_id)
                 .filter(
                     ObservabilitySpan.name == "tool.invoke",
-                    extract_json_field(ObservabilitySpan.attributes, '$."tool.name"').ilike(f"%{tool_name}%"),
+                    or_(
+                        extract_json_field(ObservabilitySpan.attributes, '$."tool.name"').ilike(f"%{tool_name}%"),
+                        extract_json_field(ObservabilitySpan.attributes, '$."tool.original_name"').ilike(f"%{tool_name}%"),
+                    ),
                 )
                 .distinct()
                 .subquery()
@@ -18760,7 +18819,9 @@ async def get_observability_traces(
         traces = query.order_by(ObservabilityTrace.start_time.desc()).limit(limit).all()
 
         root_path = _resolve_root_path(request)
-        return request.app.state.templates.TemplateResponse(request, "observability_traces_list.html", {"request": request, "traces": traces, "root_path": root_path})
+        return request.app.state.templates.TemplateResponse(
+            request, "observability_traces_list.html", {"request": request, "traces": traces, "summaries": _summarize_observability_traces(db, traces), "root_path": root_path}
+        )
     finally:
         # Ensure close() always runs even if commit() fails
         try:
@@ -18794,7 +18855,9 @@ async def get_observability_trace_detail(request: Request, trace_id: str, _user=
             raise HTTPException(status_code=404, detail="Trace not found")
 
         root_path = _resolve_root_path(request)
-        return request.app.state.templates.TemplateResponse(request, "observability_trace_detail.html", {"request": request, "trace": trace, "root_path": root_path})
+        return request.app.state.templates.TemplateResponse(
+            request, "observability_trace_detail.html", {"request": request, "trace": trace, "summary": _summarize_observability_traces(db, [trace])[trace.trace_id], "root_path": root_path}
+        )
     finally:
         # Ensure close() always runs even if commit() fails
         try:

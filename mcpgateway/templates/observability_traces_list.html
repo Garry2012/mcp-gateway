@@ -1,39 +1,58 @@
 <!-- htmlhint doctype-first:false -->
-{% if traces %}
-    {% for trace in traces %}
-    <tr hx-get="{{ root_path }}/admin/observability/trace/{{ trace.trace_id }}" hx-swap="innerHTML"
-        hx-target="#trace-detail-content"
-        hx-trigger="click"
-        @click="selectedTrace = '{{ trace.trace_id }}'">
-        <td class="bg-gray-50 dark:bg-gray-700/50 px-4 py-3 text-left text-sm font-semibold text-gray-600 dark:text-gray-300 border-b border-gray-200 dark:border-gray-700">{{ trace.start_time.strftime('%Y-%m-%d %H:%M:%S') }}</td>
-        <td class="bg-gray-50 dark:bg-gray-700/50 px-4 py-3 text-left text-sm font-semibold text-gray-600 dark:text-gray-300 border-b border-gray-200 dark:border-gray-700"><strong>{{ trace.http_method or 'N/A' }}</strong></td>
-        <td class="bg-gray-50 dark:bg-gray-700/50 px-4 py-3 text-left text-sm font-semibold text-gray-600 dark:text-gray-300 border-b border-gray-200 dark:border-gray-700"><code>{{ trace.name }}</code></td>
-        <td class="bg-gray-50 dark:bg-gray-700/50 px-4 py-3 text-left text-sm font-semibold text-gray-600 dark:text-gray-300 border-b border-gray-200 dark:border-gray-700">
-            <span class="status-badge status-{{ trace.status }}">
-                {% if trace.status == 'ok' %}✓ {{ trace.http_status_code or 'OK' }}{% else %}✗ {{ trace.http_status_code or 'ERROR' }}{% endif %}
-            </span>
-        </td>
-        <td class="bg-gray-50 dark:bg-gray-700/50 px-4 py-3 text-left text-sm font-semibold text-gray-600 dark:text-gray-300 border-b border-gray-200 dark:border-gray-700">
-            <span class="duration-badge {% if trace.duration_ms %}{% if trace.duration_ms < 100 %}duration-fast{% elif trace.duration_ms < 500 %}duration-medium{% else %}duration-slow{% endif %}{% endif %}">
-                {{ "%.2f"|format(trace.duration_ms) if trace.duration_ms else 'N/A' }} ms
-            </span>
-        </td>
-        <td class="bg-gray-50 dark:bg-gray-700/50 px-4 py-3 text-left text-sm font-semibold text-gray-600 dark:text-gray-300 border-b border-gray-200 dark:border-gray-700">{{ trace.user_email or 'anonymous' }}</td>
-        <td class="bg-gray-50 dark:bg-gray-700/50 px-4 py-3 text-left text-sm font-semibold text-gray-600 dark:text-gray-300 border-b border-gray-200 dark:border-gray-700">
-            <button class="px-2 py-1 text-sm border border-gray-300 rounded-md bg-white hover:bg-gray-50 cursor-pointer transition-all dark:bg-gray-700 dark:text-gray-100 dark:border-gray-600 dark:hover:bg-gray-600">
-                View Details →
-            </button>
-        </td>
-    </tr>
-    {% endfor %}
+{% for trace in traces %}
+{% set summary = summaries[trace.trace_id] %}
+<tr class="border-b border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-700/50">
+    <td class="px-4 py-4 text-sm text-gray-600 dark:text-gray-300 whitespace-nowrap">
+        <time datetime="{{ trace.start_time.isoformat() }}">{{ trace.start_time.strftime('%Y-%m-%d %H:%M:%S') }}</time>
+    </td>
+    <td class="px-4 py-4 text-sm text-gray-900 dark:text-gray-100">
+        {% for tool in summary.tools %}
+        <div class="font-semibold break-all">{{ tool.original_name or tool.name }}</div>
+        {% if tool.original_name and tool.original_name != tool.name %}
+        <div class="text-xs text-gray-500 dark:text-gray-400 break-all">{{ tool.name }}</div>
+        {% endif %}
+        {% else %}
+        <div class="font-medium">HTTP request</div>
+        {% endfor %}
+        <div class="mt-1 text-xs text-gray-500 dark:text-gray-400 break-all">{{ trace.name }}</div>
+    </td>
+    <td class="px-4 py-4 text-sm text-gray-700 dark:text-gray-300">
+        {% for server in summary.servers %}
+        <div title="{{ server.id }}">{{ server.name }}</div>
+        {% else %}
+        <span class="text-gray-500 dark:text-gray-400" title="No virtual server recorded for this request">—</span>
+        {% endfor %}
+    </td>
+    <td class="px-4 py-4 text-sm">
+        <span class="font-medium {% if summary.status == 'error' %}text-red-700 dark:text-red-400{% elif summary.status == 'ok' %}text-green-700 dark:text-green-400{% else %}text-gray-600 dark:text-gray-300{% endif %}">
+            {{ summary.outcome }}
+        </span>
+        <div class="mt-1 text-xs {% if trace.status == 'error' %}text-red-700 dark:text-red-400{% else %}text-gray-500 dark:text-gray-400{% endif %}">
+            {% if trace.http_status_code %}HTTP {{ trace.http_status_code }}{% elif not trace.end_time %}Request in progress{% else %}HTTP status not recorded{% endif %}
+        </div>
+    </td>
+    <td class="px-4 py-4 text-sm text-gray-700 dark:text-gray-300 whitespace-nowrap">
+        {% if trace.duration_ms is not none %}{{ "%.2f"|format(trace.duration_ms) }} ms{% else %}In progress{% endif %}
+    </td>
+    <td class="px-4 py-4 text-sm text-gray-700 dark:text-gray-300 break-all">
+        {{ trace.user_email or 'Not recorded' }}
+    </td>
+    <td class="px-4 py-4 text-sm">
+        <button type="button"
+            hx-get="{{ root_path }}/admin/observability/trace/{{ trace.trace_id }}"
+            hx-swap="innerHTML" hx-target="#trace-detail-content"
+            @click="selectedTrace = {{ trace.trace_id|tojson|forceescape }}"
+            aria-label="View trace details for {{ summary.tools[0].name if summary.tools else trace.name }}"
+            class="px-3 py-2 text-sm border border-gray-300 rounded-md bg-white hover:bg-gray-50 focus:ring-2 focus:ring-blue-500 dark:bg-gray-800 dark:text-gray-100 dark:border-gray-600 dark:hover:bg-gray-700 whitespace-nowrap">
+            View details →
+        </button>
+    </td>
+</tr>
 {% else %}
-    <tr>
-        <td colspan="7">
-            <div class="empty-state">
-                <div class="empty-state-icon">📊</div>
-                <h3>No traces found</h3>
-                <p>Make some API requests to see observability data</p>
-            </div>
-        </td>
-    </tr>
-{% endif %}
+<tr>
+    <td colspan="7" class="px-6 py-12 text-center text-gray-600 dark:text-gray-300">
+        <h3 class="font-semibold text-gray-900 dark:text-gray-100">No matching requests</h3>
+        <p class="mt-2">Try a wider time range or clear the filters. New tool calls appear here when tracing is enabled.</p>
+    </td>
+</tr>
+{% endfor %}

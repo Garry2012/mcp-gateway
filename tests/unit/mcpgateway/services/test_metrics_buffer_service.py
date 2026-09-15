@@ -1222,3 +1222,53 @@ def test_flush_to_db_isolates_failed_metric_type(monkeypatch):
     assert sessions_by_model[PromptMetric].committed is True
     assert sessions_by_model[ServerMetric].committed is True
     assert sessions_by_model[A2AAgentMetric].committed is True
+
+
+@pytest.mark.parametrize("buffered", [False, True])
+def test_deleted_tool_metric_does_not_prevent_server_metric(tmp_path, monkeypatch, caplog, buffered):
+    """A real foreign-key failure after catalog deletion leaves server recording independent."""
+    # Standard
+    from contextlib import contextmanager
+
+    # Third-Party
+    from sqlalchemy import create_engine, delete, event, func, insert, select
+    from sqlalchemy.orm import Session
+
+    # First-Party
+    from mcpgateway.db import Base, Server, ServerMetric, Tool, ToolMetric
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'metrics.db'}")
+
+    @event.listens_for(engine, "connect")
+    def enable_foreign_keys(connection, _record):
+        connection.execute("PRAGMA foreign_keys=ON")
+
+    Base.metadata.create_all(engine)
+
+    @contextmanager
+    def fresh_session():
+        with Session(engine) as session, session.begin():
+            yield session
+
+    monkeypatch.setattr("mcpgateway.services.metrics_buffer_service.fresh_db_session", fresh_session)
+    service = MetricsBufferService(enabled=buffered)
+    service.recording_enabled = True
+    monkeypatch.setattr(service, "_ensure_flush_task_started", MagicMock())
+    try:
+        with fresh_session() as session:
+            session.execute(insert(Server), {"id": "surviving-server", "name": "surviving-server"})
+            session.execute(insert(Tool.__table__), {"id": "deleted-tool", "name": "deleted-tool", "original_name": "echo", "custom_name": "echo", "custom_name_slug": "echo", "input_schema": {}})
+        # The invocation resolved its catalog identity before this deletion.
+        with fresh_session() as session:
+            session.execute(delete(Tool).where(Tool.id == "deleted-tool"))
+        start = time.monotonic()
+        service.record_tool_metric("deleted-tool", start, True)
+        service.record_server_metric("surviving-server", start, True)
+        if buffered:
+            service._flush_to_db(list(service._tool_metrics), [], [], list(service._server_metrics), [])
+        with fresh_session() as session:
+            assert session.scalar(select(func.count()).select_from(ToolMetric)) == 0
+            assert session.scalar(select(func.count()).select_from(ServerMetric)) == 1
+        assert "FOREIGN KEY constraint failed" in caplog.text
+    finally:
+        engine.dispose()

@@ -11454,3 +11454,462 @@ class TestGrpcToolInvocation:
 #   converts cancellation into TimeoutError in some Python event-loop states. Since the
 #   pattern is structurally identical in all three branches, protecting it in one branch
 #   (gRPC) is sufficient to detect a regression that would affect all three.
+
+
+@pytest.fixture
+def tool_observation_runtime(monkeypatch):
+    """Exercise both service bodies with deterministic upstream and recording sinks."""
+    # Third-Party
+    from mcp import types
+
+    # First-Party
+    from mcpgateway.services import tool_service as module
+
+    gateway = SimpleNamespace(
+        id="observed-gateway",
+        name="observed",
+        slug="observed",
+        url="http://upstream/mcp",
+        gateway_mode="direct_proxy",
+        auth_type=None,
+        auth_value=None,
+        auth_query_params=None,
+        oauth_config=None,
+        ca_certificate=None,
+        ca_certificate_sig=None,
+        passthrough_headers=[],
+        visibility="public",
+        team_id=None,
+        owner_email=None,
+    )
+    row = SimpleNamespace(id="observed-tool", name="observed-echo", original_name="echo")
+    db = MagicMock()
+    runtime = SimpleNamespace(gateway=gateway, row=row, rows=[row], db=db)
+
+    def execute(statement):
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = gateway if statement.column_descriptions[0]["entity"] is DbGateway else runtime.row
+        result.all.return_value = runtime.rows
+        return result
+
+    db.execute.side_effect = execute
+
+    @contextmanager
+    def fresh_session():
+        yield db
+
+    @asynccontextmanager
+    async def streamable_client(*_args, **_kwargs):
+        yield ("read", "write", None)
+
+    session = AsyncMock()
+    session.call_tool.return_value = types.CallToolResult(content=[types.TextContent(type="text", text="unchanged")], structuredContent={"value": 42}, _meta={"source": "fixture"})
+    session_cm = AsyncMock()
+    session_cm.__aenter__.return_value = session
+    session_cm.__aexit__.return_value = False
+    observations = MagicMock()
+    observations.start_span.return_value = "tool-span"
+    metrics = MagicMock()
+    monkeypatch.setattr(module, "fresh_db_session", fresh_session)
+    monkeypatch.setattr(module, "streamablehttp_client", streamable_client)
+    monkeypatch.setattr(module, "ClientSession", Mock(return_value=session_cm))
+    monkeypatch.setattr(module, "check_gateway_access", AsyncMock(return_value=True))
+    monkeypatch.setattr(module, "build_gateway_auth_headers", Mock(return_value={}))
+    monkeypatch.setattr(module, "ObservabilityService", Mock(return_value=observations))
+    monkeypatch.setattr(module, "metrics_buffer", metrics)
+    monkeypatch.setattr(module.global_config_cache, "get_passthrough_headers", Mock(return_value=[]))
+    monkeypatch.setattr(module.settings, "mcpgateway_direct_proxy_enabled", True)
+    monkeypatch.setattr(module.settings, "observability_enabled", True)
+    service = ToolService()
+    monkeypatch.setattr(service, "_get_plugin_manager", AsyncMock(return_value=None))
+    trace_token = module.current_trace_id.set("trace-parent")
+    span_token = module.current_span_id.set("span-parent")
+    runtime.service, runtime.session, runtime.observations, runtime.metrics = service, session, observations, metrics
+
+    async def invoke(path, server_id="observed-server"):
+        if path == "shortcut":
+            return await service.invoke_tool_direct(gateway.id, "observed-echo", {"value": 42}, server_id=server_id)
+        return await service.invoke_tool(db, "echo", {"value": 42}, request_headers={"x-context-forge-gateway-id": gateway.id}, server_id=server_id)
+
+    runtime.invoke = invoke
+    try:
+        yield runtime
+    finally:
+        module.current_span_id.reset(span_token)
+        module.current_trace_id.reset(trace_token)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["shortcut", "canonical"])
+@pytest.mark.parametrize("registered,server_id", [(True, "observed-server"), (True, None), (False, "observed-server")])
+@pytest.mark.parametrize("is_error", [False, True])
+async def test_direct_observation_attribution_and_outcome(tool_observation_runtime, path, registered, server_id, is_error):
+    """Both direct paths record actual MCP outcomes using catalog and independent server IDs."""
+    r = tool_observation_runtime
+    if not registered:
+        r.row, r.rows = None, []
+    r.session.call_tool.return_value.isError = is_error
+    result = await r.invoke(path, server_id)
+    if path == "shortcut":
+        assert result is r.session.call_tool.return_value
+    else:
+        assert result.is_error == is_error
+    assert result.content[0].text == "unchanged"
+    if path == "shortcut":
+        r.session.call_tool.assert_awaited_once_with(name="echo", arguments={"value": 42})
+    else:
+        r.session.call_tool.assert_awaited_once_with("echo", {"value": 42}, meta=None)
+    start = r.observations.start_span.call_args.kwargs
+    assert start["name"] == "tool.invoke"
+    assert start["trace_id"] == "trace-parent"
+    assert start["parent_span_id"] == "span-parent"
+    assert start["resource_id"] == ("observed-tool" if registered else None)
+    assert start["attributes"]["tool.catalog_match"] == ("matched" if registered else "unregistered")
+    assert start["attributes"]["tool.name"] == ("observed-echo" if registered or path == "shortcut" else "echo")
+    assert "arguments" not in start["attributes"]
+    end = r.observations.end_span.call_args.kwargs
+    assert end["status"] == ("error" if is_error else "ok")
+    assert end["attributes"]["success"] is not is_error
+    assert r.metrics.record_tool_metric.call_count == int(registered)
+    if registered:
+        assert r.metrics.record_tool_metric.call_args.kwargs["tool_id"] == "observed-tool"
+        assert r.metrics.record_tool_metric.call_args.kwargs["success"] is not is_error
+    assert r.metrics.record_server_metric.call_count == int(path == "shortcut" and server_id is not None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["shortcut", "canonical"])
+@pytest.mark.parametrize("failure,reason", [(asyncio.CancelledError, "cancelled"), (TimeoutError, "timeout"), (RuntimeError, "exception")])
+async def test_direct_observation_failed_execution(tool_observation_runtime, path, failure, reason):
+    """Interrupted invocations finalize as failures and cancellation remains cancellation."""
+    r = tool_observation_runtime
+    r.session.call_tool.side_effect = failure("fixture failure")
+    with pytest.raises(asyncio.CancelledError if failure is asyncio.CancelledError else ToolInvocationError):
+        await r.invoke(path)
+    end = r.observations.end_span.call_args.kwargs
+    assert end["status"] == "error"
+    assert end["attributes"]["tool.failure_reason"] == reason
+    assert r.metrics.record_tool_metric.call_args.kwargs["success"] is False
+    if path == "shortcut":
+        assert r.metrics.record_server_metric.call_args.kwargs["success"] is False
+    else:
+        r.metrics.record_server_metric.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["shortcut", "canonical"])
+@pytest.mark.parametrize("sink", ["constructor", "start_span", "end_span", "record_tool_metric", "record_server_metric"])
+async def test_direct_observation_sink_failure_isolation(tool_observation_runtime, monkeypatch, path, sink):
+    """A failing sink preserves execution and does not prevent other recording attempts."""
+    # First-Party
+    from mcpgateway.services import tool_service as module
+
+    r = tool_observation_runtime
+    if sink == "constructor":
+        monkeypatch.setattr(module, "ObservabilityService", Mock(side_effect=RuntimeError("fixture")))
+    else:
+        owner = r.observations if sink in {"start_span", "end_span"} else r.metrics
+        getattr(owner, sink).side_effect = RuntimeError("fixture")
+    result = await r.invoke(path)
+    assert result.content[0].text == "unchanged"
+    r.metrics.record_tool_metric.assert_called_once()
+    assert r.metrics.record_server_metric.call_count == int(path == "shortcut")
+    if sink not in {"constructor", "start_span"}:
+        r.observations.end_span.assert_called_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["shortcut", "canonical"])
+@pytest.mark.parametrize("tracing,has_context", [(False, True), (True, False)])
+async def test_direct_observation_without_trace_still_records_metrics(tool_observation_runtime, monkeypatch, path, tracing, has_context):
+    """Tracing configuration and missing parent context do not suppress execution metrics."""
+    # First-Party
+    from mcpgateway.services import tool_service as module
+
+    r = tool_observation_runtime
+    monkeypatch.setattr(module.settings, "observability_enabled", tracing)
+    token = module.current_trace_id.set("trace-parent" if has_context else None)
+    try:
+        await r.invoke(path)
+    finally:
+        module.current_trace_id.reset(token)
+    r.observations.start_span.assert_not_called()
+    r.metrics.record_tool_metric.assert_called_once()
+    assert r.metrics.record_server_metric.call_count == int(path == "shortcut")
+
+
+def test_observation_catalog_lookup_is_gateway_constrained(test_engine, monkeypatch):
+    """Use real SQL to prove canonical priority and gateway isolation."""
+    # Standard
+    import uuid
+
+    # Third-Party
+    from sqlalchemy import insert
+    from sqlalchemy.orm import Session
+
+    # First-Party
+    from mcpgateway.services import tool_service as module
+
+    prefix = uuid.uuid4().hex
+    with test_engine.connect() as connection:
+        transaction = connection.begin()
+        try:
+            for gateway_id in ("a", "b"):
+                connection.execute(insert(DbGateway), {"id": prefix + gateway_id, "name": prefix + gateway_id, "url": "http://upstream/mcp", "slug": prefix + gateway_id, "capabilities": {}})
+            records = [("1", "canonical", "echo", "a"), ("2", "other", "echo", "b"), ("3", "duplicate", "ambiguous", "a"), ("4", "duplicate-two", prefix + "canonical", "a")]
+            for suffix, name, original, gateway_id in records:
+                connection.execute(
+                    insert(DbTool),
+                    {
+                        "id": prefix + suffix,
+                        "name": prefix + name,
+                        "original_name": original,
+                        "gateway_id": prefix + gateway_id,
+                        "custom_name": name,
+                        "custom_name_slug": name,
+                        "input_schema": {},
+                    },
+                )
+
+            @contextmanager
+            def fresh_session():
+                with Session(bind=connection) as session:
+                    yield session
+
+            monkeypatch.setattr(module, "fresh_db_session", fresh_session)
+            assert ToolService._resolve_observation_tool(prefix + "a", "echo")["tool.id"] == prefix + "1"
+            assert ToolService._resolve_observation_tool(prefix + "b", "echo")["tool.id"] == prefix + "2"
+            assert ToolService._resolve_observation_tool(prefix + "b", prefix + "canonical")["tool.id"] is None
+            assert ToolService._resolve_observation_tool(prefix + "a", prefix + "canonical")["tool.id"] == prefix + "1"
+            assert ToolService._resolve_observation_tool(prefix + "a", prefix + "duplicate")["tool.id"] == prefix + "3"
+        finally:
+            transaction.rollback()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["shortcut", "canonical"])
+async def test_direct_observation_lookup_failure_is_nonblocking(tool_observation_runtime, path):
+    """A telemetry-only lookup failure loses tool attribution but preserves server recording."""
+    r = tool_observation_runtime
+    r.row = None
+    execute = r.db.execute.side_effect
+
+    def fail_metadata(statement):
+        if len(statement.column_descriptions) == 3:
+            raise RuntimeError("metadata unavailable")
+        return execute(statement)
+
+    r.db.execute.side_effect = fail_metadata
+    result = await r.invoke(path)
+    assert result.content[0].text == "unchanged"
+    assert r.observations.start_span.call_args.kwargs["attributes"]["tool.catalog_match"] == "lookup_failed"
+    r.metrics.record_tool_metric.assert_not_called()
+    assert r.metrics.record_server_metric.call_count == int(path == "shortcut")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["shortcut", "canonical"])
+async def test_direct_observation_denied_before_recording(tool_observation_runtime, monkeypatch, path):
+    """Authorization denial does not create an execution span or execution metric."""
+    # First-Party
+    from mcpgateway.services import tool_service as module
+
+    r = tool_observation_runtime
+    monkeypatch.setattr(module, "check_gateway_access", AsyncMock(return_value=False))
+    with pytest.raises(ToolNotFoundError):
+        await r.invoke(path)
+    r.observations.start_span.assert_not_called()
+    r.metrics.record_tool_metric.assert_not_called()
+    r.metrics.record_server_metric.assert_not_called()
+    r.session.call_tool.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_direct_observation_concurrent_contexts(tool_observation_runtime):
+    """Concurrent calls on the same service retain their own trace and server attribution."""
+    # First-Party
+    from mcpgateway.services import tool_service as module
+
+    r = tool_observation_runtime
+    ready = asyncio.Event()
+    entered = 0
+    result = r.session.call_tool.return_value
+
+    async def upstream(*_args, **_kwargs):
+        nonlocal entered
+        entered += 1
+        if entered == 2:
+            ready.set()
+        await ready.wait()
+        return result
+
+    async def invoke(index):
+        token = module.current_trace_id.set(f"trace-{index}")
+        parent = module.current_span_id.set(f"parent-{index}")
+        try:
+            return await r.invoke("shortcut", f"server-{index}")
+        finally:
+            module.current_span_id.reset(parent)
+            module.current_trace_id.reset(token)
+
+    r.session.call_tool.side_effect = upstream
+    await asyncio.wait_for(asyncio.gather(invoke(1), invoke(2)), timeout=5)
+    assert {(c.kwargs["trace_id"], c.kwargs["parent_span_id"], c.kwargs["attributes"]["server.id"]) for c in r.observations.start_span.call_args_list} == {
+        ("trace-1", "parent-1", "server-1"),
+        ("trace-2", "parent-2", "server-2"),
+    }
+    assert {c.kwargs["server_id"] for c in r.metrics.record_server_metric.call_args_list} == {"server-1", "server-2"}
+    assert r.observations.end_span.call_count == 2
+    assert module.current_trace_id.get() == "trace-parent"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["shortcut", "canonical"])
+async def test_direct_observation_metrics_disabled(tool_observation_runtime, monkeypatch, path):
+    """Existing buffer recording toggle suppresses metrics independently of tracing."""
+    # First-Party
+    from mcpgateway.services import tool_service as module
+    from mcpgateway.services.metrics_buffer_service import MetricsBufferService
+
+    r = tool_observation_runtime
+    buffer = MetricsBufferService(enabled=True)
+    buffer.recording_enabled = False
+    monkeypatch.setattr(module, "metrics_buffer", buffer)
+    await r.invoke(path)
+    assert not buffer._tool_metrics
+    assert not buffer._server_metrics
+    r.observations.end_span.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_direct_observation_sanitizes_grouped_timeout(tool_observation_runtime):
+    """SDK task-group timeouts retain their category and redact diagnostic credentials."""
+    r = tool_observation_runtime
+    r.session.call_tool.side_effect = ExceptionGroup("SDK task group", [TimeoutError("Bearer synthetic-fixture-token")])
+    with pytest.raises(ToolInvocationError):
+        await r.invoke("shortcut")
+    end = r.observations.end_span.call_args.kwargs
+    assert end["attributes"]["tool.failure_reason"] == "timeout"
+    assert "synthetic-fixture-token" not in end["status_message"]
+    assert "synthetic-fixture-token" not in r.metrics.record_tool_metric.call_args.kwargs["error_message"]
+
+
+@pytest.mark.asyncio
+async def test_direct_observation_ambiguous_metadata(tool_observation_runtime):
+    """Legacy ambiguous metadata never attributes a metric to an arbitrary catalog row."""
+    r = tool_observation_runtime
+    r.row = None
+    r.rows = [SimpleNamespace(id="one", name="one", original_name="echo"), SimpleNamespace(id="two", name="two", original_name="echo")]
+    await r.invoke("canonical")
+    assert r.observations.start_span.call_args.kwargs["attributes"]["tool.catalog_match"] == "ambiguous"
+    r.metrics.record_tool_metric.assert_not_called()
+    r.metrics.record_server_metric.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("is_error", [False, True])
+async def test_catalog_observation_uses_existing_identity(tool_observation_runtime, monkeypatch, is_error):
+    """The normal execution pipeline preserves its catalog metric and MCP outcome."""
+    r = tool_observation_runtime
+    resolved = await r.service._resolve_tool_for_invocation(r.db, "echo", {"x-context-forge-gateway-id": r.gateway.id}, None, None, None, False, False)
+    resolved.is_direct_proxy = False
+    resolved.tool_payload.update(id=r.row.id, name=r.row.name, original_name="echo")
+    monkeypatch.setattr(r.service, "_resolve_tool_for_invocation", AsyncMock(return_value=resolved))
+    r.session.call_tool.return_value.isError = is_error
+    result = await r.invoke("canonical")
+    assert result.is_error == is_error
+    r.metrics.record_tool_metric.assert_called_once()
+    assert r.metrics.record_tool_metric.call_args.kwargs["tool_id"] == r.row.id
+    assert r.metrics.record_tool_metric.call_args.kwargs["success"] is not is_error
+    assert r.observations.start_span.call_args.kwargs["attributes"]["tool.execution_mode"] == "catalog"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("server_id", ["observed-server", "nonexistent-server", "default_server_id"])
+async def test_rpc_direct_observation_ignores_supplied_server(tool_observation_runtime, server_id):
+    """RPC gateway authorization alone cannot attribute invocations to a requested server."""
+    r = tool_observation_runtime
+    result = await r.invoke("canonical", server_id)
+    assert result.content[0].text == "unchanged"
+    r.metrics.record_tool_metric.assert_called_once()
+    r.metrics.record_server_metric.assert_not_called()
+    assert "server.id" not in r.observations.start_span.call_args.kwargs["attributes"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["shortcut", "canonical"])
+async def test_direct_observation_grouped_cancellation(tool_observation_runtime, path):
+    """Nested cancellation groups keep their identity and are never labelled MCP errors."""
+    r = tool_observation_runtime
+    failure = BaseExceptionGroup("outer", [RuntimeError("sibling"), BaseExceptionGroup("inner", [asyncio.CancelledError()])])
+    r.session.call_tool.side_effect = failure
+    with pytest.raises(BaseExceptionGroup) as exc_info:
+        await r.invoke(path)
+    assert exc_info.value is failure
+    end = r.observations.end_span.call_args.kwargs
+    assert end["status"] == "error"
+    assert end["attributes"]["tool.failure_reason"] == "cancelled"
+    assert r.metrics.record_tool_metric.call_args.kwargs["success"] is False
+
+
+@pytest.mark.asyncio
+async def test_direct_observation_bounds_names_without_changing_execution(tool_observation_runtime):
+    """Observation columns fit PostgreSQL limits while the upstream sees the complete name."""
+    r = tool_observation_runtime
+    r.row, r.rows = None, []
+    requested_name = "echo_" + "x" * 500
+    result = await r.service.invoke_tool_direct(r.gateway.id, requested_name, {})
+    assert result is r.session.call_tool.return_value
+    r.session.call_tool.assert_awaited_once_with(name=requested_name, arguments={})
+    start = r.observations.start_span.call_args.kwargs
+    assert start["resource_name"] == requested_name[:255]
+    for key in ("tool.name", "tool.original_name", "tool.requested_name"):
+        assert start["attributes"][key] == requested_name[:255]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["shortcut", "canonical"])
+async def test_direct_observation_disabled_skips_attribution_query(tool_observation_runtime, monkeypatch, path):
+    """Disabled telemetry adds no catalog attribution query to the execution path."""
+    # First-Party
+    from mcpgateway.services import tool_service as module
+    from mcpgateway.services.metrics_buffer_service import MetricsBufferService
+
+    r = tool_observation_runtime
+    r.row = None
+    buffer = MetricsBufferService(enabled=True)
+    buffer.recording_enabled = False
+    monkeypatch.setattr(module, "metrics_buffer", buffer)
+    monkeypatch.setattr(module.settings, "observability_enabled", False)
+    result = await r.invoke(path)
+    assert result.content[0].text == "unchanged"
+    assert all(len(call.args[0].column_descriptions) != 3 for call in r.db.execute.call_args_list)
+    r.observations.start_span.assert_not_called()
+    assert not buffer._tool_metrics
+    assert not buffer._server_metrics
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["pre", "post"])
+@pytest.mark.parametrize("denial", [False, True])
+async def test_plugin_failure_observation_is_not_mcp_error(tool_observation_runtime, monkeypatch, stage, denial):
+    """Plugin denials and outages remain plugin exceptions and finalize as execution failures."""
+    # Third-Party
+    from cpex.framework import PluginError, PluginViolationError
+    from cpex.framework.models import PluginErrorModel
+
+    r = tool_observation_runtime
+    failure = PluginViolationError("fixture denial") if denial else PluginError(PluginErrorModel(message="fixture outage", plugin_name="fixture"))
+    manager = MagicMock()
+    manager.has_hooks_for.return_value = True
+    manager.invoke_hook = AsyncMock(side_effect=failure)
+    managers = [None, manager] if stage == "pre" else [None, None, manager]
+    monkeypatch.setattr(r.service, "_get_plugin_manager", AsyncMock(side_effect=managers))
+    with pytest.raises(type(failure)) as exc_info:
+        await r.invoke("canonical")
+    assert exc_info.value is failure
+    assert r.session.call_tool.await_count == int(stage == "post")
+    end = r.observations.end_span.call_args.kwargs
+    assert end["status"] == "error"
+    assert end["attributes"]["tool.failure_reason"] == "exception"
+    assert r.metrics.record_tool_metric.call_args.kwargs["success"] is False

@@ -1793,6 +1793,7 @@ async def call_tool(
                         user_email=user_email,
                         token_teams=token_teams,
                         user_context=user_identity_var.get(),
+                        server_id=server_id if server_id and server_id != "default_server_id" else None,
                     )
         except Exception as e:
             logger.error("Direct proxy mode failed for gateway %s: %s", gateway_id_from_header, e)

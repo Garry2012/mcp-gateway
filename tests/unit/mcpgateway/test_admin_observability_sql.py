@@ -590,3 +590,180 @@ class TestResourceStatistics:
                 result = asyncio.run(get_resources_errors(hours=24, limit=20, _user=mock_user))
 
         assert "resources" in result
+
+
+@pytest.mark.asyncio
+async def test_tool_usage_groups_shared_observation_records_by_catalog_name(test_engine, monkeypatch):
+    """Real persisted catalog and direct-proxy spans feed the existing admin SQL aggregation."""
+    # Standard
+    import uuid
+
+    # Third-Party
+    from sqlalchemy import delete
+    from sqlalchemy.orm import sessionmaker
+
+    # First-Party
+    from mcpgateway import admin
+    from mcpgateway.db import ObservabilitySpan, ObservabilityTrace
+    from mcpgateway.services import observability_service, tool_service
+
+    session_factory = sessionmaker(bind=test_engine)
+    monkeypatch.setattr(observability_service, "_get_or_create_observability_session", lambda: (session_factory(), True))
+    monkeypatch.setattr(tool_service, "metrics_buffer", MagicMock())
+    monkeypatch.setattr(tool_service.settings, "observability_enabled", True)
+    service = observability_service.ObservabilityService()
+    trace_id = service.start_trace("catalog aggregation fixture")
+    trace_token = tool_service.current_trace_id.set(trace_id)
+    parent_token = tool_service.current_span_id.set(None)
+    canonical_name = "gateway-echo-" + uuid.uuid4().hex
+    try:
+        for mode in ("catalog", "direct_proxy"):
+            state = tool_service.ToolService._start_tool_observation(None, None, {"tool.name": canonical_name, "tool.original_name": "echo", "tool.execution_mode": mode})
+            tool_service.ToolService._finish_tool_observation(state, True, None)
+        # This shares the name attribute but is not a tool invocation and must be excluded.
+        service.start_span(trace_id, "mcp.client.request", attributes={"tool.name": canonical_name})
+        query_db = session_factory()
+        monkeypatch.setattr(admin, "get_db", lambda: iter([query_db]))
+        result = await admin.get_tool_usage.__wrapped__(MagicMock(), hours=24, limit=1000, db=query_db)
+        record = next(row for row in result["tools"] if row["tool_name"] == canonical_name)
+        assert record["count"] == 2
+        assert not any(row["tool_name"] == "echo" for row in result["tools"])
+    finally:
+        tool_service.current_span_id.reset(parent_token)
+        tool_service.current_trace_id.reset(trace_token)
+        with session_factory.begin() as db:
+            db.execute(delete(ObservabilitySpan).where(ObservabilitySpan.trace_id == trace_id))
+            db.execute(delete(ObservabilityTrace).where(ObservabilityTrace.trace_id == trace_id))
+
+
+@pytest.mark.parametrize("span_status,outcome", [("ok", "Succeeded"), ("error", "Failed"), ("unset", "In progress")])
+def test_trace_summary_separates_tool_outcome_from_http(span_status, outcome):
+    """A successful HTTP request can contain a failed or unfinished tool invocation."""
+    # Standard
+    from types import SimpleNamespace
+
+    # First-Party
+    from mcpgateway.admin import _summarize_observability_traces
+
+    trace = SimpleNamespace(trace_id="trace", attributes={"http.route": "/servers/server/mcp"}, http_url=None, http_status_code=200)
+    span = SimpleNamespace(trace_id="trace", attributes={"tool.name": "catalog-echo", "tool.original_name": "echo", "tool.execution_mode": "direct_proxy"},
+                           resource_name="catalog-echo", status=span_status, duration_ms=0, status_message="Bearer fixture-secret")
+    db = MagicMock()
+    span_query, server_query = MagicMock(), MagicMock()
+    span_query.filter.return_value.order_by.return_value.all.return_value = [span]
+    server_query.filter.return_value.all.return_value = [("server", "Discovery Studio")]
+    db.query.side_effect = [span_query, server_query]
+    summaries = _summarize_observability_traces(db, [trace])
+    result = summaries["trace"]
+    assert result["outcome"] == outcome
+    assert result["servers"] == [{"id": "server", "name": "Discovery Studio"}]
+    assert result["tools"][0]["original_name"] == "echo"
+    assert "fixture-secret" not in result["tools"][0]["status_message"]
+    assert result["tools"][0]["duration_ms"] == 0
+    assert db.query.call_count == 2
+
+
+def test_trace_summary_batches_page_and_handles_missing_context():
+    """A full trace page uses one span query and no server query when no IDs were recorded."""
+    # Standard
+    from types import SimpleNamespace
+
+    # First-Party
+    from mcpgateway.admin import _summarize_observability_traces
+
+    traces = [SimpleNamespace(trace_id=str(i), attributes={}, http_url="/mcp") for i in range(50)]
+    db = MagicMock()
+    db.query.return_value.filter.return_value.order_by.return_value.all.return_value = []
+    result = _summarize_observability_traces(db, traces)
+    assert len(result) == 50
+    assert all(row["outcome"] == "No recorded call" and not row["servers"] for row in result.values())
+    db.query.assert_called_once()
+    db.reset_mock()
+    assert _summarize_observability_traces(db, []) == {}
+    db.query.assert_not_called()
+
+
+def test_trace_templates_escape_names_and_render_missing_timing():
+    """Untrusted tool names stay text, missing identity stays unknown, and zero durations render."""
+    # Standard
+    import json
+    from types import SimpleNamespace
+
+    # Third-Party
+    from jinja2 import Environment, FileSystemLoader, select_autoescape
+
+    env = Environment(loader=FileSystemLoader("mcpgateway/templates"), autoescape=select_autoescape())
+    env.globals["csp_nonce"] = lambda _request: "fixture"
+    attack = '</script><script>alert("name")</script>'
+    now = datetime.now(timezone.utc)
+    span = SimpleNamespace(span_id="span", name="tool.invoke", resource_name=attack, attributes={"tool.original_name": attack}, kind="client", status="unset",
+                           start_time=now, end_time=None, duration_ms=None, parent_span_id=None, events=[])
+    trace = SimpleNamespace(trace_id="trace", name="POST /mcp", http_method="POST", start_time=now, end_time=None, duration_ms=None, status="unset",
+                            http_status_code=200, user_email=None, spans=[span], attributes={})
+    summary = {"tools": [{"name": attack, "original_name": attack, "mode": "direct_proxy", "status": "unset", "duration_ms": None,
+                           "failure_reason": None, "status_message": None}], "servers": [], "outcome": "In progress", "status": "unset"}
+    for name in ("observability_traces_list.html", "observability_trace_detail.html"):
+        html = env.get_template(name).render(request=None, trace=trace, traces=[trace], summary=summary, summaries={"trace": summary}, root_path="/gateway")
+        assert attack not in html
+        assert "Not recorded" in html
+        assert "In progress" in html
+        assert "anonymous" not in html or "does not imply anonymous access" in html
+    trace.duration_ms = 0
+    html = env.get_template("observability_traces_list.html").render(traces=[trace], summaries={"trace": summary}, root_path="/gateway")
+    assert "0.00 ms" in html
+    assert 'hx-get="/gateway/admin/observability/trace/trace"' in html
+
+    # Completed child spans exercise the JavaScript chart payload, not only the cards.
+    for parent_id in (None, "parent-span", attack):
+        span.parent_span_id = parent_id
+        html = env.get_template("observability_trace_detail.html").render(request=None, trace=trace, summary=summary)
+        assert attack not in html
+        script = html.split("<script", 1)[1].split(">", 1)[1].split("</script>", 1)[0]
+        serialized_parent = script.split("parent_span_id: ", 1)[1].split(",", 1)[0]
+        assert json.loads(serialized_parent) == parent_id
+
+
+@pytest.mark.asyncio
+async def test_trace_filter_uses_original_tool_name_and_utc_window(test_engine, monkeypatch):
+    """Recent UTC traces stay visible on a non-UTC host when searching an upstream name."""
+    # Standard
+    import uuid
+
+    # Third-Party
+    from sqlalchemy import delete
+    from sqlalchemy.orm import sessionmaker
+
+    # First-Party
+    from mcpgateway import admin
+    from mcpgateway.db import ObservabilitySpan, ObservabilityTrace
+
+    now = datetime.now(timezone.utc)
+
+    class LocalClock(datetime):
+        """Simulate a host ten hours ahead of the database's UTC timestamps."""
+
+        @classmethod
+        def now(cls, tz=None):
+            """Return UTC only when the caller explicitly requests an aware timestamp."""
+            return now.astimezone(tz) if tz else (now + timedelta(hours=10)).replace(tzinfo=None)
+
+    session_factory = sessionmaker(bind=test_engine)
+    trace_id = str(uuid.uuid4())
+    with session_factory.begin() as db:
+        db.add(ObservabilityTrace(trace_id=trace_id, name="POST /rpc", start_time=now - timedelta(minutes=5), status="ok", attributes={}))
+        db.flush()
+        db.add(ObservabilitySpan(trace_id=trace_id, name="tool.invoke", start_time=now, status="ok", attributes={"tool.name": "opaque-catalog-label", "tool.original_name": "my_tool"}))
+    try:
+        monkeypatch.setattr(admin, "datetime", LocalClock)
+        monkeypatch.setattr(admin, "get_db", lambda: iter([session_factory()]))
+        request = MagicMock()
+        request.scope = {"root_path": ""}
+        await admin.get_observability_traces.__wrapped__(request, time_range="1h", status_filter="all", limit=50, min_duration=None, max_duration=None,
+            http_method=None, user_email=None, name_search=None, attribute_search=None, tool_name="my_tool", _user={})
+        context = request.app.state.templates.TemplateResponse.call_args.args[2]
+        assert trace_id in context["summaries"]
+        assert context["summaries"][trace_id]["tools"][0]["name"] == "opaque-catalog-label"
+    finally:
+        with session_factory.begin() as db:
+            db.execute(delete(ObservabilitySpan).where(ObservabilitySpan.trace_id == trace_id))
+            db.execute(delete(ObservabilityTrace).where(ObservabilityTrace.trace_id == trace_id))

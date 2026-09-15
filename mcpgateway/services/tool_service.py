@@ -54,7 +54,7 @@ from mcp.client.sse import sse_client
 from mcp.client.streamable_http import streamablehttp_client
 import orjson
 from pydantic import BaseModel, ValidationError
-from sqlalchemy import and_, delete, desc, or_, select
+from sqlalchemy import and_, case, delete, desc, or_, select
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import joinedload, selectinload, Session
 
@@ -63,8 +63,7 @@ from mcpgateway.cache.global_config_cache import global_config_cache
 from mcpgateway.common.models import Gateway as PydanticGateway
 from mcpgateway.common.models import TextContent
 from mcpgateway.common.models import Tool as PydanticTool
-from mcpgateway.common.models import ToolAnnotations
-from mcpgateway.common.models import ToolResult
+from mcpgateway.common.models import ToolAnnotations, ToolResult
 from mcpgateway.common.validators import pin_url_to_resolved_ip, SecurityValidator
 from mcpgateway.config import settings
 from mcpgateway.db import A2AAgent as DbA2AAgent
@@ -89,11 +88,11 @@ from mcpgateway.services.metrics_buffer_service import get_metrics_buffer_servic
 from mcpgateway.services.metrics_cleanup_service import delete_metrics_in_batches, pause_rollup_during_purge
 from mcpgateway.services.metrics_query_service import get_top_performers_combined
 from mcpgateway.services.oauth_manager import OAuthManager
-from mcpgateway.services.token_backends.vault_backend import VaultAuthError, VaultConnectionError
-from mcpgateway.services.observability_service import current_trace_id, ObservabilityService
+from mcpgateway.services.observability_service import current_span_id, current_trace_id, ObservabilityService
 from mcpgateway.services.performance_tracker import get_performance_tracker
 from mcpgateway.services.structured_logger import get_structured_logger
 from mcpgateway.services.team_management_service import TeamManagementService
+from mcpgateway.services.token_backends.vault_backend import VaultAuthError, VaultConnectionError
 from mcpgateway.services.token_exchange_cache import TokenExchangeCache
 from mcpgateway.services.upstream_session_registry import downstream_session_id_from_request_context, get_upstream_session_registry, RegistryNotInitializedError, TransportType
 from mcpgateway.transports.context import UserContext
@@ -117,7 +116,7 @@ from mcpgateway.utils.ssl_context_cache import get_cached_ssl_context
 from mcpgateway.utils.subject_token import extract_inbound_bearer, looks_like_jwt
 from mcpgateway.utils.token_exchange_audit import audit_token_exchange
 from mcpgateway.utils.trace_context import format_trace_team_scope
-from mcpgateway.utils.trace_redaction import is_input_capture_enabled, is_output_capture_enabled, serialize_trace_payload
+from mcpgateway.utils.trace_redaction import is_input_capture_enabled, is_output_capture_enabled, sanitize_trace_text, serialize_trace_payload
 from mcpgateway.utils.url_auth import apply_query_param_auth, sanitize_exception_message, sanitize_url_for_logging
 from mcpgateway.utils.validate_signature import validate_signature
 
@@ -1099,6 +1098,17 @@ class ResolvedTool:
     gateway: Optional[DbGateway]
     tool_payload: Dict[str, Any]
     gateway_payload: Optional[Dict[str, Any]]
+
+
+@dataclass
+class _ToolObservation:
+    """Invocation-local recording state; never shared across service calls."""
+
+    start_time: float
+    tool_id: Optional[str]
+    server_id: Optional[str]
+    service: Optional[ObservabilityService] = None
+    span_id: Optional[str] = None
 
 
 class ToolService(BaseService):
@@ -3724,6 +3734,119 @@ class ToolService(BaseService):
             )
             raise ToolError(f"Failed to set tool state: {str(e)}")
 
+    @staticmethod
+    def _resolve_observation_tool(gateway_id: Optional[str], name: str, tool_row: Optional[DbTool] = None) -> Dict[str, Any]:
+        """Resolve catalog attribution without changing execution or authorization.
+
+        Args:
+            gateway_id: Already authorized upstream gateway.
+            name: Requested tool name, canonical or original.
+            tool_row: Existing canonical lookup result, while still attached.
+
+        Returns:
+            Scalar span attributes, with no tool ID for a missing or ambiguous match.
+        """
+        attributes: Dict[str, Any] = {"tool.id": None, "tool.name": name, "tool.catalog_match": "unregistered"}
+        if not gateway_id:
+            return attributes
+        try:
+            if not settings.observability_enabled and not metrics_buffer.recording_enabled:
+                return attributes
+            if tool_row is not None:
+                attributes.update({"tool.id": str(tool_row.id), "tool.name": tool_row.name, "tool.original_name": tool_row.original_name, "tool.catalog_match": "matched"})
+                return attributes
+            # Independent session: a failed telemetry query must not poison the routing transaction.
+            with fresh_db_session() as db:
+                rows = db.execute(
+                    select(DbTool.id, DbTool.__table__.c.name, DbTool.original_name)
+                    .where(DbTool.gateway_id == gateway_id, or_(DbTool.__table__.c.name == name, DbTool.original_name == name))
+                    .order_by(case((DbTool.__table__.c.name == name, 0), else_=1))
+                    .limit(2)
+                ).all()
+                if rows:
+                    if len(rows) > 1 and (rows[0].name != name or rows[1].name == name):
+                        attributes["tool.catalog_match"] = "ambiguous"
+                        logger.debug("Ambiguous catalog attribution for direct tool invocation")
+                    else:
+                        row = rows[0]
+                        attributes.update({"tool.id": str(row.id), "tool.name": row.name, "tool.original_name": row.original_name, "tool.catalog_match": "matched"})
+        except Exception as observation_error:
+            logger.warning("Failed to resolve catalog attribution for direct tool invocation: %s", type(observation_error).__name__)
+            attributes = {"tool.id": None, "tool.name": name, "tool.catalog_match": "lookup_failed"}
+        return attributes
+
+    @staticmethod
+    def _start_tool_observation(tool_id: Optional[str], server_id: Optional[str], attributes: Dict[str, Any]) -> _ToolObservation:
+        """Start the existing database span without retaining a database session.
+
+        Args:
+            tool_id: Observation catalog ID, separate from the execution ID.
+            server_id: Virtual server context supplied by the authorized caller.
+            attributes: Compatible tool span metadata, without arguments or headers.
+
+        Returns:
+            Local lifecycle state, also used when tracing is disabled or fails.
+        """
+        observation = _ToolObservation(start_time=time.monotonic(), tool_id=tool_id, server_id=server_id)
+        try:
+            trace_id = current_trace_id.get()
+            if trace_id and settings.observability_enabled:
+                # Bound only observation metadata; upstream names and catalog lookups remain unchanged.
+                attributes = attributes.copy()
+                for key in ("tool.name", "tool.original_name", "tool.requested_name"):
+                    if isinstance(attributes.get(key), str):
+                        attributes[key] = attributes[key][:255]
+                observation.service = ObservabilityService()
+                observation.span_id = observation.service.start_span(
+                    trace_id=trace_id,
+                    parent_span_id=current_span_id.get(),
+                    name="tool.invoke",
+                    kind="client",
+                    resource_type="tool",
+                    resource_name=attributes["tool.name"],
+                    resource_id=tool_id,
+                    attributes=attributes,
+                )
+        except Exception as observation_error:
+            logger.warning("Failed to start observability span for tool invocation: %s", type(observation_error).__name__)
+        return observation
+
+    @staticmethod
+    def _finish_tool_observation(observation: _ToolObservation, success: bool, error_message: Optional[str], failure_reason: Optional[str] = None) -> None:
+        """Complete each enabled sink independently, preserving the invocation outcome.
+
+        Args:
+            observation: Local state from the recording start operation.
+            success: Final MCP execution outcome.
+            error_message: Optional diagnostic; sanitized before persistence.
+            failure_reason: Bounded failure category, including cancellation and timeout.
+        """
+        safe_error = None
+        try:
+            if error_message:
+                safe_error = sanitize_trace_text(error_message)[:2000]
+        except Exception:
+            logger.warning("Failed to sanitize tool observation error; omitting diagnostic")
+        if observation.span_id and observation.service:
+            try:
+                attributes: Dict[str, Any] = {"success": success, "duration_ms": (time.monotonic() - observation.start_time) * 1000}
+                if not success:
+                    attributes["tool.failure_reason"] = failure_reason or "mcp_error"
+                observation.service.end_span(span_id=observation.span_id, status="ok" if success else "error", status_message=safe_error, attributes=attributes)
+            except Exception as observation_error:
+                logger.warning("Failed to end observability span for tool invocation: %s", type(observation_error).__name__)
+        if observation.tool_id:
+            try:
+                metrics_buffer.record_tool_metric(tool_id=observation.tool_id, start_time=observation.start_time, success=success, error_message=safe_error)
+            except Exception as metric_error:
+                logger.warning("Failed to record tool metric: %s", type(metric_error).__name__)
+        # Server attribution does not require a registered tool (direct proxy can pass through uncatalogued tools).
+        if observation.server_id:
+            try:
+                metrics_buffer.record_server_metric(server_id=observation.server_id, start_time=observation.start_time, success=success, error_message=safe_error)
+            except Exception as metric_error:
+                logger.warning("Failed to record server metric: %s", type(metric_error).__name__)
+
     async def invoke_tool_direct(
         self,
         gateway_id: str,
@@ -3734,6 +3857,7 @@ class ToolService(BaseService):
         user_email: Optional[str] = None,
         token_teams: Optional[List[str]] = None,
         user_context: Optional[UserContext] = None,
+        server_id: Optional[str] = None,
     ) -> types.CallToolResult:
         """
         Invoke a tool directly on a remote MCP gateway in direct_proxy mode.
@@ -3750,6 +3874,7 @@ class ToolService(BaseService):
             user_email: Email of the requesting user for access control.
             token_teams: Team IDs from the user's token for access control.
             user_context: Optional UserContext for identity propagation.
+            server_id: Virtual server context from the authorized transport endpoint.
 
         Returns:
             CallToolResult from the remote MCP server (as-is, no normalization).
@@ -3790,6 +3915,7 @@ class ToolService(BaseService):
                 meta_data = build_identity_meta(user_context, meta_data, gateway)
 
             gateway_url = gateway.url
+            gateway_id = str(gateway.id)
 
             # Resolve the original (unprefixed) tool name for the remote server.
             # Tools registered via gateways are stored as "{gateway_slug}{separator}{slugified_name}",
@@ -3808,13 +3934,32 @@ class ToolService(BaseService):
                     if name.startswith(prefix):
                         remote_name = name[len(prefix) :]
 
+            observation_attributes = self._resolve_observation_tool(gateway_id, name, tool_row)
+
+        observation_attributes.setdefault("tool.original_name", remote_name)
+        observation_attributes.update(
+            {
+                "tool.gateway_id": gateway_id,
+                "tool.integration_type": "MCP",
+                "tool.requested_name": name,
+                "tool.execution_mode": "direct_proxy",
+                "arguments_count": len(arguments) if arguments else 0,
+                "has_headers": bool(request_headers),
+                "server.id": server_id,
+            }
+        )
+        observation = self._start_tool_observation(observation_attributes["tool.id"], server_id, observation_attributes)
+        success = False
+        error_message = None
+        failure_reason = None
+
         # Use MCP SDK to connect and call tool
         try:
             with create_span(
                 "mcp.client.call",
                 {
                     "mcp.tool.name": remote_name,
-                    "contextforge.gateway_id": str(gateway.id),
+                    "contextforge.gateway_id": gateway_id,
                     "contextforge.runtime": "python",
                     "contextforge.transport": "streamablehttp",
                     "network.protocol.name": "mcp",
@@ -3835,7 +3980,7 @@ class ToolService(BaseService):
                             "mcp.client.request",
                             {
                                 "mcp.tool.name": remote_name,
-                                "contextforge.gateway_id": str(gateway.id),
+                                "contextforge.gateway_id": gateway_id,
                                 "contextforge.runtime": "python",
                             },
                         ):
@@ -3849,7 +3994,7 @@ class ToolService(BaseService):
                             "mcp.client.response",
                             {
                                 "mcp.tool.name": remote_name,
-                                "contextforge.gateway_id": str(gateway.id),
+                                "contextforge.gateway_id": gateway_id,
                                 "contextforge.runtime": "python",
                                 "upstream.response.success": not getattr(tool_result, "is_error", False) and not getattr(tool_result, "isError", False),
                             },
@@ -3858,13 +4003,35 @@ class ToolService(BaseService):
 
                         logger.info(
                             "[INVOKE TOOL] Using direct_proxy mode for gateway %s (from X-Context-Forge-Gateway-Id header). Meta Attached: %s",
-                            SecurityValidator.sanitize_log_message(gateway.id),
+                            SecurityValidator.sanitize_log_message(gateway_id),
                             meta_data is not None,
                         )
+                        is_error = getattr(tool_result, "is_error", None)
+                        if is_error is None:
+                            is_error = getattr(tool_result, "isError", False)
+                        success = not is_error
                         return tool_result
-        except Exception as e:
+        except asyncio.CancelledError:
+            success = False
+            failure_reason = "cancelled"
+            raise
+        except BaseException as e:
+            success = False
+            root_cause: BaseException = e
+            if isinstance(e, BaseExceptionGroup):
+                if e.subgroup(asyncio.CancelledError) is not None:
+                    failure_reason = "cancelled"
+                    raise
+                while isinstance(root_cause, BaseExceptionGroup) and root_cause.exceptions:
+                    root_cause = root_cause.exceptions[0]
+            failure_reason = "timeout" if isinstance(root_cause, (TimeoutError, httpx.TimeoutException)) else "exception"
+            if not isinstance(e, Exception):
+                raise
+            error_message = str(root_cause)
             logger.exception("Direct proxy tool invocation failed for %s: %s", name, e)
             raise ToolInvocationError(f"Direct proxy tool invocation failed: {str(e)}")
+        finally:
+            self._finish_tool_observation(observation, success, error_message, failure_reason)
 
     # Conservative TTL when the AS omits expires_in (RFC 8693 makes it optional, L1).
     # pylint: disable=duplicate-code
@@ -4183,7 +4350,8 @@ class ToolService(BaseService):
         if not app_user_email or settings.oauth_token_backend != "vault":  # nosec B105 - config discriminator, not a password
             return None
         try:
-            from mcpgateway.services.token_storage_service import TokenStorageService, build_token_user_context  # pylint: disable=import-outside-toplevel
+            # First-Party
+            from mcpgateway.services.token_storage_service import build_token_user_context, TokenStorageService  # pylint: disable=import-outside-toplevel
 
             with fresh_db_session() as token_db:
                 token_storage_context = build_token_user_context(token_db, app_user_email, token_teams, jwt_teams_claim)
@@ -4488,7 +4656,7 @@ class ToolService(BaseService):
             if grant_type == "authorization_code":
                 try:
                     # First-Party
-                    from mcpgateway.services.token_storage_service import TokenStorageService, build_token_user_context  # pylint: disable=import-outside-toplevel
+                    from mcpgateway.services.token_storage_service import build_token_user_context, TokenStorageService  # pylint: disable=import-outside-toplevel
 
                     if not app_user_email:
                         raise ToolInvocationError(f"User authentication required for OAuth-protected gateway '{gateway_name}'. Please ensure you are authenticated.")
@@ -5543,36 +5711,29 @@ class ToolService(BaseService):
         tool_result: Optional[ToolResult] = None
         tool_team_scope = format_trace_team_scope(token_teams)
 
-        # Get trace_id from context for database span creation
-        trace_id = current_trace_id.get()
-        db_span_id = None
-        db_span_ended = False
-        observability_service = ObservabilityService() if trace_id else None
-
-        # Create database span for observability_spans table
-        if trace_id and observability_service:
-            try:
-                # start_span creates its own independent session (issue #3883)
-                db_span_id = observability_service.start_span(
-                    trace_id=trace_id,
-                    name="tool.invoke",
-                    kind="client",
-                    resource_type="tool",
-                    resource_name=name,
-                    resource_id=tool_id,
-                    attributes={
-                        "tool.name": name,
-                        "tool.id": tool_id,
-                        "tool.integration_type": tool_integration_type,
-                        "tool.gateway_id": tool_gateway_id,
-                        "arguments_count": len(arguments) if arguments else 0,
-                        "has_headers": bool(request_headers),
-                    },
-                )
-                logger.debug("✓ Created tool.invoke span: %s for tool: %s", db_span_id, name)
-            except Exception as e:
-                logger.warning("Failed to start observability span for tool invocation: %s", e)
-                db_span_id = None
+        observation_attributes = {
+            "tool.name": tool_name_computed,
+            "tool.id": tool_id,
+            "tool.original_name": tool_name_original,
+            "tool.requested_name": name,
+            "tool.integration_type": tool_integration_type,
+            "tool.gateway_id": tool_gateway_id,
+            "tool.execution_mode": "direct_proxy" if is_direct_proxy else "catalog",
+            "tool.catalog_match": "matched",
+            "arguments_count": len(arguments) if arguments else 0,
+            "has_headers": bool(request_headers),
+            "server.id": server_id,
+        }
+        if is_direct_proxy:
+            observation_attributes.update(self._resolve_observation_tool(tool_gateway_id, name))
+            # /rpc direct proxy authorizes the gateway, not its caller-supplied server_id.
+            # Only the path-validated transport shortcut can attribute direct calls to a server.
+            observation_attributes.pop("server.id", None)
+        observation_tool_id = observation_attributes["tool.id"]
+        observation = self._start_tool_observation(observation_tool_id, None if is_direct_proxy else server_id, observation_attributes)
+        # Preserve the ordinary path's timing boundary, including plugin-driven re-entry.
+        observation.start_time = start_time
+        failure_reason = None
 
         # Create a trace span for OpenTelemetry export (Jaeger, Zipkin, etc.)
         span_attributes = {
@@ -6031,7 +6192,7 @@ class ToolService(BaseService):
 
                                 with fresh_db_session() as token_db:
                                     # First-Party
-                                    from mcpgateway.services.token_storage_service import TokenStorageService, build_token_user_context  # pylint: disable=import-outside-toplevel
+                                    from mcpgateway.services.token_storage_service import build_token_user_context, TokenStorageService  # pylint: disable=import-outside-toplevel
 
                                     # build_token_user_context uses token_teams as-is (JWT sole authority)
                                     # and only queries DB for the non-scoped is_admin flag.
@@ -6946,6 +7107,8 @@ class ToolService(BaseService):
                 _emit_ctl_telemetry()
                 return tool_result
             except PluginViolationError:
+                success = False
+                failure_reason = "exception"
                 # Deliberate policy denial — emit partial telemetry so the summary span captures
                 # result.allowed=False and any pre-denial execution records.
                 # Note: when violations_as_exceptions=True, CPEX raises PluginViolationError
@@ -6956,6 +7119,8 @@ class ToolService(BaseService):
                 _emit_ctl_telemetry()
                 raise
             except PluginError:
+                success = False
+                failure_reason = "exception"
                 # Plugin outage (crash/timeout/misconfiguration) — mark the accumulator so
                 # the summary span carries cpex.control.plugin_error=True, emit partial
                 # telemetry (even when the accumulator is empty, e.g. first-plugin failure),
@@ -6966,6 +7131,8 @@ class ToolService(BaseService):
                 _emit_ctl_telemetry()
                 raise
             except ToolTimeoutError as e:
+                success = False
+                failure_reason = "timeout"
                 # ToolTimeoutError is raised by timeout handlers which already called tool_post_invoke.
                 # Do NOT call post_invoke again — the retry_delay_ms signal is carried on the exception.
                 # Emit partial telemetry before retrying or re-raising so timeout records are not lost.
@@ -6997,15 +7164,24 @@ class ToolService(BaseService):
                     )
                 raise
             except asyncio.CancelledError:
-                # Never wrap a cancellation as a ToolInvocationError; cancellation is not a tool failure.
+                success = False
+                failure_reason = "cancelled"
+                # Preserve cancellation while marking the interrupted execution in telemetry.
                 raise
             except BaseException as e:
+                success = False
+                failure_reason = "exception"
                 # Extract root cause from ExceptionGroup (Python 3.11+)
                 # MCP SDK uses TaskGroup which wraps exceptions in ExceptionGroup
                 root_cause = e
                 if isinstance(e, BaseExceptionGroup):
+                    if e.subgroup(asyncio.CancelledError) is not None:
+                        failure_reason = "cancelled"
+                        raise
                     while isinstance(root_cause, BaseExceptionGroup) and root_cause.exceptions:
                         root_cause = root_cause.exceptions[0]
+                if isinstance(root_cause, (TimeoutError, httpx.TimeoutException)):
+                    failure_reason = "timeout"
                 error_message = str(root_cause)
                 # Set span error status
                 if span:
@@ -7069,23 +7245,7 @@ class ToolService(BaseService):
                 # Calculate duration
                 duration_ms = (time.monotonic() - start_time) * 1000
 
-                # End database span for observability_spans table
-                # end_span creates its own independent session (issue #3883)
-                if db_span_id and observability_service and not db_span_ended:
-                    try:
-                        observability_service.end_span(
-                            span_id=db_span_id,
-                            status="ok" if success else "error",
-                            status_message=error_message if error_message else None,
-                            attributes={
-                                "success": success,
-                                "duration_ms": duration_ms,
-                            },
-                        )
-                        db_span_ended = True
-                        logger.debug("✓ Ended tool.invoke span: %s", db_span_id)
-                    except Exception as e:
-                        logger.warning("Failed to end observability span for tool invocation: %s", e)
+                self._finish_tool_observation(observation, success, error_message, failure_reason)
 
                 # Add final span attributes for OpenTelemetry
                 if span:
@@ -7096,36 +7256,6 @@ class ToolService(BaseService):
                     # wrong - was the only case that recorded nothing.
                     if tool_result and is_output_capture_enabled("tool.invoke"):
                         set_span_attribute(span, "langfuse.observation.output", serialize_trace_payload(tool_result))
-
-                # ═══════════════════════════════════════════════════════════════════════════
-                # PHASE 4: Record metrics via buffered service (batches writes for performance)
-                # ═══════════════════════════════════════════════════════════════════════════
-                # Only record metrics if tool_id is valid (skip for direct_proxy mode)
-                if tool_id:
-                    try:
-                        metrics_buffer.record_tool_metric(
-                            tool_id=tool_id,
-                            start_time=start_time,
-                            success=success,
-                            error_message=error_message,
-                        )
-                    except Exception as metric_error:
-                        logger.warning("Failed to record tool metric: %s", metric_error)
-
-                # Record server metrics ONLY when invoked through a specific virtual server
-                # When server_id is provided, it means the tool was called via a virtual server endpoint
-                # Direct tool calls via /rpc should NOT populate server metrics
-                if tool_id and server_id:
-                    try:
-                        # Record server metric only for the specific virtual server being accessed
-                        metrics_buffer.record_server_metric(
-                            server_id=server_id,
-                            start_time=start_time,
-                            success=success,
-                            error_message=error_message,
-                        )
-                    except Exception as metric_error:
-                        logger.warning("Failed to record server metric: %s", metric_error)
 
                 # Log structured message with performance tracking (using local variables)
                 if success:
