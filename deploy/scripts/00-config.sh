@@ -125,6 +125,7 @@ KV_JWT_SECRET="${KV_JWT_SECRET:-mcpgw-jwt-secret}"  # pragma: allowlist secret
 KV_ENC_SECRET="${KV_ENC_SECRET:-mcpgw-auth-encryption-secret}"  # pragma: allowlist secret
 KV_DB_URL="${KV_DB_URL:-mcpgw-database-url}"
 KV_ADMIN_PASSWORD="${KV_ADMIN_PASSWORD:-mcpgw-platform-admin-password}"  # pragma: allowlist secret
+KV_DEFAULT_USER_PASSWORD="${KV_DEFAULT_USER_PASSWORD:-mcpgw-default-user-password}"  # pragma: allowlist secret
 
 # --- Base images -------------------------------------------------------------
 # MUST be passed explicitly to `az acr build`. The Containerfile declares

@@ -93,6 +93,10 @@ kv_has "$KV_ENC_SECRET" && ok "$KV_ENC_SECRET (exists)" \
 kv_has "$KV_ADMIN_PASSWORD" && ok "$KV_ADMIN_PASSWORD (exists)" \
   || kv_set "$KV_ADMIN_PASSWORD" "$(python3 -c 'import secrets;print(secrets.token_urlsafe(24))')"
 
+# Keep the bootstrap default distinct from the administrator's own password.
+kv_has "$KV_DEFAULT_USER_PASSWORD" && ok "$KV_DEFAULT_USER_PASSWORD (exists)" \
+  || kv_set "$KV_DEFAULT_USER_PASSWORD" "$(python3 -c 'import secrets;print(secrets.token_urlsafe(24))')"
+
 if kv_has "$KV_DB_URL"; then
   ok "$KV_DB_URL (exists)"
 elif [ -n "$PG_PASSWORD" ]; then

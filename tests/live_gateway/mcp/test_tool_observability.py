@@ -138,7 +138,7 @@ async def test_tool_observability_parity(observation_catalog: ObservationCatalog
     server_before = _total(_metrics(client, "servers", server_id))
     endpoint = f"{BASE_URL}/servers/{server_id}/mcp/"
 
-    async def invoke(name: str, outcome: str = "ok", direct: bool = False, scoped: bool = True) -> CallToolResult:
+    async def invoke(name: str, outcome: str = "ok", direct: bool = False, scoped: bool = True, arguments: dict[str, Any] | None = None) -> CallToolResult:
         call_headers = dict(headers)
         if direct:
             call_headers["X-Context-Forge-Gateway-Id"] = gateway_id
@@ -149,10 +149,14 @@ async def test_tool_observability_parity(observation_catalog: ObservationCatalog
                 args = {"value": "fixture"}
                 if name != "unregistered_echo":
                     args["outcome"] = outcome
-                return await session.call_tool(name, args)
+                return await session.call_tool(name, args if arguments is None else arguments)
 
     normal = await invoke(echo["name"])
     assert not normal.isError
+    assert not (await invoke(echo["name"], scoped=False)).isError
+    rejected = await invoke(echo["name"], arguments={"private": "private-customer-value"})
+    assert rejected.isError
+    assert "private-customer-value" not in str(rejected)
     assert (await invoke(echo["name"], "timeout")).isError
     response = client.put(f"/gateways/{gateway_id}", json={"gateway_mode": "direct_proxy"})
     response.raise_for_status()
@@ -186,18 +190,21 @@ async def test_tool_observability_parity(observation_catalog: ObservationCatalog
     while True:
         tool_count = _total(_metrics(client, "tools", echo["id"], server_id)) - tool_before
         server_count = _total(_metrics(client, "servers", server_id)) - server_before
-        if (tool_count, server_count) == (7, 5):
+        if (tool_count, server_count) == (9, 6):
             break
-        assert time.monotonic() < deadline, f"Expected (7, 5) metric deltas, got {(tool_count, server_count)}"
+        assert time.monotonic() < deadline, f"Expected (9, 6) metric deltas, got {(tool_count, server_count)}"
         await asyncio.sleep(2)
 
     response = client.get("/observability/spans", params={"resource_type": "tool", "resource_name": echo["name"], "limit": 100})
     response.raise_for_status()
     spans = [s for s in response.json() if s["name"] == "tool.invoke"]
-    assert len(spans) == 7
-    assert sorted(s["status"] for s in spans) == ["error", "error", "ok", "ok", "ok", "ok", "ok"]
-    assert sum(s["attributes"].get("server.id") == server_id for s in spans) == 4
-    assert sum(s["attributes"].get("server.id") is None for s in spans) == 3
+    assert len(spans) == 9
+    rejected_spans = [s for s in spans if s["attributes"].get("tool.failure_reason") == "invalid_arguments"]
+    assert len(rejected_spans) == 1
+    assert "private-customer-value" not in str(rejected_spans)
+    assert sorted(s["status"] for s in spans) == ["error", "error", "error", "ok", "ok", "ok", "ok", "ok", "ok"]
+    assert sum(s["attributes"].get("server.id") == server_id for s in spans) == 5
+    assert sum(s["attributes"].get("server.id") is None for s in spans) == 4
     assert {s["attributes"].get("tool.execution_mode") for s in spans} == {"catalog", "direct_proxy"}
     assert all(s.get("resourceId", s.get("resource_id")) == echo["id"] for s in spans)
     # The real admin HTML exposes tool outcomes and names, including HTTP-200 MCP errors.

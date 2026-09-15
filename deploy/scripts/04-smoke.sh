@@ -14,6 +14,12 @@ URL="https://${FQDN}"
 
 log "Smoke test: $URL"
 
+DEFAULT_PASSWORD_REF="$(az containerapp show -n "$APP_NAME_AZ" -g "$RESOURCE_GROUP" \
+  --query "properties.template.containers[0].env[?name=='DEFAULT_USER_PASSWORD'].secretRef | [0]" -o tsv)"
+[ "$DEFAULT_PASSWORD_REF" = "default-user-password" ] \
+  || die "DEFAULT_USER_PASSWORD must reference its dedicated Key Vault secret"
+ok "default user password uses a dedicated secret reference"
+
 # 0. A running revision must actually be serving the image this deploy built.
 # Everything below asserts on HTTP output, which cannot distinguish two builds
 # that share a brand - so without this check the whole suite passes happily
