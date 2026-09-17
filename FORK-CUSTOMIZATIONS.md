@@ -463,6 +463,10 @@ The Azure image uses the Python runtime, but optional Rust builds must also use
 the patched dependency. Do not restore the older minimum or lock entry during
 future merges; retain the dependency-policy check.
 
+The existing version-scoped `cargo-vet` exemption in `supply-chain/config.toml`
+follows the patched version. It remains an explicit exemption, not an audit
+certification; the independent vulnerability check must still pass.
+
 ## Conventions for future divergences
 
 1. Prefer changing configuration over changing widely-edited source files.

@@ -314,8 +314,9 @@ version = "2.1.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.rustls]]
-version = "0.23.43"
+version = "0.23.45"
 criteria = "safe-to-deploy"
+notes = "Carry the existing version-scoped exemption to the RUSTSEC-2026-0285 patched release; this is not an audit certification."
 
 [[exemptions.rustls-platform-verifier-android]]
 version = "0.1.1"
