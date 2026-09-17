@@ -7,6 +7,9 @@ This file records everything that deliberately diverges from upstream, and how t
 the fork in sync. It exists so that divergences are discoverable in one place rather
 than discovered by surprise during a merge.
 
+Last updated: **2026-09-17**. This record covers the fork snapshot and the separate
+integration branch below; an integration entry does not mean it has been deployed.
+
 ## Syncing with upstream
 
 The `upstream` remote is configured with pushing disabled, so an accidental
@@ -26,6 +29,38 @@ in history.
 This differs from the PR workflow described in `AGENTS.md`, which uses rebase. That
 applies to feature branches within a single repository, which is a different situation
 from tracking a fork.
+
+### Latest integration: 2026-09-15
+
+Merge `13a692e3c` on `Garry2012/upstream-integration-20260915` integrates upstream
+`2af962ac8` (1.0.10) with fork snapshot `3643f5e9f`. The original workspace branch,
+`Garry2012/gpt5-reasoning-effort-400-error`, retained `3643f5e9f` as its code
+baseline. The integration was reviewed and tested locally; it was **not pushed or
+deployed to Azure as part of that merge**.
+
+- Preserved branding, CSP-safe Alpine components, tool observability, execution
+  timelines and Azure build compatibility.
+- Accepted upstream's removal of deprecated `mcpgateway/wrapper.py`; do not restore
+  it merely to preserve former branding edits.
+- Kept upstream's live input-schema validation, adding safe observation of rejected
+  arguments (§5), and passwordless-user migration, with type-only corrections (§9).
+- Resolved the secrets-baseline conflict using upstream's audited baseline, then
+  regenerated it through the normal detection workflow.
+
+Validation covered the full Python suite, JavaScript tests and UI builds, live
+tool observations, protocol/RBAC on a two-worker Python gateway with PostgreSQL
+and Redis, and SQLite/PostgreSQL migration round trips. Lint, package checks and
+pre-commit passed. Full Bandit retained upstream's low-severity findings; the Rust
+runtime and Azure AMD64 build were outside this validation. Detailed results and
+waivers are in the integration worktree's local `.context/integration-verification.md`
+(not committed).
+
+**Deployment gates:** provision the dedicated default-user password secret (§7),
+build the reviewed commit for Azure AMD64, and check real registered-tool payloads
+against stricter input schemas. Keep stateless sessions enabled and session
+affinity disabled, matching the validated deployment configuration. Optional
+multi-worker stateful/affinity tests showed intermittent `Session terminated`
+errors that also reproduced on the pre-merge source image; this remains unresolved.
 
 ### Repository configuration
 
@@ -72,6 +107,10 @@ observability fixes (divergence 3):
 
 The two high-churn files carry deliberately small, localised hunks. The large rewrite
 sits in the file upstream touches about twice a quarter, which is the trade we wanted.
+
+These are historical measurements, not the current total fork diff. The changes
+in §5–6 increase the tool-service and admin-observability surface; review their
+shared helpers and regression tests on each future sync.
 
 ### login.html is the hot spot
 
@@ -136,12 +175,10 @@ Status: **implemented**, and submitted upstream as
 [#6127](https://github.com/IBM/mcp-context-forge/pull/6127) (Closes #6054).
 If both merge, this divergence disappears on the next sync.
 
-**Upstream status, checked 2026-09-03: both still OPEN and unreviewed.** Opened
-2026-08-07, no activity since; `reviewDecision: REVIEW_REQUIRED`, zero reviews and
-zero comments on either. Both are `MERGEABLE` but `BLOCKED` pending a reviewer.
-Plan on carrying this divergence indefinitely rather than assuming it lands — the
-guard tests below are what keep it safe across syncs. Re-check the PR status when
-updating this file rather than trusting this line.
+**Upstream status, checked 2026-09-17: both still OPEN, neither merged.**
+Continue carrying the fixes and guard tests until upstream supplies equivalent
+behavior. Re-check the PR status when updating this file rather than trusting
+this dated status.
 
 These are **bug fixes to upstream code**, not customisations. Every defect was verified
 present in `upstream/main`; our fork had never touched `tabs.js` or any observability
@@ -278,6 +315,157 @@ restores the 403 for every team-scoped admin. The regression tests in
 `tests/unit/mcpgateway/services/test_permission_service.py` (four cases: widened
 lookup, team-scoped lookup, denial without `admin.*`, public-only token) will
 fail loudly if it is removed.
+
+### 5. Tool execution observations across catalog and direct-proxy paths
+
+Status: **implemented** in snapshot `3643f5e9f`; integration `13a692e3c` adds
+schema-rejection observation and global-server sentinel normalization.
+
+`mcpgateway/services/tool_service.py` reuses `ObservabilityService`, the metrics
+buffer, trace context and redaction helpers. `_start_tool_observation()` and
+`_finish_tool_observation()` share the lifecycle across catalog invocation, direct
+invocation and direct-proxy delegation. No parallel telemetry store was introduced.
+
+- Catalog attribution is observation-only: `observation_tool_id` is separate from
+  the execution ID. Lookup failures must not change routing or authorization.
+- Registered calls record tool metrics; server-scoped calls also record server
+  metrics. An unregistered direct tool can still record a server metric and span.
+  Keep metric guards independent; server recording does not require a tool ID.
+- Global `/mcp` calls have no virtual-server metric. Normalize the transport's
+  `default_server_id` sentinel to `None` before passing it into tool invocation.
+- One observation covers a logical invocation, including internal retries. Final
+  MCP errors, exceptions, timeouts and cancellations close it with a failure
+  outcome. Delegation must not double-count the invocation.
+- Each sink is independently best-effort. Lookup, span, sanitization and metric
+  failures must preserve the tool result or original exception. Keep independent
+  observability sessions rather than using the routing transaction.
+- Do not capture arguments or auth headers in the added metadata. In integration,
+  invalid inputs use `tool.failure_reason=invalid_arguments` and a fixed error
+  message: raw schema-validation errors can expose submitted values. Preserve
+  rejection before execution, plugin post hooks and retries.
+
+**Merge guidance:** keep upstream execution/validation behavior and route recording
+through the shared helpers. Do not move schema rejection ahead of observation
+startup or collapse the tool/server metric guards together.
+
+Guards: `tests/unit/mcpgateway/services/test_tool_service.py`,
+`tests/unit/mcpgateway/services/test_metrics_buffer_service.py`, and
+`tests/unit/mcpgateway/transports/test_streamablehttp_transport.py`. Retain the
+transport instrumentation-failure cases: its broad exception handler can otherwise
+turn a telemetry failure into a client error. The black-box test,
+`tests/live_gateway/mcp/test_tool_observability.py`, covers catalog/direct calls;
+integration adds global calls and schema-rejection privacy checks.
+
+### 6. Tool names, outcomes and execution timelines in the Admin UI
+
+Status: **implemented** in snapshot `3643f5e9f`, preserved in `13a692e3c`.
+
+`mcpgateway/admin.py::_summarize_observability_traces()` supplies shared summaries
+to the trace list/detail templates: original tool names, catalog names where
+different, execution modes and outcomes. Requests without recorded tool spans
+retain an HTTP-request fallback; historical traces are not backfilled. Tool-name
+filtering matches both original and catalog names.
+
+The dashboard, statistics and tool templates distinguish requests from tool
+executions. The detail template reuses existing Gantt/flame renderers and a shared
+payload serialized with Jinja's `tojson`, including `parent_span_id`. Previously,
+HTML-escaped quote interpolation broke chart JavaScript, leaving timelines empty.
+Empty and unfinished traces have explicit display states.
+
+**Merge guidance:** retain shared summaries and chart payloads; do not duplicate
+aggregation in templates or restore hand-built JavaScript string quoting. Keep
+new directives compatible with CSP-safe Alpine (§3).
+
+Guards: `tests/unit/mcpgateway/test_admin_observability_sql.py` covers rendering,
+filtering and serialization; `tests/unit/js/observability-exec-strip.test.js`
+covers partial-script execution, dashboard filters and time-range refresh. Retain
+the template CSP tests in §3 as well.
+
+### 7. Azure build and secret configuration
+
+Status: Azure scripts/build compatibility are in the fork snapshot; the dedicated
+default-user password wiring is **integration-only** in `13a692e3c`.
+
+`deploy/scripts/` and `deploy/README.md` reuse the Containerfile, ACR and Key Vault.
+Preserve classic-builder-compatible `COPY` plus `RUN chmod`, explicit base-image
+arguments including `WHEELS_REF`, and the clean `git archive HEAD` build context.
+Uncommitted source edits are not included in that archive. Use native AMD64
+infrastructure for Azure builds; the scripts explain the Apple Silicon emulation
+limitation with the selected base images.
+
+Upstream startup validation requires a valid `DEFAULT_USER_PASSWORD` when email
+auth is enabled. Integration adds `KV_DEFAULT_USER_PASSWORD` (default secret name
+`mcpgw-default-user-password`). `01-prepare-azure.sh` creates a random value only
+if absent; `03-deploy-gateway.sh` checks and maps it through Key Vault to
+`DEFAULT_USER_PASSWORD`; `04-smoke.sh` checks the secret reference. Keep it separate
+from the platform-admin password, preserve existing secrets, and do not rotate
+JWT or encryption keys during an upstream sync.
+
+**Merge guidance:** retain deployment overrides through Containerfile/configuration
+changes and check new required settings before rollout. Reuse existing secret
+helpers. Shell syntax checks passed; the merged Azure AMD64 build and rollout
+remain pending.
+
+### 8. Global MCP team-token permission checks
+
+Status: **integration-only**, implemented in `13a692e3c`.
+
+`mcpgateway/transports/streamablehttp_transport.py` uses
+`_check_any_team_for_streamable_rbac()` for tool execution, logging and
+`servers.use`. Previously the decision depended on a virtual-server ID, denying
+team API tokens on global `/mcp` even when their team role granted access.
+
+The shared helper enables team-role lookup for team-scoped API tokens and keeps
+existing session-token behavior. `PermissionService` still receives `token_teams`;
+visibility, permission scope caps and role checks remain independent. Public-only
+API tokens do not gain team permissions.
+
+**Merge guidance:** do not restore a server-ID prerequisite or reimplement team
+claim interpretation. Keep the transport helper truth-table tests and
+`test_global_tool_call_uses_token_scoped_roles`, including public-only denial.
+Re-run live protocol/RBAC checks after changes.
+
+### 9. Integration test isolation and migration typing
+
+Status: **integration-only**, implemented in `13a692e3c`.
+
+- `tests/unit/mcpgateway/services/test_session_affinity.py` detaches the real
+  OpenTelemetry context attached by its trace-envelope test, asserts the trace ID
+  and verifies restored context. Keep the `finally` cleanup: without it, subsequent
+  tests inherit a stale trace ID and fail depending on execution order.
+- `mcpgateway/alembic/versions/5e211ec89cad_allow_nullable_email_user_password_hash.py`
+  uses SQLAlchemy's `ReflectedColumn` and a read-only `Sequence` annotation. These
+  are type corrections only. Preserve upstream's revision chain and passwordless
+  metadata snapshots; SQLite and PostgreSQL upgrade/downgrade checks passed.
+
+### 10. Configured reasoning effort in gateway-backed LLM chat
+
+Status: **implemented** before snapshot `3643f5e9f`, preserved in `13a692e3c`.
+
+`GatewayProvider` in `mcpgateway/services/mcp_client_chat_service.py` forwards a
+configured `reasoning_effort` into shared OpenAI-family client kwargs (`openai`,
+`azure_openai`, `openai_compatible`), leaving it unset when not configured. This
+allows an endpoint-supported effort for tool calls without a hardcoded default.
+
+**Merge guidance:** retain the configured value through provider construction;
+do not forward it indiscriminately to other providers. Regression coverage is in
+`tests/unit/mcpgateway/services/test_mcp_client_chat_service_extended.py`.
+
+### 11. Rust TLS dependency security update
+
+Status: **integration-only**, added during the 2026-09-17 pre-merge checks.
+
+`crates/mcp_runtime/Cargo.toml` requires `rustls >=0.23.45` within the 0.23 series,
+and `Cargo.lock` resolves that patched version. This addresses
+[RUSTSEC-2026-0285](https://rustsec.org/advisories/RUSTSEC-2026-0285.html), which
+the GitHub Rust dependency-policy check detected in upstream's locked 0.23.43.
+The Azure image uses the Python runtime, but optional Rust builds must also use
+the patched dependency. Do not restore the older minimum or lock entry during
+future merges; retain the dependency-policy check.
+
+The existing version-scoped `cargo-vet` exemption in `supply-chain/config.toml`
+follows the patched version. It remains an explicit exemption, not an audit
+certification; the independent vulnerability check must still pass.
 
 ## Conventions for future divergences
 

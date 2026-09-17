@@ -54,7 +54,9 @@ from mcp.client.sse import sse_client
 from mcp.client.streamable_http import streamablehttp_client
 import orjson
 from pydantic import BaseModel, ValidationError
-from sqlalchemy import and_, delete, desc, or_, select
+import referencing
+import referencing.exceptions
+from sqlalchemy import and_, case, delete, desc, or_, select
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import joinedload, selectinload, Session
 
@@ -63,8 +65,7 @@ from mcpgateway.cache.global_config_cache import global_config_cache
 from mcpgateway.common.models import Gateway as PydanticGateway
 from mcpgateway.common.models import TextContent
 from mcpgateway.common.models import Tool as PydanticTool
-from mcpgateway.common.models import ToolAnnotations
-from mcpgateway.common.models import ToolResult
+from mcpgateway.common.models import ToolAnnotations, ToolResult
 from mcpgateway.common.validators import pin_url_to_resolved_ip, SecurityValidator
 from mcpgateway.config import settings
 from mcpgateway.db import A2AAgent as DbA2AAgent
@@ -89,11 +90,11 @@ from mcpgateway.services.metrics_buffer_service import get_metrics_buffer_servic
 from mcpgateway.services.metrics_cleanup_service import delete_metrics_in_batches, pause_rollup_during_purge
 from mcpgateway.services.metrics_query_service import get_top_performers_combined
 from mcpgateway.services.oauth_manager import OAuthManager
-from mcpgateway.services.token_backends.vault_backend import VaultAuthError, VaultConnectionError
-from mcpgateway.services.observability_service import current_trace_id, ObservabilityService
+from mcpgateway.services.observability_service import current_span_id, current_trace_id, ObservabilityService
 from mcpgateway.services.performance_tracker import get_performance_tracker
 from mcpgateway.services.structured_logger import get_structured_logger
 from mcpgateway.services.team_management_service import TeamManagementService
+from mcpgateway.services.token_backends.vault_backend import VaultAuthError, VaultConnectionError
 from mcpgateway.services.token_exchange_cache import TokenExchangeCache
 from mcpgateway.services.upstream_session_registry import downstream_session_id_from_request_context, get_upstream_session_registry, RegistryNotInitializedError, TransportType
 from mcpgateway.transports.context import UserContext
@@ -117,7 +118,7 @@ from mcpgateway.utils.ssl_context_cache import get_cached_ssl_context
 from mcpgateway.utils.subject_token import extract_inbound_bearer, looks_like_jwt
 from mcpgateway.utils.token_exchange_audit import audit_token_exchange
 from mcpgateway.utils.trace_context import format_trace_team_scope
-from mcpgateway.utils.trace_redaction import is_input_capture_enabled, is_output_capture_enabled, serialize_trace_payload
+from mcpgateway.utils.trace_redaction import is_input_capture_enabled, is_output_capture_enabled, sanitize_trace_text, serialize_trace_payload
 from mcpgateway.utils.url_auth import apply_query_param_auth, sanitize_exception_message, sanitize_url_for_logging
 from mcpgateway.utils.validate_signature import validate_signature
 
@@ -636,6 +637,46 @@ def _handle_json_parse_error(response, error, is_error_response: bool = False) -
     return {"response_text": text}
 
 
+# SECURITY: JSON Schemas validated here are tool-controlled data — a federated tool ships its
+# own input/output schema — and jsonschema's default registry resolves remote ``$ref`` URIs by
+# fetching them with ``urllib.request.urlopen``. That is an SSRF primitive reachable from the
+# preview route and from every live invocation. Two layers close it: non-local refs are refused
+# outright (below), and validators are built against this registry, which holds only the bundled
+# metaschemas and has no ``retrieve`` callable, so any residual resolution attempt raises
+# ``referencing.exceptions.Unresolvable`` instead of hitting the network.
+_NO_RETRIEVE_REGISTRY: referencing.Registry = referencing.Registry()
+
+# Every keyword whose value is a reference URI, across the drafts we accept.
+_REFERENCE_KEYWORDS = ("$ref", "$dynamicRef", "$recursiveRef")
+
+
+def _assert_local_refs_only(schema: Any) -> None:
+    """Refuse a schema that references anything outside its own document.
+
+    Walks the whole schema (iteratively, so a deeply nested schema cannot exhaust the
+    stack) and rejects any reference keyword whose value is not a same-document pointer,
+    anchor, or the empty self-reference. Anything else — ``https://``, ``file://``, or a
+    relative path resolved against a base URI — would make validation fetch a URL.
+
+    Args:
+        schema: The parsed JSON Schema (or any sub-node of one).
+
+    Raises:
+        jsonschema.exceptions.SchemaError: If a non-local reference is present.
+    """
+    stack: List[Any] = [schema]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, Mapping):
+            for keyword in _REFERENCE_KEYWORDS:
+                ref = node.get(keyword)
+                if isinstance(ref, str) and ref and not ref.startswith("#"):
+                    raise jsonschema.exceptions.SchemaError(f"Refusing to resolve non-local {keyword} '{ref}': only same-document references (starting with '#') are supported.")
+            stack.extend(node.values())
+        elif isinstance(node, list):
+            stack.extend(node)
+
+
 @lru_cache(maxsize=128)
 def _get_validator_class_and_check(schema_json: str) -> Tuple[type, dict]:
     """Cache schema validation and validator class selection.
@@ -654,8 +695,15 @@ def _get_validator_class_and_check(schema_json: str) -> Tuple[type, dict]:
 
     Returns:
         Tuple of (validator_class, schema_dict) ready for instantiation.
+
+    Raises:
+        jsonschema.exceptions.SchemaError: If the schema references anything outside its
+            own document (see :func:`_assert_local_refs_only`) or no validator accepts it.
     """
     schema = orjson.loads(schema_json)
+
+    # Refuse non-local $refs before any validator sees the schema (SSRF guard).
+    _assert_local_refs_only(schema)
 
     # First try auto-detection based on $schema
     validator_cls = validators.validator_for(schema)
@@ -706,16 +754,50 @@ def _validate_with_cached_schema(instance: Any, schema: dict) -> None:
     Raises:
         error: The best matching ValidationError from jsonschema validation.
         jsonschema.exceptions.ValidationError: If validation fails.
-        jsonschema.exceptions.SchemaError: If the schema itself is invalid.
+        jsonschema.exceptions.SchemaError: If the schema itself is invalid or carries a
+            non-local ``$ref``.
+        referencing.exceptions.Unresolvable: If a reference cannot be resolved from the
+            in-memory registry (never fetched over the network).
     """
     schema_json = _canonicalize_schema(schema)
     validator_cls, checked_schema = _get_validator_class_and_check(schema_json)
-    # Create fresh validator instance for thread safety
-    validator = validator_cls(checked_schema)
+    # Create fresh validator instance for thread safety. The registry never retrieves,
+    # so an unresolvable reference fails closed instead of triggering a network fetch.
+    validator = validator_cls(checked_schema, registry=_NO_RETRIEVE_REGISTRY)
     # Use best_match to match jsonschema.validate() error selection behavior
     error = jsonschema.exceptions.best_match(validator.iter_errors(instance))
     if error is not None:
         raise error
+
+
+def _validate_tool_input_arguments(arguments: Dict[str, Any], input_schema: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Validate candidate arguments against a tool's input schema.
+
+    Shared by ``ToolService.invoke_tool`` (live invocation) and
+    ``ToolService.preview_tool_invocation`` (dry-run, #5629) via
+    ``ToolService._resolve_tool_for_invocation`` so the two can never disagree about
+    whether a given set of arguments is acceptable.
+
+    Schemas are tool-controlled, so this fails closed on a schema that reaches outside its
+    own document: a non-local ``$ref`` is rejected up front and an unresolvable reference
+    is reported as a validation failure rather than being fetched over the network.
+
+    Args:
+        arguments: Candidate arguments to validate.
+        input_schema: The tool's JSON input schema, if any.
+
+    Returns:
+        None if ``arguments`` validate cleanly (or there is no schema to check against),
+        otherwise the ``str()`` of the ``jsonschema``/``referencing`` validation, schema,
+        or reference-resolution error.
+    """
+    if not input_schema:
+        return None
+    try:
+        _validate_with_cached_schema(arguments, input_schema)
+    except (jsonschema.exceptions.ValidationError, jsonschema.exceptions.SchemaError, referencing.exceptions.Unresolvable) as exc:
+        return str(exc)
+    return None
 
 
 def extract_using_jq(data, jq_filter=""):
@@ -1092,6 +1174,13 @@ class ResolvedTool:
         tool_payload: Flattened tool fields, from a cache hit, a cache-miss ORM conversion,
             or direct-proxy synthesis. Always populated.
         gateway_payload: Flattened gateway fields, or None when the tool has no gateway.
+        schema_validation_error: ``str()`` of the ``jsonschema`` error when the caller's
+            ``arguments`` fail the tool's input schema, via ``_validate_tool_input_arguments``
+            (#5629); None when arguments validate, no schema exists, or no ``arguments`` were
+            passed to resolution. Never raised from resolution itself -- each caller decides
+            how to react (``invoke_tool`` raises ``ToolInvocationError``;
+            ``preview_tool_invocation`` reports ``validated=False`` plus a warning) since a
+            dry-run must not turn a schema mismatch into an HTTP error.
     """
 
     is_direct_proxy: bool
@@ -1099,6 +1188,18 @@ class ResolvedTool:
     gateway: Optional[DbGateway]
     tool_payload: Dict[str, Any]
     gateway_payload: Optional[Dict[str, Any]]
+    schema_validation_error: Optional[str] = None
+
+
+@dataclass
+class _ToolObservation:
+    """Invocation-local recording state; never shared across service calls."""
+
+    start_time: float
+    tool_id: Optional[str]
+    server_id: Optional[str]
+    service: Optional[ObservabilityService] = None
+    span_id: Optional[str] = None
 
 
 class ToolService(BaseService):
@@ -3724,6 +3825,119 @@ class ToolService(BaseService):
             )
             raise ToolError(f"Failed to set tool state: {str(e)}")
 
+    @staticmethod
+    def _resolve_observation_tool(gateway_id: Optional[str], name: str, tool_row: Optional[DbTool] = None) -> Dict[str, Any]:
+        """Resolve catalog attribution without changing execution or authorization.
+
+        Args:
+            gateway_id: Already authorized upstream gateway.
+            name: Requested tool name, canonical or original.
+            tool_row: Existing canonical lookup result, while still attached.
+
+        Returns:
+            Scalar span attributes, with no tool ID for a missing or ambiguous match.
+        """
+        attributes: Dict[str, Any] = {"tool.id": None, "tool.name": name, "tool.catalog_match": "unregistered"}
+        if not gateway_id:
+            return attributes
+        try:
+            if not settings.observability_enabled and not metrics_buffer.recording_enabled:
+                return attributes
+            if tool_row is not None:
+                attributes.update({"tool.id": str(tool_row.id), "tool.name": tool_row.name, "tool.original_name": tool_row.original_name, "tool.catalog_match": "matched"})
+                return attributes
+            # Independent session: a failed telemetry query must not poison the routing transaction.
+            with fresh_db_session() as db:
+                rows = db.execute(
+                    select(DbTool.id, DbTool.__table__.c.name, DbTool.original_name)
+                    .where(DbTool.gateway_id == gateway_id, or_(DbTool.__table__.c.name == name, DbTool.original_name == name))
+                    .order_by(case((DbTool.__table__.c.name == name, 0), else_=1))
+                    .limit(2)
+                ).all()
+                if rows:
+                    if len(rows) > 1 and (rows[0].name != name or rows[1].name == name):
+                        attributes["tool.catalog_match"] = "ambiguous"
+                        logger.debug("Ambiguous catalog attribution for direct tool invocation")
+                    else:
+                        row = rows[0]
+                        attributes.update({"tool.id": str(row.id), "tool.name": row.name, "tool.original_name": row.original_name, "tool.catalog_match": "matched"})
+        except Exception as observation_error:
+            logger.warning("Failed to resolve catalog attribution for direct tool invocation: %s", type(observation_error).__name__)
+            attributes = {"tool.id": None, "tool.name": name, "tool.catalog_match": "lookup_failed"}
+        return attributes
+
+    @staticmethod
+    def _start_tool_observation(tool_id: Optional[str], server_id: Optional[str], attributes: Dict[str, Any]) -> _ToolObservation:
+        """Start the existing database span without retaining a database session.
+
+        Args:
+            tool_id: Observation catalog ID, separate from the execution ID.
+            server_id: Virtual server context supplied by the authorized caller.
+            attributes: Compatible tool span metadata, without arguments or headers.
+
+        Returns:
+            Local lifecycle state, also used when tracing is disabled or fails.
+        """
+        observation = _ToolObservation(start_time=time.monotonic(), tool_id=tool_id, server_id=server_id)
+        try:
+            trace_id = current_trace_id.get()
+            if trace_id and settings.observability_enabled:
+                # Bound only observation metadata; upstream names and catalog lookups remain unchanged.
+                attributes = attributes.copy()
+                for key in ("tool.name", "tool.original_name", "tool.requested_name"):
+                    if isinstance(attributes.get(key), str):
+                        attributes[key] = attributes[key][:255]
+                observation.service = ObservabilityService()
+                observation.span_id = observation.service.start_span(
+                    trace_id=trace_id,
+                    parent_span_id=current_span_id.get(),
+                    name="tool.invoke",
+                    kind="client",
+                    resource_type="tool",
+                    resource_name=attributes["tool.name"],
+                    resource_id=tool_id,
+                    attributes=attributes,
+                )
+        except Exception as observation_error:
+            logger.warning("Failed to start observability span for tool invocation: %s", type(observation_error).__name__)
+        return observation
+
+    @staticmethod
+    def _finish_tool_observation(observation: _ToolObservation, success: bool, error_message: Optional[str], failure_reason: Optional[str] = None) -> None:
+        """Complete each enabled sink independently, preserving the invocation outcome.
+
+        Args:
+            observation: Local state from the recording start operation.
+            success: Final MCP execution outcome.
+            error_message: Optional diagnostic; sanitized before persistence.
+            failure_reason: Bounded failure category, including cancellation and timeout.
+        """
+        safe_error = None
+        try:
+            if error_message:
+                safe_error = sanitize_trace_text(error_message)[:2000]
+        except Exception:
+            logger.warning("Failed to sanitize tool observation error; omitting diagnostic")
+        if observation.span_id and observation.service:
+            try:
+                attributes: Dict[str, Any] = {"success": success, "duration_ms": (time.monotonic() - observation.start_time) * 1000}
+                if not success:
+                    attributes["tool.failure_reason"] = failure_reason or "mcp_error"
+                observation.service.end_span(span_id=observation.span_id, status="ok" if success else "error", status_message=safe_error, attributes=attributes)
+            except Exception as observation_error:
+                logger.warning("Failed to end observability span for tool invocation: %s", type(observation_error).__name__)
+        if observation.tool_id:
+            try:
+                metrics_buffer.record_tool_metric(tool_id=observation.tool_id, start_time=observation.start_time, success=success, error_message=safe_error)
+            except Exception as metric_error:
+                logger.warning("Failed to record tool metric: %s", type(metric_error).__name__)
+        # Server attribution does not require a registered tool (direct proxy can pass through uncatalogued tools).
+        if observation.server_id:
+            try:
+                metrics_buffer.record_server_metric(server_id=observation.server_id, start_time=observation.start_time, success=success, error_message=safe_error)
+            except Exception as metric_error:
+                logger.warning("Failed to record server metric: %s", type(metric_error).__name__)
+
     async def invoke_tool_direct(
         self,
         gateway_id: str,
@@ -3734,6 +3948,7 @@ class ToolService(BaseService):
         user_email: Optional[str] = None,
         token_teams: Optional[List[str]] = None,
         user_context: Optional[UserContext] = None,
+        server_id: Optional[str] = None,
     ) -> types.CallToolResult:
         """
         Invoke a tool directly on a remote MCP gateway in direct_proxy mode.
@@ -3750,6 +3965,7 @@ class ToolService(BaseService):
             user_email: Email of the requesting user for access control.
             token_teams: Team IDs from the user's token for access control.
             user_context: Optional UserContext for identity propagation.
+            server_id: Virtual server context from the authorized transport endpoint.
 
         Returns:
             CallToolResult from the remote MCP server (as-is, no normalization).
@@ -3790,6 +4006,7 @@ class ToolService(BaseService):
                 meta_data = build_identity_meta(user_context, meta_data, gateway)
 
             gateway_url = gateway.url
+            gateway_id = str(gateway.id)
 
             # Resolve the original (unprefixed) tool name for the remote server.
             # Tools registered via gateways are stored as "{gateway_slug}{separator}{slugified_name}",
@@ -3808,13 +4025,33 @@ class ToolService(BaseService):
                     if name.startswith(prefix):
                         remote_name = name[len(prefix) :]
 
+            observation_attributes = self._resolve_observation_tool(gateway_id, name, tool_row)
+
+        if not observation_attributes.get("tool.original_name"):
+            observation_attributes["tool.original_name"] = remote_name
+        observation_attributes.update(
+            {
+                "tool.gateway_id": gateway_id,
+                "tool.integration_type": "MCP",
+                "tool.requested_name": name,
+                "tool.execution_mode": "direct_proxy",
+                "arguments_count": len(arguments) if arguments else 0,
+                "has_headers": bool(request_headers),
+                "server.id": server_id,
+            }
+        )
+        observation = self._start_tool_observation(observation_attributes["tool.id"], server_id, observation_attributes)
+        success = False
+        error_message = None
+        failure_reason = None
+
         # Use MCP SDK to connect and call tool
         try:
             with create_span(
                 "mcp.client.call",
                 {
                     "mcp.tool.name": remote_name,
-                    "contextforge.gateway_id": str(gateway.id),
+                    "contextforge.gateway_id": gateway_id,
                     "contextforge.runtime": "python",
                     "contextforge.transport": "streamablehttp",
                     "network.protocol.name": "mcp",
@@ -3835,7 +4072,7 @@ class ToolService(BaseService):
                             "mcp.client.request",
                             {
                                 "mcp.tool.name": remote_name,
-                                "contextforge.gateway_id": str(gateway.id),
+                                "contextforge.gateway_id": gateway_id,
                                 "contextforge.runtime": "python",
                             },
                         ):
@@ -3849,7 +4086,7 @@ class ToolService(BaseService):
                             "mcp.client.response",
                             {
                                 "mcp.tool.name": remote_name,
-                                "contextforge.gateway_id": str(gateway.id),
+                                "contextforge.gateway_id": gateway_id,
                                 "contextforge.runtime": "python",
                                 "upstream.response.success": not getattr(tool_result, "is_error", False) and not getattr(tool_result, "isError", False),
                             },
@@ -3858,13 +4095,35 @@ class ToolService(BaseService):
 
                         logger.info(
                             "[INVOKE TOOL] Using direct_proxy mode for gateway %s (from X-Context-Forge-Gateway-Id header). Meta Attached: %s",
-                            SecurityValidator.sanitize_log_message(gateway.id),
+                            SecurityValidator.sanitize_log_message(gateway_id),
                             meta_data is not None,
                         )
+                        is_error = getattr(tool_result, "is_error", None)
+                        if is_error is None:
+                            is_error = getattr(tool_result, "isError", False)
+                        success = not is_error
                         return tool_result
-        except Exception as e:
+        except asyncio.CancelledError:
+            success = False
+            failure_reason = "cancelled"
+            raise
+        except BaseException as e:
+            success = False
+            root_cause: BaseException = e
+            if isinstance(e, BaseExceptionGroup):
+                if e.subgroup(asyncio.CancelledError) is not None:
+                    failure_reason = "cancelled"
+                    raise
+                while isinstance(root_cause, BaseExceptionGroup) and root_cause.exceptions:
+                    root_cause = root_cause.exceptions[0]
+            failure_reason = "timeout" if isinstance(root_cause, (TimeoutError, httpx.TimeoutException)) else "exception"
+            if not isinstance(e, Exception):
+                raise
+            error_message = str(root_cause)
             logger.exception("Direct proxy tool invocation failed for %s: %s", name, e)
             raise ToolInvocationError(f"Direct proxy tool invocation failed: {str(e)}")
+        finally:
+            self._finish_tool_observation(observation, success, error_message, failure_reason)
 
     # Conservative TTL when the AS omits expires_in (RFC 8693 makes it optional, L1).
     # pylint: disable=duplicate-code
@@ -4183,7 +4442,8 @@ class ToolService(BaseService):
         if not app_user_email or settings.oauth_token_backend != "vault":  # nosec B105 - config discriminator, not a password
             return None
         try:
-            from mcpgateway.services.token_storage_service import TokenStorageService, build_token_user_context  # pylint: disable=import-outside-toplevel
+            # First-Party
+            from mcpgateway.services.token_storage_service import build_token_user_context, TokenStorageService  # pylint: disable=import-outside-toplevel
 
             with fresh_db_session() as token_db:
                 token_storage_context = build_token_user_context(token_db, app_user_email, token_teams, jwt_teams_claim)
@@ -4488,7 +4748,7 @@ class ToolService(BaseService):
             if grant_type == "authorization_code":
                 try:
                     # First-Party
-                    from mcpgateway.services.token_storage_service import TokenStorageService, build_token_user_context  # pylint: disable=import-outside-toplevel
+                    from mcpgateway.services.token_storage_service import build_token_user_context, TokenStorageService  # pylint: disable=import-outside-toplevel
 
                     if not app_user_email:
                         raise ToolInvocationError(f"User authentication required for OAuth-protected gateway '{gateway_name}'. Please ensure you are authenticated.")
@@ -4997,6 +5257,7 @@ class ToolService(BaseService):
         server_id: Optional[str],
         require_app_visible: bool,
         require_model_visible: bool,
+        arguments: Optional[Dict[str, Any]] = None,
     ) -> ResolvedTool:
         """Resolve a tool name to an authorized, invocable target.
 
@@ -5004,7 +5265,7 @@ class ToolService(BaseService):
         required to answer "is this tool invocable by this caller"): no network call, no
         plugin hook, no dispatch. Extracted from ``invoke_tool`` (#5629) so the live
         invocation path and the dry-run preview path (``preview_tool_invocation``) share
-        one resolution/RBAC implementation and cannot silently drift apart.
+        one resolution/RBAC/schema-validation implementation and cannot silently drift apart.
 
         Args:
             db: Database session.
@@ -5019,6 +5280,11 @@ class ToolService(BaseService):
             require_app_visible: When True, deny resolution unless the tool is MCP Apps
                 app-visible.
             require_model_visible: When True, deny resolution unless the tool is model-visible.
+            arguments: Candidate arguments to validate against the resolved tool's input
+                schema (#5629). None skips schema validation entirely -- the direct-proxy
+                path has no schema, and validation errors surface via
+                ``ResolvedTool.schema_validation_error`` rather than being raised here, so
+                callers that don't pass ``arguments`` see no schema check applied at all.
 
         Returns:
             ResolvedTool: The resolved, authorized tool (or direct-proxy target).
@@ -5202,7 +5468,19 @@ class ToolService(BaseService):
         elif require_model_visible and not is_direct_proxy and not is_model_visible_tool(tool_payload):
             raise ToolNotFoundError(f"Tool not found: {name}")
 
-        return ResolvedTool(is_direct_proxy=is_direct_proxy, tool=tool, gateway=gateway, tool_payload=tool_payload, gateway_payload=gateway_payload)
+        # Input-schema validation (#5629): shared by invoke_tool and preview_tool_invocation
+        # so the two can never disagree about whether a given set of arguments is acceptable.
+        # Reported, not raised -- see ResolvedTool.schema_validation_error.
+        schema_validation_error = _validate_tool_input_arguments(arguments, tool_payload.get("input_schema")) if arguments is not None else None
+
+        return ResolvedTool(
+            is_direct_proxy=is_direct_proxy,
+            tool=tool,
+            gateway=gateway,
+            tool_payload=tool_payload,
+            gateway_payload=gateway_payload,
+            schema_validation_error=schema_validation_error,
+        )
 
     async def invoke_tool(
         self,
@@ -5257,7 +5535,8 @@ class ToolService(BaseService):
 
         Raises:
             ToolNotFoundError: If tool not found or access denied.
-            ToolInvocationError: If invocation fails or A2A authentication decryption fails.
+            ToolInvocationError: If invocation fails, A2A authentication decryption fails,
+                or arguments fail the tool's input schema (#5629; same validator preview uses).
             ToolTimeoutError: If tool invocation times out.
             PluginViolationError: If plugin blocks tool invocation.
             PluginError: If encounters issue with plugin.
@@ -5282,9 +5561,10 @@ class ToolService(BaseService):
         # ═══════════════════════════════════════════════════════════════════════════
         # PHASE 1: Resolve tool name to an authorized, invocable target.
         # Shared with preview_tool_invocation (#5629) via _resolve_tool_for_invocation
-        # so tool lookup, RBAC, and visibility rules cannot drift between the two paths.
+        # so tool lookup, RBAC, visibility rules, and input-schema validation cannot
+        # drift between the two paths.
         # ═══════════════════════════════════════════════════════════════════════════
-        resolved = await self._resolve_tool_for_invocation(db, name, request_headers, user_email, token_teams, server_id, require_app_visible, require_model_visible)
+        resolved = await self._resolve_tool_for_invocation(db, name, request_headers, user_email, token_teams, server_id, require_app_visible, require_model_visible, arguments=arguments)
         is_direct_proxy = resolved.is_direct_proxy
         tool = resolved.tool
         gateway = resolved.gateway
@@ -5543,36 +5823,29 @@ class ToolService(BaseService):
         tool_result: Optional[ToolResult] = None
         tool_team_scope = format_trace_team_scope(token_teams)
 
-        # Get trace_id from context for database span creation
-        trace_id = current_trace_id.get()
-        db_span_id = None
-        db_span_ended = False
-        observability_service = ObservabilityService() if trace_id else None
-
-        # Create database span for observability_spans table
-        if trace_id and observability_service:
-            try:
-                # start_span creates its own independent session (issue #3883)
-                db_span_id = observability_service.start_span(
-                    trace_id=trace_id,
-                    name="tool.invoke",
-                    kind="client",
-                    resource_type="tool",
-                    resource_name=name,
-                    resource_id=tool_id,
-                    attributes={
-                        "tool.name": name,
-                        "tool.id": tool_id,
-                        "tool.integration_type": tool_integration_type,
-                        "tool.gateway_id": tool_gateway_id,
-                        "arguments_count": len(arguments) if arguments else 0,
-                        "has_headers": bool(request_headers),
-                    },
-                )
-                logger.debug("✓ Created tool.invoke span: %s for tool: %s", db_span_id, name)
-            except Exception as e:
-                logger.warning("Failed to start observability span for tool invocation: %s", e)
-                db_span_id = None
+        observation_attributes = {
+            "tool.name": tool_name_computed,
+            "tool.id": tool_id,
+            "tool.original_name": tool_name_original,
+            "tool.requested_name": name,
+            "tool.integration_type": tool_integration_type,
+            "tool.gateway_id": tool_gateway_id,
+            "tool.execution_mode": "direct_proxy" if is_direct_proxy else "catalog",
+            "tool.catalog_match": "matched",
+            "arguments_count": len(arguments) if arguments else 0,
+            "has_headers": bool(request_headers),
+            "server.id": server_id,
+        }
+        if is_direct_proxy:
+            observation_attributes.update(self._resolve_observation_tool(tool_gateway_id, name))
+            # /rpc direct proxy authorizes the gateway, not its caller-supplied server_id.
+            # Only the path-validated transport shortcut can attribute direct calls to a server.
+            observation_attributes.pop("server.id", None)
+        observation_tool_id = observation_attributes["tool.id"]
+        observation = self._start_tool_observation(observation_tool_id, None if is_direct_proxy else server_id, observation_attributes)
+        # Preserve the ordinary path's timing boundary, including plugin-driven re-entry.
+        observation.start_time = start_time
+        failure_reason = None
 
         # Create a trace span for OpenTelemetry export (Jaeger, Zipkin, etc.)
         span_attributes = {
@@ -5591,6 +5864,11 @@ class ToolService(BaseService):
 
         with create_span("tool.invoke", span_attributes) as span:
             try:
+                if resolved.schema_validation_error:
+                    failure_reason = "invalid_arguments"
+                    # jsonschema error strings contain the submitted instance. Keep
+                    # argument values out of logs and traces when capture is disabled.
+                    raise ToolInvocationError(f"Invalid arguments for tool '{name}': input schema validation failed")
                 # Create a lightweight lookup child span so Langfuse shows the invoke breakdown.
                 with create_child_span(
                     "tool.lookup",
@@ -6031,7 +6309,7 @@ class ToolService(BaseService):
 
                                 with fresh_db_session() as token_db:
                                     # First-Party
-                                    from mcpgateway.services.token_storage_service import TokenStorageService, build_token_user_context  # pylint: disable=import-outside-toplevel
+                                    from mcpgateway.services.token_storage_service import build_token_user_context, TokenStorageService  # pylint: disable=import-outside-toplevel
 
                                     # build_token_user_context uses token_teams as-is (JWT sole authority)
                                     # and only queries DB for the non-scoped is_admin flag.
@@ -6718,6 +6996,7 @@ class ToolService(BaseService):
                         )
                         if not settings.enable_sensitive_header_passthrough:
                             headers = filter_sensitive_headers(headers)
+                    # Plugins always see filtered headers for security reasons
                     plugin_headers = filter_sensitive_headers(headers)
 
                     # Plugin hook: tool pre-invoke for A2A
@@ -6749,12 +7028,42 @@ class ToolService(BaseService):
                             arguments = payload.args
                             if payload.headers is not None:
                                 plugin_returned_headers = payload.headers.model_dump()
+
+                                # Defense in depth: a plugin (e.g. Vault) that determined the
+                                # destination requires managed credentials it couldn't supply
+                                # signals this by returning "authorization": "" -- read here, off
+                                # the plugin's raw returned headers, since checking only the
+                                # post-allowlist-filtered `safe_headers` below would silently
+                                # drop the sentinel (and thus never strip the real header)
+                                # whenever Authorization isn't in this agent's passthrough_headers
+                                # or sensitive passthrough is disabled. A real bearer token is
+                                # never empty, so this is unambiguous.
+                                auth_mismatch = plugin_returned_headers.get("authorization") == ""
+
                                 if a2a_allowlist:
                                     allowlist_lower = {h.lower() for h in a2a_allowlist}
                                     safe_headers = {k: v for k, v in plugin_returned_headers.items() if k.lower() in allowlist_lower}
                                     if not settings.enable_sensitive_header_passthrough:
                                         safe_headers = filter_sensitive_headers(safe_headers)
                                     headers.update(safe_headers)
+
+                                # Apply the strip last, after the allowlist merge above, so it
+                                # can't be undone by that merge re-adding the sentinel itself (as
+                                # opposed to the stale value, which this also guards against) --
+                                # and so the header is actually removed rather than left present
+                                # with an empty value, which some downstream servers treat
+                                # differently from an absent header. Unconditional: applies
+                                # regardless of allowlist/flag state, so the caller's stale
+                                # credential can never reach a destination the plugin explicitly
+                                # flagged as mismatched.
+                                if auth_mismatch:
+                                    headers = {hk: hv for hk, hv in headers.items() if hk.lower() != "authorization"}
+
+                    # Defense in depth: strip X-Vault-Tokens (case-insensitive) from outbound
+                    # headers. The Vault plugin removes this header when it processes the token,
+                    # but stripping unconditionally prevents leakage when the plugin is disabled,
+                    # errors in permissive mode, or the header is mistakenly in passthrough_allowed.
+                    headers = {hk: hv for hk, hv in headers.items() if hk.lower() != "x-vault-tokens"}
 
                     prepared = prepare_a2a_invocation(
                         agent_type=a2a_agent_type,
@@ -6768,6 +7077,13 @@ class ToolService(BaseService):
                         base_headers=headers,
                         correlation_id=get_correlation_id(),
                     )
+
+                    # Final safety strip: X-Vault-Tokens must never reach the downstream A2A agent,
+                    # even if prepare_a2a_invocation added auth headers from agent config or passthrough
+                    # preserved it. PreparedA2AInvocation is frozen, so mutate the headers dict in
+                    # place (matches the pattern in a2a_service.py) rather than rebinding the field.
+                    for existing_key in [hk for hk in prepared.headers if hk.lower() == "x-vault-tokens"]:
+                        del prepared.headers[existing_key]
 
                     with create_child_span("tool.gateway_call", {"tool.name": name, "tool.id": tool_id, "tool.integration_type": "A2A"}):
                         # Make HTTP request with timeout enforcement
@@ -6946,6 +7262,8 @@ class ToolService(BaseService):
                 _emit_ctl_telemetry()
                 return tool_result
             except PluginViolationError:
+                success = False
+                failure_reason = "exception"
                 # Deliberate policy denial — emit partial telemetry so the summary span captures
                 # result.allowed=False and any pre-denial execution records.
                 # Note: when violations_as_exceptions=True, CPEX raises PluginViolationError
@@ -6956,6 +7274,8 @@ class ToolService(BaseService):
                 _emit_ctl_telemetry()
                 raise
             except PluginError:
+                success = False
+                failure_reason = "exception"
                 # Plugin outage (crash/timeout/misconfiguration) — mark the accumulator so
                 # the summary span carries cpex.control.plugin_error=True, emit partial
                 # telemetry (even when the accumulator is empty, e.g. first-plugin failure),
@@ -6966,6 +7286,8 @@ class ToolService(BaseService):
                 _emit_ctl_telemetry()
                 raise
             except ToolTimeoutError as e:
+                success = False
+                failure_reason = "timeout"
                 # ToolTimeoutError is raised by timeout handlers which already called tool_post_invoke.
                 # Do NOT call post_invoke again — the retry_delay_ms signal is carried on the exception.
                 # Emit partial telemetry before retrying or re-raising so timeout records are not lost.
@@ -6997,19 +7319,32 @@ class ToolService(BaseService):
                     )
                 raise
             except asyncio.CancelledError:
-                # Never wrap a cancellation as a ToolInvocationError; cancellation is not a tool failure.
+                success = False
+                failure_reason = "cancelled"
+                # Preserve cancellation while marking the interrupted execution in telemetry.
                 raise
             except BaseException as e:
+                success = False
+                failure_reason = failure_reason or "exception"
                 # Extract root cause from ExceptionGroup (Python 3.11+)
                 # MCP SDK uses TaskGroup which wraps exceptions in ExceptionGroup
                 root_cause = e
                 if isinstance(e, BaseExceptionGroup):
+                    if e.subgroup(asyncio.CancelledError) is not None:
+                        failure_reason = "cancelled"
+                        raise
                     while isinstance(root_cause, BaseExceptionGroup) and root_cause.exceptions:
                         root_cause = root_cause.exceptions[0]
+                if isinstance(root_cause, (TimeoutError, httpx.TimeoutException)):
+                    failure_reason = "timeout"
                 error_message = str(root_cause)
                 # Set span error status
                 if span:
                     set_span_error(span, error_message)
+
+                if failure_reason == "invalid_arguments":
+                    # Rejected input never entered the plugin/execution lifecycle.
+                    raise
 
                 # Notify plugins of the failure so circuit breaker / retry plugin can track it.
                 # Capture the result so we can honour a retry_delay_ms signal from the retry plugin.
@@ -7069,23 +7404,7 @@ class ToolService(BaseService):
                 # Calculate duration
                 duration_ms = (time.monotonic() - start_time) * 1000
 
-                # End database span for observability_spans table
-                # end_span creates its own independent session (issue #3883)
-                if db_span_id and observability_service and not db_span_ended:
-                    try:
-                        observability_service.end_span(
-                            span_id=db_span_id,
-                            status="ok" if success else "error",
-                            status_message=error_message if error_message else None,
-                            attributes={
-                                "success": success,
-                                "duration_ms": duration_ms,
-                            },
-                        )
-                        db_span_ended = True
-                        logger.debug("✓ Ended tool.invoke span: %s", db_span_id)
-                    except Exception as e:
-                        logger.warning("Failed to end observability span for tool invocation: %s", e)
+                self._finish_tool_observation(observation, success, error_message, failure_reason)
 
                 # Add final span attributes for OpenTelemetry
                 if span:
@@ -7096,36 +7415,6 @@ class ToolService(BaseService):
                     # wrong - was the only case that recorded nothing.
                     if tool_result and is_output_capture_enabled("tool.invoke"):
                         set_span_attribute(span, "langfuse.observation.output", serialize_trace_payload(tool_result))
-
-                # ═══════════════════════════════════════════════════════════════════════════
-                # PHASE 4: Record metrics via buffered service (batches writes for performance)
-                # ═══════════════════════════════════════════════════════════════════════════
-                # Only record metrics if tool_id is valid (skip for direct_proxy mode)
-                if tool_id:
-                    try:
-                        metrics_buffer.record_tool_metric(
-                            tool_id=tool_id,
-                            start_time=start_time,
-                            success=success,
-                            error_message=error_message,
-                        )
-                    except Exception as metric_error:
-                        logger.warning("Failed to record tool metric: %s", metric_error)
-
-                # Record server metrics ONLY when invoked through a specific virtual server
-                # When server_id is provided, it means the tool was called via a virtual server endpoint
-                # Direct tool calls via /rpc should NOT populate server metrics
-                if tool_id and server_id:
-                    try:
-                        # Record server metric only for the specific virtual server being accessed
-                        metrics_buffer.record_server_metric(
-                            server_id=server_id,
-                            start_time=start_time,
-                            success=success,
-                            error_message=error_message,
-                        )
-                    except Exception as metric_error:
-                        logger.warning("Failed to record server metric: %s", metric_error)
 
                 # Log structured message with performance tracking (using local variables)
                 if success:
@@ -7170,6 +7459,41 @@ class ToolService(BaseService):
         """
         return "preview_safe" in (hook_ref.plugin_ref.tags or [])
 
+    @staticmethod
+    def _has_elicit_hook(plugin_manager: Optional[Any], plugin_name: str) -> bool:
+        """True if ``plugin_name`` also registers the ``elicit`` hook a future cpex release adds (#5629).
+
+        A future cpex release (not yet available as of this writing; see
+        https://contextforge-org.github.io/cpex/docs/apl/elicitation/) adds an ``elicit`` hook
+        type through which a plugin drives a Dispatch/Check/Validate human-in-the-loop approval
+        flow, e.g. ``hooks: [elicit]`` with ``kind: elicitation/ciba`` in ``plugins/config.yaml``.
+        The installed cpex here (0.1.x) has no such hook type and no plugin registers one, so
+        this returns ``False`` in practice today -- expected, not a bug.
+
+        Checked by the literal future hook-type name ``"elicit"`` (not a name this project
+        invented) via ``PluginInstanceRegistry.get_plugin_hook_by_name``, so this keeps working
+        unchanged once that future cpex release ships: a plugin author who adds ``elicit`` to a
+        ``preview_safe`` plugin's ``hooks`` list today (which requires implementing an
+        ``elicit`` method on the plugin class -- cpex's ``HookRef`` construction raises
+        ``PluginError`` at registration time for a hook name with no matching method) already
+        gets this behavior for free, no mcp-context-forge change required when that future cpex
+        release lands.
+
+        Args:
+            plugin_manager: The resolved plugin manager, or None.
+            plugin_name: The plugin's name, as registered in its ``PluginConfig``.
+
+        Returns:
+            bool: True if the named plugin has an ``elicit`` hook registered.
+        """
+        if plugin_manager is None:
+            return False
+        try:
+            return plugin_manager._registry.get_plugin_hook_by_name(plugin_name, "elicit") is not None  # pylint: disable=protected-access
+        except Exception as exc:  # pylint: disable=broad-except  # degrade to "no elicit hook known", same as other hook-lookup helpers
+            logger.debug("Elicit-hook lookup failed for plugin '%s' (treating as no elicit hook): %s", plugin_name, exc)
+            return False
+
     async def preview_tool_invocation(
         self,
         db: Session,
@@ -7182,17 +7506,33 @@ class ToolService(BaseService):
     ) -> ToolPreviewResponse:
         """Validate and resolve a tool invocation without executing it (#5629).
 
-        Dry-run counterpart to :meth:`invoke_tool`, sharing its resolution/RBAC path via
-        :meth:`_resolve_tool_for_invocation` so the two can never disagree about whether a
-        tool exists or is accessible. Never dispatches: no REST/MCP/A2A/gRPC call is made
-        (federated tools resolve to ``target.kind == "federated"`` with no wire call to the
-        remote gateway, regardless of the tool's annotations), and TOOL_POST_INVOKE never runs.
+        Dry-run counterpart to :meth:`invoke_tool`, sharing its resolution/RBAC/input-schema
+        validation path via :meth:`_resolve_tool_for_invocation` so the two can never disagree
+        about whether a tool exists, is accessible, or whether given arguments would pass
+        live invocation's own schema check (#5629 -- previously the two diverged: only preview
+        checked the input schema, so ``validated: true`` here did not guarantee the live path
+        would accept the same arguments). Never dispatches: no REST/MCP/A2A/gRPC call is made
+        (federated tools -- including a direct-proxy target selected by the caller's
+        ``X-Context-Forge-Gateway-Id`` header -- resolve to ``target.kind == "federated"`` with no
+        wire call to the remote gateway, regardless of the tool's annotations), and
+        TOOL_POST_INVOKE never runs.
 
         Only plugins tagged ``preview_safe`` have their TOOL_PRE_INVOKE hook actually run, and
         only when they'd also be dispatch-eligible live (see :meth:`_get_dispatchable_hook_refs`
         for the three gates applied: not statically disabled, not runtime-disabled, and matching
         ``conditions``); every other hook that clears those same three gates is reported in
-        ``warnings`` instead (see :meth:`_is_preview_safe` and plugins/AGENTS.md).
+        ``warnings`` instead (see :meth:`_is_preview_safe` and plugins/AGENTS.md). A
+        ``preview_safe`` plugin that also registers the ``elicit`` hook a future cpex release
+        adds (see :meth:`_has_elicit_hook`) is not run at all and is reported as an ``elicitation_skipped``
+        warning instead, since it may need to gather user input live.
+
+        No audit trail entry is written for a preview (v1 scope, #5629): the spec's "isolates
+        preview metrics and audit rows from production tool traffic by route" describes keeping
+        them separate from live rows, not that no rows exist at all. Today that separation is
+        simply "no rows" rather than "preview-tagged rows" -- a defensible v1 call, but a preview
+        activity view would need audit rows here, tagged as preview, not the live-invocation audit
+        call reused as-is. Tracked in
+        https://github.com/IBM/mcp-context-forge/issues/6722.
 
         Args:
             db: Database session.
@@ -7203,12 +7543,16 @@ class ToolService(BaseService):
                 [] = public-only, [...] = team-scoped.
             server_id: Virtual server ID for server scoping enforcement, if previewing through
                 a virtual server context.
-            request_headers: The caller's inbound request headers, forwarded into the
-                ``preview_safe`` hook payload as-is for condition/logic evaluation. This is
-                *not* equivalent to what a live dispatch would see: it excludes tool-configured
-                static headers, resolved auth headers, and passthrough-merged headers, since
-                building those would require preview to resolve gateway/tool secrets it
-                otherwise never touches (#5629 federation policy).
+            request_headers: The caller's inbound request headers, sensitive ones (Authorization,
+                Cookie, API keys -- see ``filter_sensitive_headers``) already stripped by the
+                caller. Used for the same ``X-Context-Forge-Gateway-Id`` direct-proxy detection
+                live invocation performs (gateway access is still RBAC-checked in
+                :meth:`_resolve_tool_for_invocation`), and forwarded into the ``preview_safe``
+                hook payload for condition/logic evaluation. This is *not* equivalent to what a
+                live dispatch would see: it also excludes tool-configured static headers, resolved
+                auth headers, and passthrough-merged headers, since building those would require
+                preview to resolve gateway/tool secrets it otherwise never touches (#5629
+                federation policy).
 
         Returns:
             ToolPreviewResponse: The dry-run envelope described in #5629.
@@ -7216,22 +7560,21 @@ class ToolService(BaseService):
         Raises:
             ToolNotFoundError: If tool not found or access denied (same as invoke_tool).
         """
-        resolved = await self._resolve_tool_for_invocation(db, name, None, user_email, token_teams, server_id, False, False)
+        # Headers are forwarded so X-Context-Forge-Gateway-Id direct-proxy detection resolves
+        # exactly as it does live -- withholding them made a direct-proxy tool preview as
+        # not-found while the same call invoked fine.
+        resolved = await self._resolve_tool_for_invocation(db, name, request_headers, user_email, token_teams, server_id, False, False, arguments=arguments)
         tool_payload = resolved.tool_payload
         warnings: List[ToolPreviewWarning] = []
 
-        # Input-schema validation: reuse the same validator invoke_tool already uses for
-        # *output* schemas (_validate_with_cached_schema, tool_service.py). No behavior
-        # change to invoke_tool itself — arguments are never validated against the input
-        # schema on the live path either; see #5629 planning notes.
-        validated = True
-        input_schema = tool_payload.get("input_schema")
-        if input_schema:
-            try:
-                _validate_with_cached_schema(arguments, input_schema)
-            except (jsonschema.exceptions.ValidationError, jsonschema.exceptions.SchemaError) as exc:
-                validated = False
-                warnings.append(ToolPreviewWarning(code="invalid_arguments", message=str(exc)))
+        # Input-schema validation (#5629): _resolve_tool_for_invocation ran the same
+        # validator invoke_tool uses (_validate_tool_input_arguments, tool_service.py) against
+        # this tool's input schema. Report it as validated=False + a warning rather than
+        # raising -- a dry-run must surface a schema mismatch in the envelope, not as an
+        # HTTP error, unlike invoke_tool which raises ToolInvocationError for the same check.
+        validated = resolved.schema_validation_error is None
+        if resolved.schema_validation_error:
+            warnings.append(ToolPreviewWarning(code="invalid_arguments", message=resolved.schema_validation_error))
 
         # Federation policy (#5629): local dry-run only, regardless of annotations.
         # Never surface the gateway's URL, transport, or credentials -- name only.
@@ -7263,6 +7606,17 @@ class ToolService(BaseService):
             skipped_refs = [ref for ref in all_refs if not self._is_preview_safe(ref)]
 
             for ref in preview_safe_refs:
+                # A plugin that also registers the `elicit` hook a future cpex release adds may
+                # need to gather user input live -- don't let it run to completion in preview (#5629).
+                if self._has_elicit_hook(plugin_manager, ref.plugin_ref.name):
+                    warnings.append(
+                        ToolPreviewWarning(
+                            code="elicitation_skipped",
+                            hook=ref.plugin_ref.name,
+                            message=f"Plugin '{ref.plugin_ref.name}' registers an elicit hook; live invocation may request user input that preview did not exercise.",
+                        )
+                    )
+                    continue
                 try:
                     await plugin_manager.invoke_hook_for_plugin(
                         name=ref.plugin_ref.name, hook_type=ToolHookType.TOOL_PRE_INVOKE, payload=payload, context=global_context, violations_as_exceptions=True

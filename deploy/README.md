@@ -72,6 +72,12 @@ base images are therefore passed explicitly as `--build-arg` values from
 | `mcpgw-auth-encryption-secret` | **No.** Rotating makes every stored OAuth token undecryptable. |
 | `mcpgw-database-url` | Yes, together with the Postgres admin password. |
 | `mcpgw-platform-admin-password` | Yes. Bootstrap password only; used on first start. |
+| `mcpgw-default-user-password` | Yes. Required bootstrap default; keep distinct from the admin password. |
+
+Run `01-prepare-azure.sh` before deploying an upgraded image so the default-user
+secret exists. Both passwords must meet the gateway strength requirements. A
+custom admin password distinct from the default does not trigger a forced password
+change on first boot.
 
 Retrieve one with:
 

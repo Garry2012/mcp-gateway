@@ -120,9 +120,9 @@ window.__obsExecAndStrip = function(html) {
                 x-model="statusFilter"
                 class="px-4 py-2 text-sm border border-gray-300 rounded-md bg-white hover:bg-gray-50 cursor-pointer transition-all dark:bg-gray-700 dark:text-gray-100 dark:border-gray-600 dark:hover:bg-gray-600"
             >
-                <option value="all" selected>All Status</option>
-                <option value="ok">Success Only</option>
-                <option value="error">Errors Only</option>
+                <option value="all" selected>All HTTP outcomes</option>
+                <option value="ok">HTTP success</option>
+                <option value="error">HTTP errors</option>
             </select>
             <button
                 class="px-4 py-2 text-sm border rounded-md cursor-pointer transition-all dark:border-gray-600 dark:hover:bg-gray-600"
@@ -182,6 +182,15 @@ window.__obsExecAndStrip = function(html) {
 
     <!-- Traces View -->
     <div x-show="viewMode === 'traces'">
+    <div class="mb-4 flex flex-wrap items-end gap-3">
+        <div class="flex-1 min-w-0">
+            <label for="observability-tool-search" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Find tool calls</label>
+            <input id="observability-tool-search" type="search" x-model.debounce.500ms="toolName"
+                placeholder="Search by tool or catalog name" maxlength="255"
+                class="w-full px-4 py-2 text-sm rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500" />
+        </div>
+        <button type="button" @click="clearFilters()" class="px-4 py-2 text-sm rounded-md border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200">Clear filters</button>
+    </div>
     <!-- Advanced Filters Panel -->
     <div x-show="showAdvancedFilters"
          x-transition
@@ -277,19 +286,7 @@ window.__obsExecAndStrip = function(html) {
                 />
             </div>
 
-            <!-- Tool Name Filter -->
-            <div>
-                <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                    🔧 MCP Tool Name
-                </label>
-                <input
-                    type="text"
-                    x-model="toolName"
-                    placeholder="Filter by tool name..."
-                    class="w-full px-4 py-2 text-sm border border-gray-300 rounded-md bg-white hover:bg-gray-50 cursor-pointer transition-all dark:bg-gray-700 dark:text-gray-100 dark:border-gray-600 dark:placeholder-gray-400"
-                    @input.debounce.500ms="refreshTraces()"
-                />
-            </div>
+
         </div>
 
         <!-- Clear Filters Button -->
@@ -303,6 +300,8 @@ window.__obsExecAndStrip = function(html) {
         </div>
     </div>
 
+    <p class="mb-4 text-sm text-gray-600 dark:text-gray-400">See the tools behind each request. Tool outcomes and HTTP status are shown separately. Times are in UTC; missing caller identity is marked Not recorded.</p>
+
     <!-- Statistics Cards -->
     <div id="stats-container">
         <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
@@ -313,16 +312,16 @@ window.__obsExecAndStrip = function(html) {
     </div>
 
     <!-- Traces Table -->
-    <div class="w-full bg-white dark:bg-gray-800 rounded-lg shadow-sm dark:shadow-gray-900/30 overflow-hidden">
+    <div class="w-full bg-white dark:bg-gray-800 rounded-lg shadow-sm dark:shadow-gray-900/30 overflow-x-auto">
         <table class="w-full border-collapse">
             <thead>
                 <tr>
                     <th class="bg-gray-50 dark:bg-gray-700/50 px-4 py-3 text-left text-sm font-semibold text-gray-600 dark:text-gray-300 border-b border-gray-200 dark:border-gray-700">Timestamp</th>
-                    <th class="bg-gray-50 dark:bg-gray-700/50 px-4 py-3 text-left text-sm font-semibold text-gray-600 dark:text-gray-300 border-b border-gray-200 dark:border-gray-700">Method</th>
-                    <th class="bg-gray-50 dark:bg-gray-700/50 px-4 py-3 text-left text-sm font-semibold text-gray-600 dark:text-gray-300 border-b border-gray-200 dark:border-gray-700">Endpoint</th>
-                    <th class="bg-gray-50 dark:bg-gray-700/50 px-4 py-3 text-left text-sm font-semibold text-gray-600 dark:text-gray-300 border-b border-gray-200 dark:border-gray-700">Status</th>
+                    <th class="bg-gray-50 dark:bg-gray-700/50 px-4 py-3 text-left text-sm font-semibold text-gray-600 dark:text-gray-300 border-b border-gray-200 dark:border-gray-700">Operation</th>
+                    <th class="bg-gray-50 dark:bg-gray-700/50 px-4 py-3 text-left text-sm font-semibold text-gray-600 dark:text-gray-300 border-b border-gray-200 dark:border-gray-700">Virtual server</th>
+                    <th class="bg-gray-50 dark:bg-gray-700/50 px-4 py-3 text-left text-sm font-semibold text-gray-600 dark:text-gray-300 border-b border-gray-200 dark:border-gray-700">Tool outcome</th>
                     <th class="bg-gray-50 dark:bg-gray-700/50 px-4 py-3 text-left text-sm font-semibold text-gray-600 dark:text-gray-300 border-b border-gray-200 dark:border-gray-700">Duration</th>
-                    <th class="bg-gray-50 dark:bg-gray-700/50 px-4 py-3 text-left text-sm font-semibold text-gray-600 dark:text-gray-300 border-b border-gray-200 dark:border-gray-700">User</th>
+                    <th class="bg-gray-50 dark:bg-gray-700/50 px-4 py-3 text-left text-sm font-semibold text-gray-600 dark:text-gray-300 border-b border-gray-200 dark:border-gray-700">Caller</th>
                     <th class="bg-gray-50 dark:bg-gray-700/50 px-4 py-3 text-left text-sm font-semibold text-gray-600 dark:text-gray-300 border-b border-gray-200 dark:border-gray-700">Actions</th>
                 </tr>
             </thead>
@@ -337,7 +336,7 @@ window.__obsExecAndStrip = function(html) {
     </div>
 
     <!-- Trace Detail Modal (shown when trace is selected) -->
-    <div x-show="selectedTrace"
+    <div x-show="selectedTrace" role="dialog" aria-modal="true" aria-label="Trace details" @keydown.escape.window="selectedTrace = null"
          x-cloak
          class="fixed inset-0 bg-black/50 dark:bg-black/70 flex items-center justify-center z-[1000]"
          @click.self="selectedTrace = null">

@@ -295,7 +295,8 @@ export function observabilityDashboard() {
           htmx.ajax('GET', url, {target: '#traces-list', swap: 'innerHTML'});
       },
       refreshStats() {
-          htmx.ajax('GET', (window.ROOT_PATH || '') + '/admin/observability/stats', {target: '#stats-container', swap: 'innerHTML'});
+          const hours = { '1h': 1, '6h': 6, '24h': 24, '7d': 168 }[this.timeRange] || 24;
+          htmx.ajax('GET', (window.ROOT_PATH || '') + '/admin/observability/stats?hours=' + hours, {target: '#stats-container', swap: 'innerHTML'});
       },
       startPolling() {
           this.refreshTraces();
@@ -324,6 +325,10 @@ export function observabilityDashboard() {
           else if (mode === 'resources') { this.loadResourcesView(); }
       },
       clearFilters() {
+          this.toolName = '';
+          this.timeRange = '24h';
+          this.statusFilter = 'all';
+          this.selectedQueryId = '';
           this.minDuration = '';
           this.maxDuration = '';
           this.httpMethod = '';

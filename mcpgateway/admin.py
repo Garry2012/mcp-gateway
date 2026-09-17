@@ -66,6 +66,7 @@ from mcpgateway import version as version_module
 
 # Authentication and password-related imports
 from mcpgateway.auth import get_current_user, get_user_team_roles
+from mcpgateway.auth_user_helpers import is_passwordless_user
 
 # Re-export canonical get_user_email from auth_context for backward compatibility.
 from mcpgateway.auth_context import (
@@ -191,7 +192,7 @@ from mcpgateway.services.performance_service import get_performance_service
 from mcpgateway.services.permission_service import PermissionService
 from mcpgateway.services.plugin_service import get_plugin_service, sync_plugin_service_from_runtime
 from mcpgateway.services.prompt_service import PromptArgumentsJSONError, PromptNameConflictError, PromptNotFoundError, PromptService
-from mcpgateway.services.resource_service import ResourceNotFoundError, ResourceService, ResourceURIConflictError, ResourceValidationError
+from mcpgateway.services.resource_service import ResourceError, ResourceNotFoundError, ResourceService, ResourceURIConflictError, ResourceValidationError
 from mcpgateway.services.root_service import RootService, RootServiceError, RootServiceNotFoundError, RootServiceValidationError
 from mcpgateway.services.server_service import ServerError, ServerLockConflictError, ServerNameConflictError, ServerNotFoundError, ServerService
 from mcpgateway.services.structured_logger import get_structured_logger
@@ -204,6 +205,7 @@ from mcpgateway.utils.error_formatter import ErrorFormatter, sanitize_validation
 from mcpgateway.utils.log_sanitizer import sanitize_for_log
 from mcpgateway.utils.metadata_capture import MetadataCapture
 from mcpgateway.utils.oauth_resource import parse_oauth_resource_form
+from mcpgateway.utils.origin import is_allowed_redirect, normalize_origin_parts, origin_from_url
 from mcpgateway.utils.orjson_response import ORJSONResponse
 from mcpgateway.utils.pagination import paginate_query
 from mcpgateway.utils.passthrough_headers import PassthroughHeadersError
@@ -212,6 +214,7 @@ from mcpgateway.utils.paths import resolve_root_path as _resolve_root_path
 from mcpgateway.utils.security_cookies import clear_auth_cookie, CookieTooLargeError, set_auth_cookie
 from mcpgateway.utils.services_auth import encode_auth
 from mcpgateway.utils.sqlalchemy_modifier import json_contains_tag_expr
+from mcpgateway.utils.trace_redaction import sanitize_trace_text
 from mcpgateway.utils.validate_signature import sign_data
 from mcpgateway.utils.verify_credentials import verify_jwt_token_cached
 
@@ -985,6 +988,7 @@ async def _assemble_oauth_config_from_fields(fields: Any, *, encrypt_secret: boo
     oauth_token_url = str(fields.get("oauth_token_url", ""))
     oauth_authorization_url = str(fields.get("oauth_authorization_url", ""))
     oauth_redirect_uri = str(fields.get("oauth_redirect_uri", ""))
+    oauth_redirect_uri_after_oauth = str(fields.get("redirect_uri_after_success", "")).strip()
     oauth_client_id = str(fields.get("oauth_client_id", ""))
     oauth_client_secret = str(fields.get("oauth_client_secret", ""))
     oauth_username = str(fields.get("oauth_username", ""))
@@ -1007,6 +1011,10 @@ async def _assemble_oauth_config_from_fields(fields: Any, *, encrypt_secret: boo
         oauth_config["authorization_url"] = oauth_authorization_url
     if oauth_redirect_uri:
         oauth_config["redirect_uri"] = oauth_redirect_uri
+    if oauth_redirect_uri_after_oauth:
+        if not is_allowed_redirect(oauth_redirect_uri_after_oauth, str(settings.app_domain), settings.oauth_redirect_allowed_origin):
+            raise ValueError(f"redirect_uri_after_oauth must use this gateway origin ({origin_from_url(str(settings.app_domain))}) or the origin in OAUTH_REDIRECT_ALLOWED_ORIGIN")
+        oauth_config["redirect_uri_after_oauth"] = oauth_redirect_uri_after_oauth
     if oauth_client_id:
         oauth_config["client_id"] = oauth_client_id
     if oauth_client_secret:
@@ -1712,25 +1720,6 @@ def _admin_cookie_path(request: Request) -> str:
     return root_path or "/"
 
 
-def _normalize_origin_parts(scheme: str, netloc: str) -> tuple[str, str, int]:
-    """Normalize origin components for exact same-origin comparisons.
-
-    Args:
-        scheme: URL scheme (for example ``http`` or ``https``).
-        netloc: URL authority component (host and optional port).
-
-    Returns:
-        Tuple of normalized scheme, hostname, and resolved port.
-    """
-    parsed = urllib.parse.urlparse(f"{scheme}://{netloc}")
-    normalized_scheme = (parsed.scheme or scheme or "http").lower()
-    normalized_host = (parsed.hostname or "").lower()
-    normalized_port = parsed.port
-    if normalized_port is None:
-        normalized_port = 443 if normalized_scheme == "https" else 80
-    return normalized_scheme, normalized_host, normalized_port
-
-
 def _request_origin_matches(request: Request) -> bool:
     """Return ``True`` when Origin/Referer matches this request origin.
 
@@ -1773,8 +1762,8 @@ def _request_origin_matches(request: Request) -> bool:
     request_scheme = (forwarded_proto.split(",")[0].strip() if forwarded_proto else request.url.scheme) or "http"
     request_netloc = (forwarded_host.split(",")[0].strip() if forwarded_host else request.headers.get("host")) or request.url.netloc
 
-    candidate_parts = _normalize_origin_parts(parsed_candidate.scheme, parsed_candidate.netloc)
-    request_parts = _normalize_origin_parts(request_scheme, request_netloc)
+    candidate_parts = normalize_origin_parts(parsed_candidate.scheme, parsed_candidate.netloc)
+    request_parts = normalize_origin_parts(request_scheme, request_netloc)
     if candidate_parts == request_parts:
         return True
 
@@ -1792,7 +1781,7 @@ def _request_origin_matches(request: Request) -> bool:
             allowed_parsed = urllib.parse.urlparse(allowed_normalized if "://" in allowed_normalized else f"https://{allowed_normalized}")
             if not allowed_parsed.scheme or not allowed_parsed.netloc:
                 continue
-            if candidate_parts == _normalize_origin_parts(allowed_parsed.scheme, allowed_parsed.netloc):
+            if candidate_parts == normalize_origin_parts(allowed_parsed.scheme, allowed_parsed.netloc):
                 return True
         except Exception:  # nosec B112 - malformed allowed_origins entry should not crash
             continue
@@ -4285,6 +4274,7 @@ async def admin_ui(
             "require_token_expiration": getattr(settings, "require_token_expiration", True),
             "sri_hashes": load_sri_hashes(),
             "max_members_per_team": settings.max_members_per_team,
+            "oauth_redirect_allowed_origin": settings.oauth_redirect_allowed_origin,
         },
     )
 
@@ -4624,9 +4614,10 @@ async def admin_login_handler(request: Request, db: Session = Depends(get_db)) -
                         LOGGER.debug("Failed to evaluate password age for %s: %s", email, exc)
 
                 # Detect default password on login if enabled
-                if getattr(settings, "detect_default_password_on_login", True):
+                if getattr(settings, "detect_default_password_on_login", True) and not is_passwordless_user(user):
+                    current_password_hash = typing_cast(str, user.password_hash)
                     password_service = Argon2PasswordService()
-                    is_using_default_password = await password_service.verify_password_async(settings.default_user_password.get_secret_value(), user.password_hash)  # nosec B105
+                    is_using_default_password = await password_service.verify_password_async(settings.default_user_password.get_secret_value(), current_password_hash)  # nosec B105
                     if is_using_default_password:
                         if getattr(settings, "require_password_change_for_default_password", True):
                             user.password_change_required = True
@@ -8530,6 +8521,9 @@ async def admin_update_user(
         response.headers["HX-Trigger"] = orjson.dumps({"adminUserAction": {"closeUserEditModal": True, "refreshUsersList": True, "delayMs": 1500}}).decode()
         return response
 
+    except PasswordValidationError as exc:
+        LOGGER.warning("Password validation failed while updating user %s: %s", user_email, exc)
+        return HTMLResponse(content=f'<div class="text-red-500">Password validation failed: {html.escape(str(exc))}</div>', status_code=400, headers={"HX-Retarget": "#edit-user-error"})
     except Exception as e:
         LOGGER.error(f"Error updating user {user_email}: {e}")
         return HTMLResponse(content=f'<div class="text-red-500">Error updating user: {html.escape(str(e))}</div>', status_code=400, headers={"HX-Retarget": "#edit-user-error"})
@@ -8773,20 +8767,22 @@ async def admin_force_password_change(
         # Get current user email from JWT
         current_user_email = get_user_email(user)
 
-        # Get the user to update
-        user_obj = await auth_service.get_user_by_email(decoded_email)
-        if not user_obj:
-            return HTMLResponse(content='<div class="text-red-500">User not found</div>', status_code=404)
-
-        # Set password_change_required flag
-        user_obj.password_change_required = True
-        db.commit()
+        user_obj = await auth_service.update_user(
+            email=decoded_email,
+            password_change_required=True,
+            admin_origin_source="ui",
+            requesting_user_email=current_user_email,
+        )
 
         LOGGER.info(f"Admin {current_user_email} forced password change for user {decoded_email}")
 
         admin_count = await auth_service.count_active_admin_users()
         return HTMLResponse(content=_render_user_card_html(user_obj, current_user_email, admin_count, root_path))
 
+    except PasswordValidationError as exc:
+        return HTMLResponse(content=f'<div class="text-red-500">{html.escape(str(exc))}</div>', status_code=400)
+    except ValueError as exc:
+        return HTMLResponse(content=f'<div class="text-red-500">{html.escape(str(exc))}</div>', status_code=404)
     except Exception as e:
         LOGGER.error(f"Error forcing password change for user {user_email}: {e}")
         return HTMLResponse(content=f'<div class="text-red-500">Error forcing password change: {html.escape(str(e))}</div>', status_code=400)
@@ -13256,14 +13252,24 @@ async def admin_edit_gateway(
                 LOGGER.info(f"✅ Assembled OAuth config from UI form fields (edit): grant_type={oauth_config.get('grant_type')}, issuer={oauth_config.get('issuer')}")
 
         user_email = get_user_email(user)
+        # Fetch existing gateway once to preserve team_id and any oauth_config fields that
+        # the UI edit form does not expose (e.g. redirect_uri_after_oauth).
+        existing_gateway = db.get(DbGateway, gateway_id)
+
         # Preserve existing gateway's team_id when no explicit team_id is provided.
         # Without this guard, verify_team_for_user() falls back to the user's
         # personal team, silently reassigning the gateway on every edit.
         if not team_id:
-            existing_gateway = db.get(DbGateway, gateway_id)
             existing_team = getattr(existing_gateway, "team_id", None) if existing_gateway else None
             if isinstance(existing_team, str) and existing_team:
                 team_id = existing_team
+
+        # Preserve redirect_uri_after_oauth when this deployment does not render the
+        # field. A rendered but blank field explicitly disables the redirect.
+        if oauth_config is not None and existing_gateway is not None:
+            existing_oauth: dict = existing_gateway.oauth_config or {}
+            if "redirect_uri_after_success" not in form and "redirect_uri_after_oauth" not in oauth_config and "redirect_uri_after_oauth" in existing_oauth:
+                oauth_config["redirect_uri_after_oauth"] = existing_oauth["redirect_uri_after_oauth"]
 
         team_service = TeamManagementService(db)
         team_id = await team_service.verify_team_for_user(user_email, team_id)
@@ -13445,6 +13451,8 @@ async def admin_test_resource(resource_uri: str, db: Session = Depends(get_db), 
         return {"content": resource_content}
     except ResourceNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except ResourceError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         LOGGER.error(f"Error getting resource for {resource_uri}: {e}")
         raise e
@@ -18637,7 +18645,7 @@ async def get_observability_stats(request: Request, hours: int = Query(24, ge=1,
     """
     db = next(get_db())
     try:
-        cutoff_time = datetime.now() - timedelta(hours=hours)
+        cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
 
         # Consolidate multiple count queries into a single aggregated select
         # Filter by start_time first (uses index), then aggregate by status
@@ -18664,6 +18672,61 @@ async def get_observability_stats(request: Request, hours: int = Query(24, ge=1,
             db.commit()  # Commit read-only transaction to avoid implicit rollback
         finally:
             db.close()
+
+
+def _summarize_observability_traces(db: Session, traces: list[ObservabilityTrace]) -> dict[str, dict[str, Any]]:
+    """Build display summaries using at most two queries for the whole trace page.
+
+    Args:
+        db: Authorized observability query session.
+        traces: Already filtered traces to display.
+
+    Returns:
+        Tool outcomes and current server names, keyed by trace ID. Missing identity
+        remains unknown; HTTP success is never treated as proof of tool success.
+    """
+    summaries: dict[str, dict[str, Any]] = {}
+    server_ids: set[str] = set()
+    for trace in traces:
+        attributes = trace.attributes or {}
+        route = attributes.get("http.route") or trace.http_url
+        path = urllib.parse.urlsplit(route).path if isinstance(route, str) else ""
+        parts = path.strip("/").split("/")
+        ids = {parts[1]} if len(parts) >= 3 and parts[0] == "servers" and parts[1] != "default_server_id" else set()
+        summaries[trace.trace_id] = {"tools": [], "server_ids": ids, "servers": [], "outcome": "No recorded call", "status": "none"}
+        server_ids.update(ids)
+    if not summaries:
+        return summaries
+    spans = db.query(ObservabilitySpan).filter(ObservabilitySpan.trace_id.in_(summaries), ObservabilitySpan.name == "tool.invoke").order_by(ObservabilitySpan.start_time).all()
+    for span in spans:
+        summary = summaries[span.trace_id]
+        attrs = span.attributes or {}
+        summary["tools"].append(
+            {
+                "name": attrs.get("tool.name") or span.resource_name or "Unnamed tool",
+                "original_name": attrs.get("tool.original_name"),
+                "mode": attrs.get("tool.execution_mode"),
+                "status": span.status,
+                "duration_ms": span.duration_ms,
+                "failure_reason": attrs.get("tool.failure_reason"),
+                "status_message": sanitize_trace_text(span.status_message)[:2000] if span.status_message else None,
+            }
+        )
+        server_id = attrs.get("server.id")
+        if isinstance(server_id, str) and server_id and server_id != "default_server_id":
+            summary["server_ids"].add(server_id)
+            server_ids.add(server_id)
+    names = dict(db.query(DbServer.id, DbServer.name).filter(DbServer.id.in_(server_ids)).all()) if server_ids else {}
+    for summary in summaries.values():
+        summary["servers"] = [{"id": server_id, "name": names.get(server_id, "Unavailable server")} for server_id in sorted(summary["server_ids"])]
+        statuses = [tool["status"] for tool in summary["tools"]]
+        if "error" in statuses:
+            summary.update(outcome="Failed", status="error")
+        elif statuses and any(status != "ok" for status in statuses):
+            summary.update(outcome="In progress", status="unset")
+        elif statuses:
+            summary.update(outcome="Succeeded", status="ok")
+    return summaries
 
 
 @admin_router.get("/observability/traces", response_class=HTMLResponse)
@@ -18710,7 +18773,7 @@ async def get_observability_traces(
         # Parse time range
         time_map = {"1h": 1, "6h": 6, "24h": 24, "7d": 168}
         hours = time_map.get(time_range, 24)
-        cutoff_time = datetime.now() - timedelta(hours=hours)
+        cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
 
         query = db.query(ObservabilityTrace).filter(ObservabilityTrace.start_time >= cutoff_time)
 
@@ -18749,7 +18812,10 @@ async def get_observability_traces(
                 db.query(ObservabilitySpan.trace_id)
                 .filter(
                     ObservabilitySpan.name == "tool.invoke",
-                    extract_json_field(ObservabilitySpan.attributes, '$."tool.name"').ilike(f"%{tool_name}%"),
+                    or_(
+                        extract_json_field(ObservabilitySpan.attributes, '$."tool.name"').ilike(f"%{tool_name}%"),
+                        extract_json_field(ObservabilitySpan.attributes, '$."tool.original_name"').ilike(f"%{tool_name}%"),
+                    ),
                 )
                 .distinct()
                 .subquery()
@@ -18760,7 +18826,9 @@ async def get_observability_traces(
         traces = query.order_by(ObservabilityTrace.start_time.desc()).limit(limit).all()
 
         root_path = _resolve_root_path(request)
-        return request.app.state.templates.TemplateResponse(request, "observability_traces_list.html", {"request": request, "traces": traces, "root_path": root_path})
+        return request.app.state.templates.TemplateResponse(
+            request, "observability_traces_list.html", {"request": request, "traces": traces, "summaries": _summarize_observability_traces(db, traces), "root_path": root_path}
+        )
     finally:
         # Ensure close() always runs even if commit() fails
         try:
@@ -18794,7 +18862,9 @@ async def get_observability_trace_detail(request: Request, trace_id: str, _user=
             raise HTTPException(status_code=404, detail="Trace not found")
 
         root_path = _resolve_root_path(request)
-        return request.app.state.templates.TemplateResponse(request, "observability_trace_detail.html", {"request": request, "trace": trace, "root_path": root_path})
+        return request.app.state.templates.TemplateResponse(
+            request, "observability_trace_detail.html", {"request": request, "trace": trace, "summary": _summarize_observability_traces(db, [trace])[trace.trace_id], "root_path": root_path}
+        )
     finally:
         # Ensure close() always runs even if commit() fails
         try:

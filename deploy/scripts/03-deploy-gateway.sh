@@ -17,7 +17,7 @@ az acr repository show-tags -n "$ACR_NAME" --repository "$IMAGE_REPO" -o tsv 2>/
   | grep -qx "$IMAGE_TAG" || die "image $IMAGE not in registry - run ./02-build-images.sh first"
 ok "image $IMAGE"
 
-for s in "$KV_JWT_SECRET" "$KV_ENC_SECRET" "$KV_DB_URL" "$KV_ADMIN_PASSWORD"; do
+for s in "$KV_JWT_SECRET" "$KV_ENC_SECRET" "$KV_DB_URL" "$KV_ADMIN_PASSWORD" "$KV_DEFAULT_USER_PASSWORD"; do
   az keyvault secret show --vault-name "$KEYVAULT_NAME" --name "$s" -o none 2>/dev/null \
     || die "Key Vault secret '$s' missing - run ./01-prepare-azure.sh first"
 done
@@ -28,6 +28,7 @@ SECRET_REFS=(
   "enc-secret=keyvaultref:${KV_URI}/${KV_ENC_SECRET},identityref:${UAMI_ID}"
   "db-url=keyvaultref:${KV_URI}/${KV_DB_URL},identityref:${UAMI_ID}"
   "admin-password=keyvaultref:${KV_URI}/${KV_ADMIN_PASSWORD},identityref:${UAMI_ID}"
+  "default-user-password=keyvaultref:${KV_URI}/${KV_DEFAULT_USER_PASSWORD},identityref:${UAMI_ID}"
 )
 
 # APP_DOMAIN must be the gateway's own public URL. On a first deploy the FQDN
@@ -44,6 +45,7 @@ ENV_VARS=(
   "AUTH_ENCRYPTION_SECRET=secretref:enc-secret"  # pragma: allowlist secret
   "DATABASE_URL=secretref:db-url"  # pragma: allowlist secret
   "PLATFORM_ADMIN_PASSWORD=secretref:admin-password"  # pragma: allowlist secret
+  "DEFAULT_USER_PASSWORD=secretref:default-user-password"  # pragma: allowlist secret
   "PLATFORM_ADMIN_EMAIL=${PLATFORM_ADMIN_EMAIL}"
   "APP_NAME=${BRAND_NAME}"
   "HOST=0.0.0.0"
