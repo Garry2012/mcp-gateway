@@ -451,6 +451,18 @@ allows an endpoint-supported effort for tool calls without a hardcoded default.
 do not forward it indiscriminately to other providers. Regression coverage is in
 `tests/unit/mcpgateway/services/test_mcp_client_chat_service_extended.py`.
 
+### 11. Rust TLS dependency security update
+
+Status: **integration-only**, added during the 2026-09-17 pre-merge checks.
+
+`crates/mcp_runtime/Cargo.toml` requires `rustls >=0.23.45` within the 0.23 series,
+and `Cargo.lock` resolves that patched version. This addresses
+[RUSTSEC-2026-0285](https://rustsec.org/advisories/RUSTSEC-2026-0285.html), which
+the GitHub Rust dependency-policy check detected in upstream's locked 0.23.43.
+The Azure image uses the Python runtime, but optional Rust builds must also use
+the patched dependency. Do not restore the older minimum or lock entry during
+future merges; retain the dependency-policy check.
+
 ## Conventions for future divergences
 
 1. Prefer changing configuration over changing widely-edited source files.
