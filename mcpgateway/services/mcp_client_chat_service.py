@@ -535,7 +535,7 @@ class WatsonxConfig(BaseModel):
 
 class GatewayConfig(BaseModel):
     """
-    Configuration for MCP Gateway internal LLM provider.
+    Configuration for ContextForge internal LLM provider.
 
     Allows LLM Chat to use models configured in the gateway's LLM Settings.
     The gateway routes requests to the appropriate configured provider.
@@ -1550,16 +1550,6 @@ class GatewayProvider:
                 "temperature": temperature,
                 "timeout": self.config.timeout,
             }
-
-            # OpenAI-family reasoning control. Reasoning models default to a
-            # server-side reasoning effort that some endpoints reject when
-            # function tools are present; a configured value (e.g. "none")
-            # is forwarded on the request. Only the OpenAI-family branches
-            # below (openai, azure_openai, openai_compatible) consume this
-            # shared kwargs dict, so this stays scoped to those providers.
-            reasoning_effort = config.get("reasoning_effort")
-            if reasoning_effort:
-                kwargs["reasoning_effort"] = reasoning_effort
 
             if provider_type == "openai":
                 kwargs.update(

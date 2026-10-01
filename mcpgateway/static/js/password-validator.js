@@ -1,5 +1,5 @@
 /**
- * Shared password validation logic for MCP Gateway
+ * Shared password validation logic for ContextForge
  * Used across user creation and password change forms
  */
 

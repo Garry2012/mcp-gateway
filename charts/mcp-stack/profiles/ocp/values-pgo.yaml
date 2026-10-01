@@ -2,7 +2,7 @@
 # OCP Deployment Values (PGO) — Experimental
 # Cluster: <your-ocp-cluster>
 #
-# Override values for deploying MCP Gateway on OpenShift with
+# Override values for deploying ContextForge on OpenShift with
 # an externally managed PostgreSQL operator (CrunchyData PGO).
 # Only settings that differ from the chart defaults are listed here.
 #
@@ -126,10 +126,10 @@ mcpContextForge:
             check_text_content: false
             tool_overrides: {}
         - name: "OutputLengthGuardPlugin"
-          kind: "plugins.output_length_guard.output_length_guard.OutputLengthGuardPlugin"
+          kind: "cpex_output_length_guard.output_length_guard.OutputLengthGuardPlugin"
           description: "Guards tool outputs by enforcing min/max length; block or truncate"
           version: "0.1.0"
-          author: "MCP Gateway"
+          author: "ContextForge"
           hooks: ["tool_post_invoke"]
           tags: ["guard", "length", "outputs", "truncate", "block"]
           mode: "permissive"

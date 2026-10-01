@@ -919,7 +919,7 @@ class OAuthManager:
         Args:
             gateway_id: ID of the gateway being configured
             credentials: OAuth configuration with client_id, authorization_url, etc.
-            app_user_email: MCP Gateway user email to associate with tokens
+            app_user_email: ContextForge user email to associate with tokens
             popup: When True, the state token is prefixed with ``popup.`` so the
                 callback endpoint knows to respond with postMessage instead of HTML.
             default_redirect_uri: Fallback used by :meth:`_apply_default_redirect_uri` when
@@ -1128,7 +1128,7 @@ class OAuthManager:
 
         Args:
             gateway_id: ID of the gateway
-            app_user_email: MCP Gateway user email
+            app_user_email: ContextForge user email
 
         Returns:
             Valid access token or None if not available
@@ -1143,7 +1143,7 @@ class OAuthManager:
         Args:
             _gateway_id: Gateway identifier (reserved for compatibility with
                 prior embedded-state call sites).
-            _app_user_email: MCP Gateway user email (reserved for
+            _app_user_email: ContextForge user email (reserved for
                 compatibility with prior embedded-state call sites).
             popup: When True, prefixes the token with ``popup.`` so the
                 callback can detect that it was opened from the React UI

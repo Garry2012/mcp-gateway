@@ -1414,7 +1414,8 @@ class SessionRegistry(SessionBackend):
             # First-Party
             from mcpgateway.cache.tool_lookup_cache import tool_lookup_cache  # pylint: disable=import-outside-toplevel
 
-            tool_info = await tool_lookup_cache.get(tool_name)
+            server_id = params.get("server_id")
+            tool_info = await tool_lookup_cache.get(tool_name, server_id=server_id)
             if not tool_info:
                 logger.debug(f"Tool {tool_name} not found in cache, skipping session mapping registration")
                 return
@@ -2140,7 +2141,7 @@ class SessionRegistry(SessionBackend):
             >>> result.protocol_version
             '2025-06-18'
             >>> result.server_info.name
-            'MCP Gateway'
+            'ContextForge'
             >>>
             >>> # Missing protocol version
             >>> try:
@@ -2190,7 +2191,7 @@ class SessionRegistry(SessionBackend):
                     logger.warning(f"Failed to query OAuth config for server {server_id}: {e}")
 
             return InitializeResult(
-                protocolVersion=protocol_version,
+                protocol_version=protocol_version,
                 capabilities=ServerCapabilities(
                     prompts={"listChanged": True},
                     resources={"subscribe": True, "listChanged": True},
@@ -2199,8 +2200,8 @@ class SessionRegistry(SessionBackend):
                     completions={},  # Advertise completions capability per MCP spec
                     experimental=experimental,  # OAuth capability when configured
                 ),
-                serverInfo=Implementation(name=settings.app_name, version=__version__),
-                instructions=("MCP Gateway providing federated tools, resources and prompts. Use /admin interface for configuration."),
+                server_info=Implementation(name=settings.app_name, version=__version__),
+                instructions=("ContextForge providing federated tools, resources and prompts. Use /admin interface for configuration."),
             )
 
     async def store_client_capabilities(self, session_id: str, capabilities: Dict[str, Any]) -> None:

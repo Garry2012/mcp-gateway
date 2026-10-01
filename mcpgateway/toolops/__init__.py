@@ -3,5 +3,5 @@
 Copyright contributors to the MCP-CONTEXT-FORGE project
 SPDX-License-Identifier: Apache-2.0
 
-MCP Gateway - Main module for toolops.
+ContextForge - Main module for toolops.
 """

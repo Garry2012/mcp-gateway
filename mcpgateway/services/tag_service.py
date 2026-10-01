@@ -53,7 +53,7 @@ def _get_admin_stats_cache():
 class TagService:
     """Service for managing and retrieving tags across all entities.
 
-    This service provides comprehensive tag management functionality across all MCP Gateway
+    This service provides comprehensive tag management functionality across all ContextForge
     entity types (tools, resources, prompts, servers, gateways). It handles tag discovery,
     entity lookup by tags, and statistics aggregation.
 

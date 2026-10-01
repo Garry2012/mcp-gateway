@@ -7,7 +7,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>MCP Gateway - Administration</title>
+    <title>ContextForge - Gateway Administration</title>
 
     <!-- Security headers are set by middleware, not meta tags -->
     <!-- Favicon -->
@@ -20,6 +20,7 @@
     <!-- Tailwind CSS - Using precompiled CSS for strict CSP compliance -->
     <link rel="stylesheet" href="{{ root_path }}/static/css/tailwind.min.css" />
     <!-- Custom animations - Previously defined via inline Tailwind config, now external for CSP compliance -->
+    <link rel="stylesheet" href="{{ root_path }}/static/css/auth-animations.css" />
     <!-- HTMX is now bundled in the main JS bundle -->
     <script nonce="{{ csp_nonce(request) }}">
       // Configure HTMX to swap content on 4xx responses (for inline error display)
@@ -242,12 +243,12 @@
         <div class="flex items-center h-16 px-4 border-b border-gray-200 dark:border-gray-700 flex-shrink-0"
              :class="sidebarCollapsed ? 'justify-center' : 'justify-between'">
           <a href="{{ root_path }}/admin" class="flex items-center" x-show="!sidebarCollapsed">
-            <span class="text-lg font-bold tracking-tight text-gray-900 dark:text-white">
-              MCP <span class="text-blue-600 dark:text-blue-400">Gateway</span>
-            </span>
+            <img src="{{ root_path }}/static/contextforge-logo.png" alt="ContextForge logo" class="h-8 dark:hidden" />
+            <img src="{{ root_path }}/static/contextforge-logo-white.png" alt="ContextForge logo" class="h-8 hidden dark:block" />
           </a>
-          <button @click="sidebarCollapsed = false" class="flex h-8 w-8 items-center justify-center" x-show="sidebarCollapsed" title="Expand sidebar">
-            <span class="text-sm font-bold text-blue-600 dark:text-blue-400" aria-label="MCP Gateway">MCP</span>
+          <button @click="sidebarCollapsed = false" class="flex items-center justify-center" x-show="sidebarCollapsed" title="Expand sidebar">
+            <img src="{{ root_path }}/static/contextforge-icon.png" alt="ContextForge icon" class="h-8 w-8 dark:hidden" />
+            <img src="{{ root_path }}/static/contextforge-icon-white.png" alt="ContextForge icon" class="h-8 w-8 hidden dark:block" />
           </button>
           <button
             @click="sidebarCollapsed = !sidebarCollapsed"
@@ -3400,7 +3401,7 @@
     "auth_value": "your-openweather-api-key-here",
     "headers": {
       "Accept": "application/json",
-      "User-Agent": "MCP-Gateway/1.0"
+      "User-Agent": "ContextForge/1.0"
     },
     "input_schema": {
       "type": "object",
@@ -7911,7 +7912,7 @@ Hello &#123;&#123; name &#125;&#125;, welcome to &#123;&#123; company &#125;&#12
                         x-transition:leave-start="opacity-100 scale-100"
                         x-transition:leave-end="opacity-0 scale-95"
                         class="fixed w-44 bg-white dark:bg-gray-800 rounded-lg shadow-xl border border-gray-200 dark:border-gray-700 z-50 py-1"
-                        :style="'top: ' + menuTop + 'px; left: ' + menuLeft + 'px; display: ' + (menuOpen ? 'block' : 'none')"
+                        :style="`top: ${menuTop}px; left: ${menuLeft}px; display: ${menuOpen ? 'block' : 'none'}`"
                         role="menu"
                         aria-orientation="vertical"
                         @keydown.arrow-down.prevent="navigate(1)"
@@ -7921,7 +7922,7 @@ Hello &#123;&#123; name &#125;&#125;, welcome to &#123;&#123; company &#125;&#12
                           type="button"
                           role="menuitem"
                           tabindex="0"
-                          @click="menuOpen = false; window.Admin && window.Admin.viewRoot && window.Admin.viewRoot({{ root.uri|tojson_attr }})"
+                          @click="menuOpen = false; window.Admin?.viewRoot?.({{ root.uri|tojson_attr }})"
                           class="w-full flex items-center px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700"
                           x-tooltip="'💡View root directory details and configuration'"
                         >View</button>
@@ -7929,7 +7930,7 @@ Hello &#123;&#123; name &#125;&#125;, welcome to &#123;&#123; company &#125;&#12
                           type="button"
                           role="menuitem"
                           tabindex="0"
-                          @click="menuOpen = false; window.Admin && window.Admin.editRoot && window.Admin.editRoot({{ root.uri|tojson_attr }})"
+                          @click="menuOpen = false; window.Admin?.editRoot?.({{ root.uri|tojson_attr }})"
                           class="w-full flex items-center px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700"
                           x-tooltip="'💡Edit root directory settings and configuration'"
                         >Edit</button>
@@ -7937,7 +7938,7 @@ Hello &#123;&#123; name &#125;&#125;, welcome to &#123;&#123; company &#125;&#12
                           type="button"
                           role="menuitem"
                           tabindex="0"
-                          @click="menuOpen = false; window.Admin && window.Admin.exportRoot && window.Admin.exportRoot({{ root.uri|tojson_attr }})"
+                          @click="menuOpen = false; window.Admin?.exportRoot?.({{ root.uri|tojson_attr }})"
                           class="w-full flex items-center px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700"
                           x-tooltip="'💡Export root directory configuration'"
                         >Export</button>
@@ -9089,6 +9090,7 @@ class="fixed z-40 inset-0 bg-gray-800 bg-opacity-75 flex items-center justify-ce
               </h3>
               <div class="mt-4">
                 <form id="edit-resource-form" method="POST">
+                  <input type="hidden" name="name" id="edit-resource-name" />
                   <div class="grid grid-cols-1 gap-7">
                     <div>
                       <label class="block text-sm font-medium text-gray-700"
@@ -9107,14 +9109,14 @@ class="fixed z-40 inset-0 bg-gray-800 bg-opacity-75 flex items-center justify-ce
                     <div class="relative">
                       <label
                         class="block text-sm font-medium text-gray-700"
-                        for="edit-resource-name"
+                        for="edit-resource-custom-name"
                         >Name</label
                       >
                       <input
                         type="text"
-                        name="name"
+                        name="customName"
                         required
-                        id="edit-resource-name"
+                        id="edit-resource-custom-name"
                         class="mt-1 px-3 py-2 block w-full rounded-md border border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 dark:bg-gray-900 dark:placeholder-gray-300 dark:text-gray-300"
                       />
                       <p data-error-message-for="name" class="absolute top-full left-0 mt-1 text-xs text-red-500 invisible">Name is required.</p>
@@ -11704,7 +11706,7 @@ class="fixed z-40 inset-0 bg-gray-800 bg-opacity-75 flex items-center justify-ce
                 class="mt-1 px-3 py-2 block w-full rounded-md shadow-sm p-2 bg-gray-200 dark:bg-gray-800"
                 placeholder="Enter your query (e.g., calc: 5*10+2 or weather: Dallas)"
                 aria-describedby="a2a-test-query-help"
-              >Hello from MCP Gateway Admin UI test!</textarea>
+              >Hello from ContextForge Admin UI test!</textarea>
               <p id="a2a-test-query-help" class="text-xs text-gray-500 dark:text-gray-400 mt-1">
                 Enter the message/query to send to the A2A agent
               </p>
@@ -14786,7 +14788,7 @@ class="fixed z-40 inset-0 bg-gray-800 bg-opacity-75 flex items-center justify-ce
             "auth_value": "your-openweather-api-key-here",
             "headers": {
               "Accept": "application/json",
-              "User-Agent": "MCP-Gateway/1.0"
+              "User-Agent": "ContextForge/1.0"
             },
             "input_schema": {
               "type": "object",
@@ -14843,7 +14845,7 @@ class="fixed z-40 inset-0 bg-gray-800 bg-opacity-75 flex items-center justify-ce
               "properties": {
                 "channel": {"type": "string", "description": "Slack channel (e.g., #general)"},
                 "text": {"type": "string", "description": "Message text"},
-                "username": {"type": "string", "description": "Bot username", "default": "MCP Gateway"}
+                "username": {"type": "string", "description": "Bot username", "default": "ContextForge"}
               },
               "required": ["text"]
             },
