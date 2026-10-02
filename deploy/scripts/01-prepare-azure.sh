@@ -11,6 +11,10 @@
 #   - the Container Apps env     (CAE_NAME)
 #   - the Key Vault              (KEYVAULT_NAME, RBAC authorization mode)
 #
+# A role is recognised as the gateway's by an ownership marker (its role comment).
+# To adopt a gateway role created before the marker existed, run once with
+# PG_ADOPT_EXISTING_ROLE=<exact role name>.
+#
 # Postgres has two modes:
 #   - PG_SERVER missing: create a dedicated server and use its admin login.
 #   - PG_SERVER exists and PG_ADMIN_URL_SECRET is set: shared server. Create a
@@ -111,6 +115,7 @@ provision_shared_database() {
     || die "cannot read Key Vault secret '$PG_ADMIN_URL_SECRET'"
   PG_ADMIN_URL="$PG_ADMIN_URL" PG_APP_USER="$PG_APP_USER" PG_APP_PASSWORD="$1" \
   PG_DATABASE="$PG_DATABASE" PG_APP_CONNECTION_LIMIT="$PG_APP_CONNECTION_LIMIT" \
+  PG_ADOPT_EXISTING_ROLE="${PG_ADOPT_EXISTING_ROLE:-}" \
   uv run --quiet --no-project --with "$PSYCOPG_SPEC" python "$SCRIPT_DIR/provision_shared_db.py" \
     || die "database provisioning refused or failed - nothing after the reported step was changed"
 }

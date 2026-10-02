@@ -81,7 +81,9 @@ deploy it with Key Vault secrets. These are new files, so they do not conflict w
 `01-prepare-azure.sh` creates a Key Vault secret only after a confirmed `SecretNotFound` and aborts
 on any other read error, so a transient failure never regenerates the encryption secret.
 `provision_shared_db.py` refuses, before any change, a role or database that it cannot prove belongs
-to the gateway (administrator role, privileged role, another owner's database, reserved database).
+to the gateway. Proof is an ownership marker (role comment) written in the same transaction as
+`CREATE ROLE`; an interrupted run resumes, and a pre-marker role needs one explicit
+`PG_ADOPT_EXISTING_ROLE` run.
 Per-target overrides live in `deploy/scripts/profiles/*.env` (for example `healthcare-rg.env`,
 which reuses that resource group's registry, environment, Key Vault and Postgres server).
 

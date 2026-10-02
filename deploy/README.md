@@ -47,6 +47,15 @@ role and database for the gateway. The admin URL is read only during that step a
 never reaches the container app. **Never reset the admin password of a shared
 server** - other applications depend on it.
 
+`provision_shared_db.py` changes nothing until it proves the role is the gateway's.
+The proof is an ownership marker, the role comment written in the same transaction
+as `CREATE ROLE`. A role without the marker is refused, so a configuration that names
+another application's role or database cannot change it. A marked role whose
+database is missing is an interrupted run, and the next run resumes it. To adopt a
+gateway role created before the marker existed, run once with
+`PG_ADOPT_EXISTING_ROLE=<exact role name>`; the privilege and ownership checks
+still apply.
+
 Size the connection pool to the server. A Burstable B1ms server allows
 `max_connections=50` across all of its databases. The gateway opens up to
 `GUNICORN_WORKERS x (DB_POOL_SIZE + DB_MAX_OVERFLOW)` connections, and the role's
