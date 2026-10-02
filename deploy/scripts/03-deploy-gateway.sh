@@ -47,15 +47,13 @@ ENV_VARS=(
   "PLATFORM_ADMIN_PASSWORD=secretref:admin-password"  # pragma: allowlist secret
   "DEFAULT_USER_PASSWORD=secretref:default-user-password"  # pragma: allowlist secret
   "PLATFORM_ADMIN_EMAIL=${PLATFORM_ADMIN_EMAIL}"
-  "APP_NAME=${BRAND_NAME}"
   "HOST=0.0.0.0"
   "PORT=${APP_PORT}"
   "ENVIRONMENT=production"
-  "MCPGATEWAY_UI_ENABLED=true"
-  "MCPGATEWAY_ADMIN_API_ENABLED=true"
+  "MCPGATEWAY_UI_ENABLED=${MCPGATEWAY_UI_ENABLED}"
+  "MCPGATEWAY_ADMIN_API_ENABLED=${MCPGATEWAY_ADMIN_API_ENABLED}"
   "DCR_ENABLED=${DCR_ENABLED}"
   "DCR_AUTO_REGISTER_ON_MISSING_CREDENTIALS=${DCR_AUTO_REGISTER_ON_MISSING_CREDENTIALS}"
-  "DCR_ALLOWED_ISSUERS=${DCR_ALLOWED_ISSUERS}"
   "DCR_TOKEN_ENDPOINT_AUTH_METHOD=${DCR_TOKEN_ENDPOINT_AUTH_METHOD}"
   "DB_POOL_SIZE=${DB_POOL_SIZE}"
   "DB_MAX_OVERFLOW=${DB_MAX_OVERFLOW}"
@@ -65,6 +63,7 @@ ENV_VARS=(
   "OTEL_CAPTURE_OUTPUT_SPANS=${OTEL_CAPTURE_OUTPUT_SPANS}"
 )
 [ -n "$RESOLVED_APP_DOMAIN" ] && ENV_VARS+=("APP_DOMAIN=${RESOLVED_APP_DOMAIN}")
+[ -n "$DCR_ALLOWED_ISSUERS" ] && ENV_VARS+=("DCR_ALLOWED_ISSUERS=${DCR_ALLOWED_ISSUERS}")
 
 if az containerapp show -n "$APP_NAME_AZ" -g "$RESOURCE_GROUP" -o none 2>/dev/null; then
   log "Updating existing app: $APP_NAME_AZ"
@@ -100,7 +99,7 @@ if [ "$(az containerapp show -n "$APP_NAME_AZ" -g "$RESOURCE_GROUP" \
 fi
 
 log "Deployed"
-echo "  URL  : https://${FQDN}/admin/login"
+echo "  URL  : https://${FQDN}"
 echo "  Admin: ${PLATFORM_ADMIN_EMAIL}"
 echo "  Pass : az keyvault secret show --vault-name ${KEYVAULT_NAME} --name ${KV_ADMIN_PASSWORD} --query value -o tsv"
 echo "  Next : ./04-smoke.sh"

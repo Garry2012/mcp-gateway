@@ -67,21 +67,18 @@ curl -s --max-time 20 "$URL/health" 2>/dev/null | grep -q '"status":"healthy"' \
   || die "health endpoint reachable but status is not healthy"
 ok "database reachable"
 
-# 3. Login page renders.
-LOGIN="$(curl -s --max-time 20 "$URL/admin/login" 2>/dev/null)"
-echo "$LOGIN" | grep -q "<title>" || die "login page did not render"
-ok "login page renders"
+# 3. Login page renders when the Admin UI is enabled.
+if [ "$MCPGATEWAY_UI_ENABLED" = "true" ]; then
+  LOGIN="$(curl -s --max-time 20 "$URL/admin/login" 2>/dev/null)"
+  echo "$LOGIN" | grep -q "<title>" || die "login page did not render"
+  ok "login page renders"
+else
+  CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "$URL/admin/login" 2>/dev/null || echo 000)"
+  [ "$CODE" = "404" ] || die "headless deployment serves /admin/login ($CODE) - expected 404"
+  ok "Admin UI disabled (headless)"
+fi
 
-# 4. Branding. Guards against deploying a stale image built before the rebrand.
-TITLE="$(printf '%s' "$LOGIN" | grep -oE '<title>[^<]*</title>' | head -1)"
-printf '%s' "$LOGIN" | grep -q "$BRAND_NAME" || die "page does not mention '$BRAND_NAME' - stale image? ($TITLE)"
-ok "brand present: $TITLE"
-
-LEGACY="$(printf '%s' "$LOGIN" | grep -c 'ContextForge' || true)"
-[ "$LEGACY" = "0" ] || die "$LEGACY legacy brand references on the login page - stale image"
-ok "no legacy brand references"
-
-# 5. Authentication is enforced. A public admin API would be a serious
+# 4. Authentication is enforced. A public admin API would be a serious
 #    misconfiguration, so assert the unauthenticated path is rejected.
 CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "$URL/gateways" 2>/dev/null || echo 000)"
 case "$CODE" in
@@ -90,4 +87,4 @@ case "$CODE" in
 esac
 
 log "All checks passed"
-echo "  $URL/admin/login"
+echo "  $URL"

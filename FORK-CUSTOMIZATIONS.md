@@ -59,6 +59,8 @@ public-only deny cases. Submit this fix upstream, then drop this divergence when
 `deploy/scripts/` and `deploy/README.md` build the image in Azure Container Registry and
 deploy it with Key Vault secrets. These are new files, so they do not conflict with upstream.
 `pyproject.toml` excludes `deploy/**` from the package manifest check.
+Per-target overrides live in `deploy/scripts/profiles/*.env` (for example `healthcare-rg.env`,
+which reuses that resource group's registry, environment, Key Vault and Postgres server).
 
 ACR Tasks uses the classic Docker builder, which rejects `COPY --chmod`. The `Containerfile`
 replaces both `COPY --chmod=0755` lines with `COPY` plus `RUN chmod 0755`.
