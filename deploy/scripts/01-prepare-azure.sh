@@ -80,7 +80,9 @@ ensure_azure_services_firewall() {
 }
 
 # Create or update the gateway's login role and database on a shared server.
-# Credentials travel through environment variables, never the command line.
+# Pass a password to create the role or rotate its password; pass "" to keep the
+# existing password. Credentials travel through environment variables, never the
+# command line.
 provision_shared_database() {
   command -v uv >/dev/null || die "uv is required to run the database provisioning step"
   PG_ADMIN_URL="$(az keyvault secret show --vault-name "$KEYVAULT_NAME" --name "$PG_ADMIN_URL_SECRET" --query value -o tsv 2>/dev/null)" \
@@ -95,6 +97,8 @@ import psycopg
 from psycopg import sql
 
 admin_url = re.sub(r"^postgres(ql)?(\+\w+)?://", "postgresql://", os.environ["PG_ADMIN_URL"])
+server_url = admin_url.split("?", 1)[0].rpartition("/")[0]
+query = admin_url.partition("?")[2]
 user = os.environ["PG_APP_USER"]
 password = os.environ["PG_APP_PASSWORD"]
 database = os.environ["PG_DATABASE"]
@@ -104,12 +108,15 @@ with psycopg.connect(admin_url, autocommit=True, connect_timeout=15) as conn:
     cur = conn.cursor()
     cur.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (user,))
     verb = "ALTER" if cur.fetchone() else "CREATE"
-    cur.execute(
-        sql.SQL("{} ROLE {} WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE CONNECTION LIMIT {} PASSWORD {}").format(
-            sql.SQL(verb), sql.Identifier(user), sql.Literal(limit), sql.Literal(password)
-        )
-    )
-    print(f"  role {user}: {verb.lower()}d, connection limit {limit}")
+    if verb == "CREATE" and not password:
+        raise SystemExit(f"role {user} does not exist and no password was supplied")
+    # Privilege flags are set on CREATE only: restating NOSUPERUSER in ALTER ROLE needs superuser.
+    attributes = "LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE" if verb == "CREATE" else "LOGIN"
+    statement = sql.SQL("{} ROLE {} WITH {} CONNECTION LIMIT {}").format(sql.SQL(verb), sql.Identifier(user), sql.SQL(attributes), sql.Literal(limit))
+    if password:
+        statement = sql.SQL("{} PASSWORD {}").format(statement, sql.Literal(password))
+    cur.execute(statement)
+    print(f"  role {user}: {verb.lower().rstrip('e')}ed, connection limit {limit}" + ("" if password else ", password unchanged"))
     cur.execute(sql.SQL("GRANT {} TO CURRENT_USER").format(sql.Identifier(user)))
     cur.execute("SELECT 1 FROM pg_database WHERE datname = %s", (database,))
     if cur.fetchone():
@@ -119,6 +126,13 @@ with psycopg.connect(admin_url, autocommit=True, connect_timeout=15) as conn:
         print(f"  database {database}: created")
     cur.execute(sql.SQL("REVOKE CONNECT ON DATABASE {} FROM PUBLIC").format(sql.Identifier(database)))
     cur.execute(sql.SQL("GRANT CONNECT ON DATABASE {} TO {}").format(sql.Identifier(database), sql.Identifier(user)))
+
+# Azure's template database leaves schema public owned by azure_pg_admin, so the
+# database owner cannot create tables there until it owns the schema.
+database_url = f"{server_url}/{database}" + (f"?{query}" if query else "")
+with psycopg.connect(database_url, autocommit=True, connect_timeout=15) as conn:
+    conn.execute(sql.SQL("ALTER SCHEMA public OWNER TO {}").format(sql.Identifier(user)))
+    print(f"  schema public: owned by {user}")
 PY
 }
 
@@ -127,10 +141,11 @@ if az postgres flexible-server show -n "$PG_SERVER" -g "$RESOURCE_GROUP" -o none
   if [ -n "$PG_ADMIN_URL_SECRET" ]; then
     ok "shared server - gateway uses its own role '$PG_APP_USER' and database '$PG_DATABASE'"
     ensure_azure_services_firewall
+    log "Database and login role"
     if kv_has "$KV_DB_URL"; then
+      provision_shared_database ""
       ok "$KV_DB_URL (exists)"
     else
-      log "Database and login role"
       APP_PASSWORD="$(random_alnum 30)"  # pragma: allowlist secret
       provision_shared_database "$APP_PASSWORD"
       kv_set "$KV_DB_URL" "postgresql+psycopg://${PG_APP_USER}:${APP_PASSWORD}@${PG_FQDN}:5432/${PG_DATABASE}?sslmode=require"
