@@ -131,6 +131,12 @@ PLATFORM_ADMIN_EMAIL="${PLATFORM_ADMIN_EMAIL:-admin@intimetec.com}"
 MCPGATEWAY_UI_ENABLED="${MCPGATEWAY_UI_ENABLED:-true}"
 MCPGATEWAY_ADMIN_API_ENABLED="${MCPGATEWAY_ADMIN_API_ENABLED:-true}"
 
+# HTTP header passthrough (off by default in config.py). When on, each gateway
+# registration's passthrough_headers allowlist decides which client headers reach
+# that MCP server. Upstream servers that read trusted context from headers (for
+# example the front-desk healthcare server's X-Call-Id / X-Turn-Context) need it.
+ENABLE_HEADER_PASSTHROUGH="${ENABLE_HEADER_PASSTHROUGH:-false}"
+
 # --- OAuth / Dynamic Client Registration ------------------------------------
 # APP_DOMAIN is the gateway's own public URL. It defaults to
 # http://localhost:4444 in config.py, and OAuth callback URLs and production
