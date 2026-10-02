@@ -30,6 +30,8 @@ try:
     # Third-Party
     from langchain_core.language_models import BaseChatModel
     from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+    from fastmcp import Client as FastMCPClient
+    from fastmcp.client.elicitation import ElicitResult
     from fastmcp.client.transports import SSETransport, StdioTransport, StreamableHttpTransport
     from langchain.mcp import MCPAdapter
     from langchain_core.tools import BaseTool
@@ -50,6 +52,8 @@ except ImportError as _import_error:
     HumanMessage = None  # type: ignore
     BaseTool = None  # type: ignore
     MCPAdapter = None  # type: ignore
+    FastMCPClient = None  # type: ignore
+    ElicitResult = None  # type: ignore
     SSETransport = None  # type: ignore
     StdioTransport = None  # type: ignore
     StreamableHttpTransport = None  # type: ignore
@@ -2121,6 +2125,28 @@ class ChatHistoryManager:
 # ==================== MCP CLIENT ====================
 
 
+async def _decline_elicitation(message: str, _response_type: Any, _params: Any, _context: Any) -> Any:
+    """
+    Decline an MCP elicitation request raised during LLM chat.
+
+    LLM chat runs a LangGraph agent without a checkpointer, so it cannot pause a
+    tool call for user input. Without this handler, ``MCPAdapter`` turns the request
+    into a LangGraph interrupt and the chat returns an empty answer. Declining lets
+    the MCP server complete the call with a decline outcome.
+
+    Args:
+        message: The prompt the MCP server wants to show the user.
+        _response_type: Expected response type (unused).
+        _params: Raw elicitation request parameters (unused).
+        _context: MCP request context (unused).
+
+    Returns:
+        Any: An ``ElicitResult`` with ``action="decline"``.
+    """
+    logger.info("Declining MCP elicitation request during LLM chat (%s characters)", len(message or ""))
+    return ElicitResult(action="decline")
+
+
 class MCPClient:
     """
     Manages MCP server connections and tool loading.
@@ -2204,7 +2230,7 @@ class MCPClient:
             if not MCPAdapter:
                 logger.error("Some dependencies are missing. Install those with: pip install '.[llmchat]'")
 
-            self._client = MCPAdapter(self._build_transport())
+            self._client = MCPAdapter(FastMCPClient(self._build_transport(), elicitation_handler=_decline_elicitation))
             self._connected = True
             logger.info("Successfully connected to MCP server")
 

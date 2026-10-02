@@ -66,6 +66,10 @@ imports MCP 1.x APIs and fails at import time. Reported as
 raises the `langchain-core` and `langgraph` caps. `langgraph-sdk` caps `websockets<17`, so the lock
 resolves `websockets` 16.x. The import guard keeps the original `ImportError` in the error message.
 
+LLM Chat runs a LangGraph agent without a checkpointer, so it cannot pause for user input. The
+FastMCP client therefore declines MCP elicitation requests (`_decline_elicitation`); without it,
+`MCPAdapter` turns them into a LangGraph interrupt and the chat returns an empty answer.
+
 **Merge guidance:** when upstream fixes #7090, take upstream's version and drop this divergence.
 Keep `test_llmchat_dependencies_import_against_installed_mcp_sdk`: it imports the real chat stack.
 
@@ -74,6 +78,10 @@ Keep `test_llmchat_dependencies_import_against_installed_mcp_sdk`: it imports th
 `deploy/scripts/` and `deploy/README.md` build the image in Azure Container Registry and
 deploy it with Key Vault secrets. These are new files, so they do not conflict with upstream.
 `pyproject.toml` excludes `deploy/**` from the package manifest check.
+`01-prepare-azure.sh` creates a Key Vault secret only after a confirmed `SecretNotFound` and aborts
+on any other read error, so a transient failure never regenerates the encryption secret.
+`provision_shared_db.py` refuses, before any change, a role or database that it cannot prove belongs
+to the gateway (administrator role, privileged role, another owner's database, reserved database).
 Per-target overrides live in `deploy/scripts/profiles/*.env` (for example `healthcare-rg.env`,
 which reuses that resource group's registry, environment, Key Vault and Postgres server).
 

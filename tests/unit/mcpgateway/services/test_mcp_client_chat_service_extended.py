@@ -6,6 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 Extended tests to achieve >95% coverage for mcp_client_chat_service module.
 """
 
+import asyncio
 import importlib.util
 import sys
 import types
@@ -594,6 +595,7 @@ async def test_mcpclient_connect_with_headers(monkeypatch):
         return AsyncMock()
 
     monkeypatch.setattr(svc, "MCPAdapter", _client_factory)
+    monkeypatch.setattr(svc, "FastMCPClient", lambda transport, **_kwargs: transport)
     await client.connect()
     assert isinstance(captured["transport"], svc.SSETransport)
     assert captured["transport"].url == "https://srv"
@@ -612,6 +614,7 @@ async def test_mcpclient_connect_stdio_args(monkeypatch):
         return AsyncMock()
 
     monkeypatch.setattr(svc, "MCPAdapter", _client_factory)
+    monkeypatch.setattr(svc, "FastMCPClient", lambda transport, **_kwargs: transport)
     await client.connect()
     assert isinstance(captured["transport"], svc.StdioTransport)
     assert captured["transport"].command == "python"
@@ -629,6 +632,7 @@ async def test_mcpclient_connect_streamable_http_transport(monkeypatch):
         return AsyncMock()
 
     monkeypatch.setattr(svc, "MCPAdapter", _client_factory)
+    monkeypatch.setattr(svc, "FastMCPClient", lambda transport, **_kwargs: transport)
     await client.connect()
     assert isinstance(captured["transport"], svc.StreamableHttpTransport)
     assert captured["transport"].url == "https://srv/mcp"
@@ -642,10 +646,71 @@ def test_mcpclient_build_transport_rejects_unsupported_transport():
         client._build_transport()
 
 
+def _llmchat_extra_installed() -> bool:
+    """Return whether the optional ``llmchat`` extra is installed, without importing it."""
+    return importlib.util.find_spec("langchain") is not None and importlib.util.find_spec("fastmcp") is not None
+
+
+@pytest.mark.skipif(not _llmchat_extra_installed(), reason="llmchat extra not installed")
 def test_llmchat_dependencies_import_against_installed_mcp_sdk():
     """Import the real LLM chat stack, so an MCP SDK upgrade that breaks it fails here."""
-    pytest.importorskip("langchain.mcp")
+    # Third-Party
+    from langchain.mcp import MCPAdapter  # noqa: F401  # pylint: disable=import-outside-toplevel,unused-import
+
     assert svc._LLMCHAT_AVAILABLE is True, f"LLM chat imports failed: {svc._LLMCHAT_IMPORT_ERROR}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not _llmchat_extra_installed(), reason="llmchat extra not installed")
+async def test_llmchat_declines_elicitation_instead_of_interrupting():
+    """A tool that asks for user input completes with a decline instead of an empty interrupt."""
+    # Third-Party
+    from fastmcp import Context, FastMCP  # pylint: disable=import-outside-toplevel
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel  # pylint: disable=import-outside-toplevel
+    from langchain_core.messages import AIMessage as RealAIMessage  # pylint: disable=import-outside-toplevel
+    from mcp.types import ElicitRequest, ElicitRequestFormParams, InputRequiredResult  # pylint: disable=import-outside-toplevel
+
+    server = FastMCP("elicitation-probe")
+
+    @server.tool
+    async def confirm(ctx: Context) -> str | InputRequiredResult:
+        """Ask the user to confirm."""
+        if getattr(ctx, "input_responses", None):
+            return f"answered: {ctx.input_responses['confirm'].action}"
+        params = ElicitRequestFormParams(message="Confirm?", requested_schema={"type": "object", "properties": {"approved": {"type": "boolean"}}, "required": ["approved"]})
+        return InputRequiredResult(input_requests={"confirm": ElicitRequest(method="elicitation/create", params=params)})
+
+    class _ToolCallingModel(FakeMessagesListChatModel):
+        def bind_tools(self, tools, **kwargs):  # noqa: ARG002
+            return self
+
+    client = svc.MCPClient(svc.MCPServerConfig(url="https://unused.example/mcp", transport="streamable_http"))
+    client._client = svc.MCPAdapter(svc.FastMCPClient(server, elicitation_handler=svc._decline_elicitation))
+    client._connected = True
+    tools = await client.get_tools()
+    model = _ToolCallingModel(responses=[RealAIMessage(content="", tool_calls=[{"name": "confirm", "args": {}, "id": "c1", "type": "tool_call"}]), RealAIMessage(content="done")])
+
+    result = await asyncio.wait_for(svc.create_react_agent(model, tools).ainvoke({"messages": [("user", "confirm")]}), 30)
+
+    assert not result.get("__interrupt__")
+    assert result["messages"][-1].content == "done"
+    assert any("answered: decline" in str(m.content) for m in result["messages"] if m.type == "tool")
+
+
+@pytest.mark.asyncio
+async def test_mcpclient_connect_builds_client_with_decline_handler(monkeypatch):
+    """connect() hands MCPAdapter a FastMCP client that declines elicitation."""
+    captured = {}
+
+    def _client(transport, **kwargs):
+        captured.update(kwargs, transport=transport)
+        return MagicMock()
+
+    monkeypatch.setattr(svc, "FastMCPClient", _client)
+    monkeypatch.setattr(svc, "MCPAdapter", MagicMock())
+    client = svc.MCPClient(svc.MCPServerConfig(url="https://srv/mcp", transport="streamable_http"))
+    await client.connect()
+    assert captured["elicitation_handler"] is svc._decline_elicitation
 
 
 @pytest.mark.asyncio
@@ -1004,6 +1069,7 @@ def test_optional_langchain_import_block_executes():
         "fastmcp",
         "fastmcp.client",
         "fastmcp.client.transports",
+        "fastmcp.client.elicitation",
         "langchain",
         "langchain.mcp",
         "langchain_ollama",
@@ -1037,7 +1103,11 @@ def test_optional_langchain_import_block_executes():
         fastmcp_transports.StdioTransport = object
         fastmcp_transports.StreamableHttpTransport = object
         fastmcp_client.transports = fastmcp_transports
+        fastmcp_elicitation = types.ModuleType("fastmcp.client.elicitation")
+        fastmcp_elicitation.ElicitResult = object
+        fastmcp_client.elicitation = fastmcp_elicitation
         fastmcp.client = fastmcp_client
+        fastmcp.Client = object
         langchain = types.ModuleType("langchain")
         langchain.__path__ = []
         langchain_mcp = types.ModuleType("langchain.mcp")
@@ -1069,6 +1139,7 @@ def test_optional_langchain_import_block_executes():
                 "fastmcp": fastmcp,
                 "fastmcp.client": fastmcp_client,
                 "fastmcp.client.transports": fastmcp_transports,
+                "fastmcp.client.elicitation": fastmcp_elicitation,
                 "langchain": langchain,
                 "langchain.mcp": langchain_mcp,
                 "langchain_ollama": langchain_ollama,

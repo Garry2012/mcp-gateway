@@ -58,7 +58,29 @@ else
   ok "granted"
 fi
 
-kv_has() { az keyvault secret show --vault-name "$KEYVAULT_NAME" --name "$1" -o none 2>/dev/null; }
+# Prints "present" or "missing". Only a confirmed SecretNotFound counts as missing:
+# any other read failure aborts, so a transient error can never regenerate an
+# existing secret (a new encryption secret would make stored credentials unreadable).
+kv_state() {
+  local err
+  if err="$(az keyvault secret show --vault-name "$KEYVAULT_NAME" --name "$1" -o none 2>&1)"; then
+    echo present
+  elif printf '%s' "$err" | grep -q "SecretNotFound"; then
+    echo missing
+  else
+    die "cannot read Key Vault secret '$1' (not a SecretNotFound error): $err"
+  fi
+}
+kv_has() {
+  local state
+  state="$(kv_state "$1")" || exit 1
+  [ "$state" = present ]
+}
+# Create a secret from a generator command only when it is confirmed missing.
+ensure_secret() {
+  local name="$1"; shift
+  if kv_has "$name"; then ok "$name (exists)"; else kv_set "$name" "$("$@")"; fi
+}
 kv_set() {
   az keyvault secret set --vault-name "$KEYVAULT_NAME" --name "$1" --value "$2" -o none \
     || die "could not write secret '$1' - check Key Vault permissions"
@@ -89,51 +111,8 @@ provision_shared_database() {
     || die "cannot read Key Vault secret '$PG_ADMIN_URL_SECRET'"
   PG_ADMIN_URL="$PG_ADMIN_URL" PG_APP_USER="$PG_APP_USER" PG_APP_PASSWORD="$1" \
   PG_DATABASE="$PG_DATABASE" PG_APP_CONNECTION_LIMIT="$PG_APP_CONNECTION_LIMIT" \
-  uv run --quiet --no-project --with "$PSYCOPG_SPEC" python - <<'PY'
-import os
-import re
-
-import psycopg
-from psycopg import sql
-
-admin_url = re.sub(r"^postgres(ql)?(\+\w+)?://", "postgresql://", os.environ["PG_ADMIN_URL"])
-server_url = admin_url.split("?", 1)[0].rpartition("/")[0]
-query = admin_url.partition("?")[2]
-user = os.environ["PG_APP_USER"]
-password = os.environ["PG_APP_PASSWORD"]
-database = os.environ["PG_DATABASE"]
-limit = int(os.environ["PG_APP_CONNECTION_LIMIT"])
-
-with psycopg.connect(admin_url, autocommit=True, connect_timeout=15) as conn:
-    cur = conn.cursor()
-    cur.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (user,))
-    verb = "ALTER" if cur.fetchone() else "CREATE"
-    if verb == "CREATE" and not password:
-        raise SystemExit(f"role {user} does not exist and no password was supplied")
-    # Privilege flags are set on CREATE only: restating NOSUPERUSER in ALTER ROLE needs superuser.
-    attributes = "LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE" if verb == "CREATE" else "LOGIN"
-    statement = sql.SQL("{} ROLE {} WITH {} CONNECTION LIMIT {}").format(sql.SQL(verb), sql.Identifier(user), sql.SQL(attributes), sql.Literal(limit))
-    if password:
-        statement = sql.SQL("{} PASSWORD {}").format(statement, sql.Literal(password))
-    cur.execute(statement)
-    print(f"  role {user}: {verb.lower().rstrip('e')}ed, connection limit {limit}" + ("" if password else ", password unchanged"))
-    cur.execute(sql.SQL("GRANT {} TO CURRENT_USER").format(sql.Identifier(user)))
-    cur.execute("SELECT 1 FROM pg_database WHERE datname = %s", (database,))
-    if cur.fetchone():
-        print(f"  database {database}: already exists")
-    else:
-        cur.execute(sql.SQL("CREATE DATABASE {} OWNER {}").format(sql.Identifier(database), sql.Identifier(user)))
-        print(f"  database {database}: created")
-    cur.execute(sql.SQL("REVOKE CONNECT ON DATABASE {} FROM PUBLIC").format(sql.Identifier(database)))
-    cur.execute(sql.SQL("GRANT CONNECT ON DATABASE {} TO {}").format(sql.Identifier(database), sql.Identifier(user)))
-
-# Azure's template database leaves schema public owned by azure_pg_admin, so the
-# database owner cannot create tables there until it owns the schema.
-database_url = f"{server_url}/{database}" + (f"?{query}" if query else "")
-with psycopg.connect(database_url, autocommit=True, connect_timeout=15) as conn:
-    conn.execute(sql.SQL("ALTER SCHEMA public OWNER TO {}").format(sql.Identifier(user)))
-    print(f"  schema public: owned by {user}")
-PY
+  uv run --quiet --no-project --with "$PSYCOPG_SPEC" python "$SCRIPT_DIR/provision_shared_db.py" \
+    || die "database provisioning refused or failed - nothing after the reported step was changed"
 }
 
 log "Postgres: $PG_SERVER"
@@ -177,13 +156,13 @@ else
 fi
 
 log "Key Vault secrets"
-kv_has "$KV_JWT_SECRET" && ok "$KV_JWT_SECRET (exists)" || kv_set "$KV_JWT_SECRET" "$(random_secret 48)"
+ensure_secret "$KV_JWT_SECRET" random_secret 48
 # Rotating this makes every previously stored OAuth token undecryptable, so it
 # is generated once and never overwritten.
-kv_has "$KV_ENC_SECRET" && ok "$KV_ENC_SECRET (exists)" || kv_set "$KV_ENC_SECRET" "$(random_secret 48)"
-kv_has "$KV_ADMIN_PASSWORD" && ok "$KV_ADMIN_PASSWORD (exists)" || kv_set "$KV_ADMIN_PASSWORD" "$(random_secret 24)"
+ensure_secret "$KV_ENC_SECRET" random_secret 48
+ensure_secret "$KV_ADMIN_PASSWORD" random_secret 24
 # Keep the bootstrap default distinct from the administrator's own password.
-kv_has "$KV_DEFAULT_USER_PASSWORD" && ok "$KV_DEFAULT_USER_PASSWORD (exists)" || kv_set "$KV_DEFAULT_USER_PASSWORD" "$(random_secret 24)"
+ensure_secret "$KV_DEFAULT_USER_PASSWORD" random_secret 24
 
 log "Identity permissions (least privilege)"
 GRANTED=0

@@ -90,13 +90,16 @@ fi
 FQDN="$(az containerapp show -n "$APP_NAME_AZ" -g "$RESOURCE_GROUP" \
   --query properties.configuration.ingress.fqdn -o tsv)"
 
-# First deploy: the FQDN was unknown when the env vars were assembled, so set
-# APP_DOMAIN now that ingress exists. Skipped when it is already correct.
+# APP_DOMAIN drives OAuth redirect URIs and production CORS origins. A supplied
+# value (for example a custom domain) is authoritative and was already applied
+# above. Only when none was supplied does the app's own hostname fill it in - on a
+# first deploy the FQDN did not exist when the env vars were assembled.
+TARGET_APP_DOMAIN="${APP_DOMAIN:-https://${FQDN}}"
 if [ "$(az containerapp show -n "$APP_NAME_AZ" -g "$RESOURCE_GROUP" \
-      --query "properties.template.containers[0].env[?name=='APP_DOMAIN'].value | [0]" -o tsv 2>/dev/null)" != "https://${FQDN}" ]; then
+      --query "properties.template.containers[0].env[?name=='APP_DOMAIN'].value | [0]" -o tsv 2>/dev/null)" != "$TARGET_APP_DOMAIN" ]; then
   az containerapp update -n "$APP_NAME_AZ" -g "$RESOURCE_GROUP" \
-    --set-env-vars "APP_DOMAIN=https://${FQDN}" -o none
-  ok "APP_DOMAIN set to https://${FQDN}"
+    --set-env-vars "APP_DOMAIN=${TARGET_APP_DOMAIN}" -o none
+  ok "APP_DOMAIN set to ${TARGET_APP_DOMAIN}"
 fi
 
 log "Deployed"
