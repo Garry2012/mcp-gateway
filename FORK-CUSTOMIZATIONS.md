@@ -54,6 +54,21 @@ gain no team permissions. Visibility and token permission caps stay independent.
 in `tests/unit/mcpgateway/transports/test_streamablehttp_transport.py`, including the
 public-only deny cases. Submit this fix upstream, then drop this divergence when it merges.
 
+### 3. LLM Chat on MCP SDK 2.x (`langchain.mcp`)
+
+Upstream moved to MCP SDK 2.x (#6868), but LLM Chat still used `langchain-mcp-adapters`, which
+imports MCP 1.x APIs and fails at import time. Reported as
+[IBM/mcp-context-forge#7090](https://github.com/IBM/mcp-context-forge/issues/7090).
+
+`MCPClient` in `mcpgateway/services/mcp_client_chat_service.py` now loads tools through
+`langchain.mcp.MCPAdapter` with FastMCP transports (`StreamableHttpTransport`, `SSETransport`,
+`StdioTransport`). The `llmchat` extra replaces `langchain-mcp-adapters` with `langchain[mcp]` and
+raises the `langchain-core` and `langgraph` caps. `langgraph-sdk` caps `websockets<17`, so the lock
+resolves `websockets` 16.x. The import guard keeps the original `ImportError` in the error message.
+
+**Merge guidance:** when upstream fixes #7090, take upstream's version and drop this divergence.
+Keep `test_llmchat_dependencies_import_against_installed_mcp_sdk`: it imports the real chat stack.
+
 ### 2. Azure deployment
 
 `deploy/scripts/` and `deploy/README.md` build the image in Azure Container Registry and

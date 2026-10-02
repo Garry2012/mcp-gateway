@@ -222,11 +222,11 @@ postgres = [
 ]
 
 llmchat = [
-    "langchain-core<=1.5.1",
-    "langchain-mcp-adapters>=0.3.0",
+    "langchain[mcp]<=1.4.2", # langchain.mcp replaces langchain-mcp-adapters, which does not support MCP SDK 2.x
+    "langchain-core<=1.6.4",
     "langchain-ollama>=1.1.0",
     "langchain-openai<=1.4.1",
-    "langgraph<=1.2.0",
+    "langgraph<=1.2.12",
     "langsmith>=0.10.10", # Transitive pin (langchain-core)
 ]
 
