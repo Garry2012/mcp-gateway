@@ -4,7 +4,7 @@ Copyright contributors to the MCP-CONTEXT-FORGE project
 SPDX-License-Identifier: Apache-2.0
 
 Services Package.
-Exposes core MCP Gateway services:
+Exposes core ContextForge services:
 - Tool management
 - Resource handling
 - Prompt templates

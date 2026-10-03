@@ -85,7 +85,7 @@ mcpContextForge:
 
   image:
     repository: ghcr.io/ibm/mcp-context-forge
-    tag: "v1.0.10"                # PRODUCTION: pin a specific immutable tag (e.g. "v1.0.0")
+    tag: "v1.0.11"                # PRODUCTION: pin a specific immutable tag (e.g. "v1.0.0")
     pullPolicy: Always          # Always pull to ensure latest security patches
 
   # Service that fronts the gateway
@@ -254,7 +254,7 @@ mcpContextForge:
     DISABLE_ACCESS_LOG: "true"          # disable access logging for performance
 
     # ─ Basic application info ─
-    APP_NAME: MCP Gateway            # public-facing name of the gateway
+    APP_NAME: ContextForge            # public-facing name of the gateway
     HOST: 0.0.0.0                    # address the server binds to
     PORT: "4444"                     # internal container port
     APP_ROOT_PATH: ""                # e.g. "/gateway" when deploying under sub-path
@@ -409,6 +409,8 @@ mcpContextForge:
     CORS_ENABLED: "true"             # enable CORS processing in gateway
     CORS_ALLOW_CREDENTIALS: "true"   # allow credentials in CORS requests
     ALLOWED_ORIGINS: '["https://gateway.local"]' # JSON list of allowed CORS origins (CHANGE to match APP_DOMAIN)
+    # MCP_ALLOWED_ORIGINS: ""        # opt-in MCP Origin allowlist (DNS-rebinding guard); comma-separated list
+    # MCP_ALLOWED_HOSTS: ""          # opt-in MCP Host allowlist; exact "host:port" entries
     SKIP_SSL_VERIFY: "false"         # skip TLS certificate verification on upstream calls
 
     # ─ Security Headers ─
@@ -632,7 +634,7 @@ mcpContextForge:
       User-agent: *
       Disallow: /
 
-      # MCP Gateway is a private API gateway
+      # ContextForge is a private API gateway
       # Public crawling is disabled by default
     WELL_KNOWN_SECURITY_TXT_ENABLED: "false" # enable security.txt endpoint (RFC 9116)
     # WELL_KNOWN_SECURITY_TXT: ""    # populate content when enabling
@@ -902,7 +904,7 @@ mcpContextForge:
     # SMTP_USER: ""
     # SMTP_PASSWORD: ""
     # SMTP_FROM_EMAIL: ""
-    # SMTP_FROM_NAME: "MCP Gateway"
+    # SMTP_FROM_NAME: "ContextForge"
     # SMTP_USE_TLS: "true"
     # SMTP_USE_SSL: "false"
     # SMTP_TIMEOUT_SECONDS: "15"
@@ -934,7 +936,7 @@ mcpContextForge:
     DCR_ALLOWED_ISSUERS: "[]"              # allowlist of trusted issuer URLs for DCR (empty = allow any)
     DCR_TOKEN_ENDPOINT_AUTH_METHOD: "client_secret_basic" # token endpoint auth method for DCR
     DCR_METADATA_CACHE_TTL: "3600"         # AS metadata cache TTL in seconds (RFC 8414 discovery)
-    DCR_CLIENT_NAME_TEMPLATE: "MCP Gateway ({gateway_name})" # template for client_name in DCR requests
+    DCR_CLIENT_NAME_TEMPLATE: "ContextForge ({gateway_name})" # template for client_name in DCR requests
     DCR_REQUEST_REFRESH_TOKEN_WHEN_UNSUPPORTED: "false" # request refresh_token when AS omits grant_types_supported
     OAUTH_DISCOVERY_ENABLED: "true"        # enable AS metadata discovery (RFC 8414)
     OAUTH_PREFERRED_CODE_CHALLENGE_METHOD: "S256" # PKCE code challenge method (S256 or plain)
@@ -1062,7 +1064,7 @@ migration:
   # Use same image as mcpgateway
   image:
     repository: ghcr.io/ibm/mcp-context-forge
-    tag: "v1.0.10"                            # Should match mcpContextForge.image.tag
+    tag: "v1.0.11"                            # Should match mcpContextForge.image.tag
     pullPolicy: Always                      # Always pull to ensure latest security patches
 
   # Resource limits for the migration job

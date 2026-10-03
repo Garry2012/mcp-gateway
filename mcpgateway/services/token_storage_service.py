@@ -53,7 +53,7 @@ def build_token_user_context(
 
     Args:
         db: SQLAlchemy session (used only for the is_admin flag lookup).
-        user_email: MCP Gateway user email address.
+        user_email: ContextForge user email address.
         token_teams: JWT-scoped team list from ``request.state.token_teams``.
             - ``None``  → Admin UI session (admin bypass) → shared Vault path
                           *unless* jwt_teams_claim provides a path hint (see below)
@@ -253,7 +253,7 @@ class TokenStorageService:
         Args:
             gateway_id: ID of the gateway
             user_id: OAuth provider user ID
-            app_user_email: MCP Gateway user email (required)
+            app_user_email: ContextForge user email (required)
             access_token: Access token from OAuth provider
             refresh_token: Refresh token from OAuth provider (optional)
             expires_in: Token expiration time in seconds, or None if the provider does not specify expiration
@@ -287,11 +287,11 @@ class TokenStorageService:
         app_user_email: str,
         threshold_seconds: int = 300,
     ) -> Optional[str]:
-        """Get a valid access token for a specific MCP Gateway user, refreshing if necessary.
+        """Get a valid access token for a specific ContextForge user, refreshing if necessary.
 
         Args:
             gateway_id: ID of the gateway
-            app_user_email: MCP Gateway user email (required)
+            app_user_email: ContextForge user email (required)
             threshold_seconds: Seconds before expiry to consider token expired
 
         Returns:
@@ -320,7 +320,7 @@ class TokenStorageService:
 
         Args:
             gateway_id: ID of the gateway
-            app_user_email: MCP Gateway user email (required)
+            app_user_email: ContextForge user email (required)
 
         Returns:
             The ``{header: value}`` dict, or None.
@@ -341,7 +341,7 @@ class TokenStorageService:
 
         Args:
             gateway_id: ID of the gateway
-            app_user_email: MCP Gateway user email
+            app_user_email: ContextForge user email
 
         Returns:
             Token information dictionary or None if not found
@@ -391,7 +391,7 @@ class TokenStorageService:
 
         Args:
             gateway_id: ID of the gateway
-            app_user_email: MCP Gateway user email
+            app_user_email: ContextForge user email
 
         Returns:
             True if tokens were revoked successfully
@@ -433,7 +433,7 @@ class TokenStorageService:
 
         Args:
             gateway_id: ID of the gateway
-            app_user_email: MCP Gateway user email
+            app_user_email: ContextForge user email
 
         Returns:
             Tuple of (learned_aud, learned_iss). Either element may be None if

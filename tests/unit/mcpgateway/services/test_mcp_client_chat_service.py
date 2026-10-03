@@ -235,8 +235,8 @@ async def test_mcpclient_connect_disconnect_get_tools(monkeypatch):
     mock_instance.disconnect = AsyncMock(return_value=None)
     mock_instance.list_tools = AsyncMock(return_value=["ToolA"])
 
-    # Patch MultiServerMCPClient creation to return our async mock instance
-    monkeypatch.setattr(svc, "MultiServerMCPClient", MagicMock(return_value=mock_instance))
+    # Patch MCPAdapter creation to return our async mock instance
+    monkeypatch.setattr(svc, "MCPAdapter", MagicMock(return_value=mock_instance))
 
     cfg = svc.MCPServerConfig(url="https://srv", transport="sse")
     client = svc.MCPClient(cfg)
@@ -258,7 +258,7 @@ async def test_mcpclient_connect_disconnect_get_tools(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_mcpclient_connect_logs_missing_dependencies_when_multiserver_client_missing(monkeypatch, patch_logger):
-    monkeypatch.setattr(svc, "MultiServerMCPClient", None)
+    monkeypatch.setattr(svc, "MCPAdapter", None)
     cfg = svc.MCPServerConfig(url="https://srv", transport="sse")
     client = svc.MCPClient(cfg)
 
@@ -300,7 +300,7 @@ async def test_mcpclient_get_tools_logs_and_raises_on_error(patch_logger):
     client = svc.MCPClient(cfg)
     client._connected = True
     client._client = AsyncMock()
-    client._client.get_tools = AsyncMock(side_effect=RuntimeError("tool load failed"))
+    client._client.list_tools = AsyncMock(side_effect=RuntimeError("tool load failed"))
 
     with pytest.raises(RuntimeError, match="tool load failed"):
         await client.get_tools(force_reload=True)
@@ -342,7 +342,7 @@ async def test_mcpchatservice_initialize_success_and_idempotent(monkeypatch, pat
 
 @pytest.mark.asyncio
 async def test_mcpchatservice_initialize_and_chat(monkeypatch):
-    monkeypatch.setattr(svc, "MultiServerMCPClient", MagicMock())
+    monkeypatch.setattr(svc, "MCPAdapter", MagicMock())
     mcpcfg = svc.MCPClientConfig(
         mcp_server=svc.MCPServerConfig(url="https://s", transport="sse"),
         llm=svc.LLMConfig(provider="ollama", config=svc.OllamaConfig(model="llama2")),

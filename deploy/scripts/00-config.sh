@@ -7,9 +7,23 @@
 #
 #   RESOURCE_GROUP=vcare-rc-rg APP_NAME_AZ=mcp-gateway-dev ./deploy.sh
 #
+# Or keep a target's overrides in a profile file and select it:
+#
+#   DEPLOY_PROFILE=profiles/healthcare-rg.env ./deploy.sh
+#
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+if [ -n "${DEPLOY_PROFILE:-}" ]; then
+  case "$DEPLOY_PROFILE" in /*) PROFILE_PATH="$DEPLOY_PROFILE" ;; *) PROFILE_PATH="$SCRIPT_DIR/$DEPLOY_PROFILE" ;; esac
+  [ -f "$PROFILE_PATH" ] || { echo "DEPLOY_PROFILE '$DEPLOY_PROFILE' not found" >&2; exit 1; }
+  set -a
+  # shellcheck disable=SC1090
+  source "$PROFILE_PATH"
+  set +a
+fi
 
 SUBSCRIPTION_ID="${SUBSCRIPTION_ID:-4e1c081a-9a6a-4e16-9da2-90217c22378b}"
 RESOURCE_GROUP="${RESOURCE_GROUP:-vcare-rc-rg}"
@@ -22,6 +36,9 @@ CAE_NAME="${CAE_NAME:-vcare-rc-cae}"
 
 # Managed identity used for BOTH the ACR pull and the Key Vault reads, so no
 # credential ever appears in a deploy command or in the app's configuration.
+# 01-prepare-azure.sh creates it when missing and grants AcrPull on the registry
+# plus Key Vault Secrets User on the gateway's own secrets only, so a shared
+# vault does not expose other applications' secrets to the gateway.
 UAMI_NAME="${UAMI_NAME:-vcare-rc-uami}"
 KEYVAULT_NAME="${KEYVAULT_NAME:-vcare-rc-kv}"
 
@@ -30,6 +47,15 @@ KEYVAULT_NAME="${KEYVAULT_NAME:-vcare-rc-kv}"
 PG_SERVER="${PG_SERVER:-vcare-mcpgw-db}"
 PG_ADMIN_USER="${PG_ADMIN_USER:-mcpadmin}"
 PG_DATABASE="${PG_DATABASE:-mcpgateway}"
+
+# Shared Postgres server. When PG_SERVER already exists and belongs to other
+# applications, the gateway gets its own login role and database on it instead
+# of the server admin account. PG_ADMIN_URL_SECRET names a Key Vault secret that
+# holds a connection URL for a role with CREATEROLE and CREATEDB; it is read only
+# during 01-prepare-azure.sh and never reaches the container app. Never reset the
+# server admin password of a shared server: other applications depend on it.
+PG_ADMIN_URL_SECRET="${PG_ADMIN_URL_SECRET:-}"  # pragma: allowlist secret
+PG_APP_USER="${PG_APP_USER:-mcpgateway_app}"
 PG_SKU="${PG_SKU:-Standard_B1ms}"
 PG_TIER="${PG_TIER:-Burstable}"
 PG_STORAGE_GB="${PG_STORAGE_GB:-32}"
@@ -98,9 +124,18 @@ APP_MEMORY="${APP_MEMORY:-2.0Gi}"
 APP_MIN_REPLICAS="${APP_MIN_REPLICAS:-1}"
 APP_MAX_REPLICAS="${APP_MAX_REPLICAS:-1}"
 
-# Product identity (see FORK-CUSTOMIZATIONS.md).
-BRAND_NAME="${BRAND_NAME:-MCP Gateway}"
 PLATFORM_ADMIN_EMAIL="${PLATFORM_ADMIN_EMAIL:-admin@intimetec.com}"
+
+# Admin UI and admin API. Set both to false for a headless deployment, where
+# consuming platforms use only the REST, MCP and A2A endpoints.
+MCPGATEWAY_UI_ENABLED="${MCPGATEWAY_UI_ENABLED:-true}"
+MCPGATEWAY_ADMIN_API_ENABLED="${MCPGATEWAY_ADMIN_API_ENABLED:-true}"
+
+# HTTP header passthrough (off by default in config.py). When on, each gateway
+# registration's passthrough_headers allowlist decides which client headers reach
+# that MCP server. Upstream servers that read trusted context from headers (for
+# example the front-desk healthcare server's X-Call-Id / X-Turn-Context) need it.
+ENABLE_HEADER_PASSTHROUGH="${ENABLE_HEADER_PASSTHROUGH:-false}"
 
 # --- OAuth / Dynamic Client Registration ------------------------------------
 # APP_DOMAIN is the gateway's own public URL. It defaults to
@@ -111,13 +146,14 @@ PLATFORM_ADMIN_EMAIL="${PLATFORM_ADMIN_EMAIL:-admin@intimetec.com}"
 APP_DOMAIN="${APP_DOMAIN:-}"
 
 # Upstream MCP servers the gateway may dynamically register itself with.
-# DCR_ALLOWED_ISSUERS is an allowlist and is fail-closed: an issuer absent from
-# it is refused. Keep this OUT of a local .env - it makes tests in
-# tests/unit/mcpgateway/services/test_dcr_service.py fail, because they use
-# https://as.example.com as a fixture issuer and expect a different error.
+# DCR_ALLOWED_ISSUERS is a JSON list of issuer URLs. When set, an issuer absent
+# from it is refused. When empty, the variable is not passed and config.py's
+# default applies (empty list = allow any issuer). Keep this OUT of a local
+# .env - it makes tests in tests/unit/mcpgateway/services/test_dcr_service.py
+# fail, because they use https://as.example.com as a fixture issuer.
 DCR_ENABLED="${DCR_ENABLED:-true}"
 DCR_AUTO_REGISTER_ON_MISSING_CREDENTIALS="${DCR_AUTO_REGISTER_ON_MISSING_CREDENTIALS:-true}"  # pragma: allowlist secret
-DCR_ALLOWED_ISSUERS="${DCR_ALLOWED_ISSUERS:-[\"https://sun-tv-7006933048.zohomcp.com.au\"]}"
+DCR_ALLOWED_ISSUERS="${DCR_ALLOWED_ISSUERS:-}"
 DCR_TOKEN_ENDPOINT_AUTH_METHOD="${DCR_TOKEN_ENDPOINT_AUTH_METHOD:-client_secret_post}"
 
 # Key Vault secret names. Values are never stored in this repo.
@@ -133,9 +169,12 @@ KV_DEFAULT_USER_PASSWORD="${KV_DEFAULT_USER_PASSWORD:-mcpgw-default-user-passwor
 # and ACR's dependency scanner cannot resolve that nesting - it fails with
 # "Failed to parse image reference: ${UBI_MINIMAL}:latest" before the build
 # starts. Passing them flattens the reference.
-UBI_BASE="${UBI_BASE:-registry.access.redhat.com/ubi10:10.2-1784668814}"
-NODEJS_IMAGE="${NODEJS_IMAGE:-registry.access.redhat.com/ubi10/nodejs-24:10.2-1784784528}"
-UBI_MINIMAL="${UBI_MINIMAL:-registry.access.redhat.com/ubi10/ubi-minimal:10.2-1784669047}"
+# Defaults are read from the Containerfile's ARG lines, so upstream base-image
+# bumps apply on the next sync without editing this file.
+containerfile_arg() { sed -n "s/^ARG $1=//p" "$ROOT_DIR/Containerfile" | head -1; }
+UBI_BASE="${UBI_BASE:-$(containerfile_arg UBI_BASE)}"
+NODEJS_IMAGE="${NODEJS_IMAGE:-$(containerfile_arg NODEJS_IMAGE)}"
+UBI_MINIMAL="${UBI_MINIMAL:-$(containerfile_arg UBI_MINIMAL)}"
 WHEELS_REF="${WHEELS_REF:-$UBI_MINIMAL}"
 
 # Derived

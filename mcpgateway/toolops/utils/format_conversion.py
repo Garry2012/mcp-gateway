@@ -3,7 +3,7 @@
 Copyright contributors to the MCP-CONTEXT-FORGE project
 SPDX-License-Identifier: Apache-2.0
 
-MCP Gateway - module for converting MCP tool format to toolops specific internal format.
+ContextForge - module for converting MCP tool format to toolops specific internal format.
 """
 
 # Standard

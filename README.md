@@ -1,8 +1,8 @@
-# MCP Gateway
+# ContextForge
 
 > An open source registry and proxy that federates MCP, A2A, and REST/gRPC APIs with centralized governance, discovery, and observability. Optimizes Agent & Tool calling, and supports plugins.
 
-![MCP Gateway Banner](docs/docs/images/contextforge-logo_horizontal_black.png)
+![ContextForge Banner](docs/docs/images/contextforge-logo_horizontal_black.png)
 
 <!-- === CI / Security / Build Badges === -->
 [![Build Python Package](https://github.com/IBM/mcp-context-forge/actions/workflows/python-package.yml/badge.svg)](https://github.com/IBM/mcp-context-forge/actions/workflows/python-package.yml)&nbsp;
@@ -17,7 +17,7 @@
 [![Docker Image](https://img.shields.io/badge/docker-ghcr.io%2Fibm%2Fmcp--context--forge-blue)](https://github.com/ibm/mcp-context-forge/pkgs/container/mcp-context-forge)&nbsp;
 
 
-**MCP Gateway** is an open source registry and proxy that federates tools, agents, and APIs into one clean endpoint for your AI clients. It provides centralized governance, discovery, and observability across your AI infrastructure:
+**ContextForge** is an open source registry and proxy that federates tools, agents, and APIs into one clean endpoint for your AI clients. It provides centralized governance, discovery, and observability across your AI infrastructure:
 
 - **Tools Gateway** — MCP, REST, gRPC-to-MCP translation, and TOON compression
 - **Agent Gateway** — A2A protocol, OpenAI-compatible and Anthropic agent routing
@@ -27,7 +27,7 @@
 
 It runs as a fully compliant MCP server, deployable via PyPI or Docker, and scales to multi-cluster environments on Kubernetes with Redis-backed federation and caching.
 
-![MCP Gateway](https://ibm.github.io/mcp-context-forge/images/mcpgateway.gif)
+![ContextForge](https://ibm.github.io/mcp-context-forge/images/mcpgateway.gif)
 ---
 
 <!-- vscode-markdown-toc -->
@@ -65,7 +65,7 @@ It runs as a fully compliant MCP server, deployable via PyPI or Docker, and scal
 
 ## Overview & Goals
 
-**MCP Gateway** is an open source registry and proxy that federates any [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server, A2A server, or REST/gRPC API, providing centralized governance, discovery, and observability. It optimizes agent and tool calling, and supports plugins. See the [project roadmap](https://ibm.github.io/mcp-context-forge/architecture/roadmap/) for more details.
+**ContextForge** is an open source registry and proxy that federates any [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server, A2A server, or REST/gRPC API, providing centralized governance, discovery, and observability. It optimizes agent and tool calling, and supports plugins. See the [project roadmap](https://ibm.github.io/mcp-context-forge/architecture/roadmap/) for more details.
 
 It currently supports:
 
@@ -79,9 +79,9 @@ It currently supports:
 * **OpenTelemetry observability** with Phoenix, Jaeger, Zipkin, and other OTLP backends
 * Scalable deployments via Docker or PyPI, Redis-backed caching, and multi-cluster federation
 
-![MCP Gateway Architecture](https://ibm.github.io/mcp-context-forge/images/mcpgateway.svg)
+![ContextForge Architecture](https://ibm.github.io/mcp-context-forge/images/mcpgateway.svg)
 
-For a list of upcoming features, check out the [MCP Gateway Roadmap](https://ibm.github.io/mcp-context-forge/architecture/roadmap/)
+For a list of upcoming features, check out the [ContextForge Roadmap](https://ibm.github.io/mcp-context-forge/architecture/roadmap/)
 
 ---
 
@@ -153,7 +153,7 @@ See **[Observability Documentation](https://ibm.github.io/mcp-context-forge/mana
 
 ## Quick Start - PyPI
 
-MCP Gateway is published on [PyPI](https://pypi.org/project/mcp-contextforge-gateway/) as `mcp-contextforge-gateway`.
+ContextForge is published on [PyPI](https://pypi.org/project/mcp-contextforge-gateway/) as `mcp-contextforge-gateway`.
 
 ---
 
@@ -378,7 +378,7 @@ docker compose exec gateway python3 -m mcpgateway.utils.create_jwt_token \
 
 **What you get:**
 - 🗄️ **PostgreSQL** - Production-ready database with 55+ tables
-- 🚀 **MCP Gateway** - Full-featured gateway with Admin UI
+- 🚀 **ContextForge** - Full-featured gateway with Admin UI
 - 📊 **Redis** - High-performance caching and session storage
 - 🔧 **Admin Tools** - pgAdmin, Redis Insight for database management
 - 🌐 **Nginx Proxy** - Caching reverse proxy on port 8080
@@ -840,7 +840,7 @@ uvicorn mcpgateway.main:app --host 0.0.0.0 --port 4444 --workers 4
 
 ## Cloud Deployment
 
-MCP Gateway can be deployed to any major cloud platform:
+ContextForge can be deployed to any major cloud platform:
 
 | Platform | Guide |
 |----------|-------|
@@ -916,7 +916,7 @@ mcp-servers/         # Sample/test MCP servers (see note below)
 > most originating from community contributions, provided for demonstration and integration
 > testing purposes only. They generally lack session management, persistent state,
 > multi-tenancy, authentication, and other production concerns. They do not go through
-> the same review, testing, and security rigor as the core MCP Gateway codebase and
+> the same review, testing, and security rigor as the core ContextForge codebase and
 > **should not be run in production**.
 >
 > **Security:** Never run untrusted MCP servers directly on your local filesystem.

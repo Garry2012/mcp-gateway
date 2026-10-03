@@ -18,7 +18,6 @@ from typing import Sequence, Union
 # Third-Party
 from alembic import op
 import sqlalchemy as sa
-from sqlalchemy.engine.interfaces import ReflectedColumn
 
 
 # revision identifiers, used by Alembic.
@@ -34,7 +33,7 @@ NULL_HASH_KEY_PREFIX = "password_hash_was_null:"
 NONE_TYPE_KEY_PREFIX = "password_hash_type_was_none:"
 
 
-def _email_users_columns() -> dict[str, ReflectedColumn]:
+def _email_users_columns() -> dict[str, dict]:
     """Return reflected email_users columns keyed by name."""
     bind = op.get_bind()
     inspector = sa.inspect(bind)
@@ -80,7 +79,7 @@ def _parse_metadata_value(value: str) -> tuple[str, str | None]:
     return email, password_hash if isinstance(password_hash, str) else None
 
 
-def _snapshot_metadata(prefix: str, rows: Sequence[tuple[str, str | None]]) -> None:
+def _snapshot_metadata(prefix: str, rows: list[tuple[str, str | None]]) -> None:
     """Persist email rows whose passwordless state must survive downgrade-to-upgrade."""
     if not rows or not _has_migration_metadata_table():
         return
@@ -112,7 +111,7 @@ def _passwordless_metadata_rows() -> list[tuple[str, str]]:
     ]
 
 
-def _restore_passwordless_metadata(columns: dict[str, ReflectedColumn]) -> None:
+def _restore_passwordless_metadata(columns: dict[str, dict]) -> None:
     """Restore passwordless markers saved by downgrade()."""
     rows = _passwordless_metadata_rows()
     if not rows:

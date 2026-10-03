@@ -3,7 +3,6 @@ module.exports = {
     content: [
         "./mcpgateway/templates/**/*.html",
         "./mcpgateway/static/**/*.js",
-        "./mcpgateway/admin_ui/**/*.js",
     ],
     darkMode: "class",
     theme: {

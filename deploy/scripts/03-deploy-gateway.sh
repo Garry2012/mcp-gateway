@@ -47,15 +47,14 @@ ENV_VARS=(
   "PLATFORM_ADMIN_PASSWORD=secretref:admin-password"  # pragma: allowlist secret
   "DEFAULT_USER_PASSWORD=secretref:default-user-password"  # pragma: allowlist secret
   "PLATFORM_ADMIN_EMAIL=${PLATFORM_ADMIN_EMAIL}"
-  "APP_NAME=${BRAND_NAME}"
   "HOST=0.0.0.0"
   "PORT=${APP_PORT}"
   "ENVIRONMENT=production"
-  "MCPGATEWAY_UI_ENABLED=true"
-  "MCPGATEWAY_ADMIN_API_ENABLED=true"
+  "MCPGATEWAY_UI_ENABLED=${MCPGATEWAY_UI_ENABLED}"
+  "MCPGATEWAY_ADMIN_API_ENABLED=${MCPGATEWAY_ADMIN_API_ENABLED}"
+  "ENABLE_HEADER_PASSTHROUGH=${ENABLE_HEADER_PASSTHROUGH}"
   "DCR_ENABLED=${DCR_ENABLED}"
   "DCR_AUTO_REGISTER_ON_MISSING_CREDENTIALS=${DCR_AUTO_REGISTER_ON_MISSING_CREDENTIALS}"
-  "DCR_ALLOWED_ISSUERS=${DCR_ALLOWED_ISSUERS}"
   "DCR_TOKEN_ENDPOINT_AUTH_METHOD=${DCR_TOKEN_ENDPOINT_AUTH_METHOD}"
   "DB_POOL_SIZE=${DB_POOL_SIZE}"
   "DB_MAX_OVERFLOW=${DB_MAX_OVERFLOW}"
@@ -65,6 +64,7 @@ ENV_VARS=(
   "OTEL_CAPTURE_OUTPUT_SPANS=${OTEL_CAPTURE_OUTPUT_SPANS}"
 )
 [ -n "$RESOLVED_APP_DOMAIN" ] && ENV_VARS+=("APP_DOMAIN=${RESOLVED_APP_DOMAIN}")
+[ -n "$DCR_ALLOWED_ISSUERS" ] && ENV_VARS+=("DCR_ALLOWED_ISSUERS=${DCR_ALLOWED_ISSUERS}")
 
 if az containerapp show -n "$APP_NAME_AZ" -g "$RESOURCE_GROUP" -o none 2>/dev/null; then
   log "Updating existing app: $APP_NAME_AZ"
@@ -90,17 +90,20 @@ fi
 FQDN="$(az containerapp show -n "$APP_NAME_AZ" -g "$RESOURCE_GROUP" \
   --query properties.configuration.ingress.fqdn -o tsv)"
 
-# First deploy: the FQDN was unknown when the env vars were assembled, so set
-# APP_DOMAIN now that ingress exists. Skipped when it is already correct.
+# APP_DOMAIN drives OAuth redirect URIs and production CORS origins. A supplied
+# value (for example a custom domain) is authoritative and was already applied
+# above. Only when none was supplied does the app's own hostname fill it in - on a
+# first deploy the FQDN did not exist when the env vars were assembled.
+TARGET_APP_DOMAIN="${APP_DOMAIN:-https://${FQDN}}"
 if [ "$(az containerapp show -n "$APP_NAME_AZ" -g "$RESOURCE_GROUP" \
-      --query "properties.template.containers[0].env[?name=='APP_DOMAIN'].value | [0]" -o tsv 2>/dev/null)" != "https://${FQDN}" ]; then
+      --query "properties.template.containers[0].env[?name=='APP_DOMAIN'].value | [0]" -o tsv 2>/dev/null)" != "$TARGET_APP_DOMAIN" ]; then
   az containerapp update -n "$APP_NAME_AZ" -g "$RESOURCE_GROUP" \
-    --set-env-vars "APP_DOMAIN=https://${FQDN}" -o none
-  ok "APP_DOMAIN set to https://${FQDN}"
+    --set-env-vars "APP_DOMAIN=${TARGET_APP_DOMAIN}" -o none
+  ok "APP_DOMAIN set to ${TARGET_APP_DOMAIN}"
 fi
 
 log "Deployed"
-echo "  URL  : https://${FQDN}/admin/login"
+echo "  URL  : https://${FQDN}"
 echo "  Admin: ${PLATFORM_ADMIN_EMAIL}"
 echo "  Pass : az keyvault secret show --vault-name ${KEYVAULT_NAME} --name ${KV_ADMIN_PASSWORD} --query value -o tsv"
 echo "  Next : ./04-smoke.sh"

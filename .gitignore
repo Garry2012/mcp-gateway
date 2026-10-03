@@ -78,6 +78,7 @@ pip-delete-this-directory.txt
 # ========================================
 # Testing & Coverage
 # ========================================
+.integration/
 .playwright-mcp/
 output
 htmlcov
@@ -362,6 +363,3 @@ tools_rust/mcp_runtime/perf.data*
 
 # Git worktrees
 .worktrees/
-
-# Brainstorming session mockups
-.superpowers/

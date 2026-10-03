@@ -6,6 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 Extended tests to achieve >95% coverage for mcp_client_chat_service module.
 """
 
+import asyncio
 import importlib.util
 import sys
 import types
@@ -144,7 +145,7 @@ async def test_mcpclient_connect_disconnect_and_reload(monkeypatch):
     mock_client.connect = AsyncMock()
     mock_client.disconnect = AsyncMock()
     mock_client.list_tools = AsyncMock(return_value=["tool_1"])
-    monkeypatch.setattr(svc, "MultiServerMCPClient", MagicMock(return_value=mock_client))
+    monkeypatch.setattr(svc, "MCPAdapter", MagicMock(return_value=mock_client))
 
     cfg = svc.MCPServerConfig(url="https://srv", transport="sse")
     client = svc.MCPClient(cfg)
@@ -164,7 +165,7 @@ async def test_mcpclient_connect_disconnect_and_reload(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_mcpchatservice_initialize_and_valid_chat(monkeypatch):
-    monkeypatch.setattr(svc, "MultiServerMCPClient", MagicMock())
+    monkeypatch.setattr(svc, "MCPAdapter", MagicMock())
     chatcfg = svc.MCPClientConfig(
         mcp_server=svc.MCPServerConfig(url="https://x", transport="sse"),
         llm=svc.LLMConfig(provider="openai", config=svc.OpenAIConfig(api_key="ak", model="gpt-4")),  # pragma: allowlist secret
@@ -263,8 +264,7 @@ async def test_chat_non_streaming_response(monkeypatch):
 @pytest.mark.asyncio
 async def test_chat_service_disconnect_cleanup(monkeypatch):
     chatcfg = svc.MCPClientConfig(
-        mcp_server=svc.MCPServerConfig(url="https://x", transport="sse"),
-        llm=svc.LLMConfig(provider="openai", config=svc.OpenAIConfig(api_key="ak", model="gpt-4")),  # pragma: allowlist secret
+        mcp_server=svc.MCPServerConfig(url="https://x", transport="sse"), llm=svc.LLMConfig(provider="openai", config=svc.OpenAIConfig(api_key="ak", model="gpt-4"))  # pragma: allowlist secret
     )  # pragma: allowlist secret
     service = svc.MCPChatService(chatcfg)
     service._client = AsyncMock()
@@ -394,54 +394,6 @@ def test_gateway_provider_openai_compatible(monkeypatch):
     gateway = svc.GatewayProvider(svc.GatewayConfig(model="gpt-4"))
     llm = gateway.get_llm(model_type="completion")
     assert llm is not None
-
-
-def test_gateway_provider_openai_reasoning_effort_forwarded(monkeypatch):
-    """A configured reasoning_effort is forwarded to the OpenAI chat client."""
-    _patch_gateway_llms(monkeypatch)
-    model, provider = _make_model_and_provider("openai", config={"reasoning_effort": "none"}, api_base="https://api")
-    _patch_gateway_session(monkeypatch, model, provider)
-    monkeypatch.setattr("mcpgateway.utils.services_auth.decode_auth", lambda _v: {"api_key": "decoded"})
-
-    gateway = svc.GatewayProvider(svc.GatewayConfig(model="gpt-4"))
-    llm = gateway.get_llm(model_type="chat")
-    assert llm.kwargs["reasoning_effort"] == "none"
-
-
-def test_gateway_provider_openai_compatible_reasoning_effort_forwarded(monkeypatch):
-    """reasoning_effort works on the openai_compatible branch too."""
-    _patch_gateway_llms(monkeypatch)
-    model, provider = _make_model_and_provider("openai_compatible", config={"reasoning_effort": "low"}, api_base="https://compat")
-    _patch_gateway_session(monkeypatch, model, provider)
-    monkeypatch.setattr("mcpgateway.utils.services_auth.decode_auth", lambda _v: "decoded")
-
-    gateway = svc.GatewayProvider(svc.GatewayConfig(model="gpt-4"))
-    llm = gateway.get_llm(model_type="chat")
-    assert llm.kwargs["reasoning_effort"] == "low"
-
-
-def test_gateway_provider_openai_reasoning_effort_absent_by_default(monkeypatch):
-    """Without config, reasoning_effort is not sent (backward compatible)."""
-    _patch_gateway_llms(monkeypatch)
-    model, provider = _make_model_and_provider("openai", config={}, api_base="https://api")
-    _patch_gateway_session(monkeypatch, model, provider)
-    monkeypatch.setattr("mcpgateway.utils.services_auth.decode_auth", lambda _v: {"api_key": "decoded"})
-
-    gateway = svc.GatewayProvider(svc.GatewayConfig(model="gpt-4"))
-    llm = gateway.get_llm(model_type="chat")
-    assert "reasoning_effort" not in llm.kwargs
-
-
-def test_gateway_provider_openai_empty_reasoning_effort_not_forwarded(monkeypatch):
-    """An empty reasoning_effort (UI 'Default' option) is treated as unset."""
-    _patch_gateway_llms(monkeypatch)
-    model, provider = _make_model_and_provider("openai", config={"reasoning_effort": ""}, api_base="https://api")
-    _patch_gateway_session(monkeypatch, model, provider)
-    monkeypatch.setattr("mcpgateway.utils.services_auth.decode_auth", lambda _v: {"api_key": "decoded"})
-
-    gateway = svc.GatewayProvider(svc.GatewayConfig(model="gpt-4"))
-    llm = gateway.get_llm(model_type="chat")
-    assert "reasoning_effort" not in llm.kwargs
 
 
 def test_gateway_provider_azure_openai(monkeypatch):
@@ -638,13 +590,16 @@ async def test_mcpclient_connect_with_headers(monkeypatch):
     client = svc.MCPClient(cfg)
     captured = {}
 
-    def _client_factory(config):
-        captured.update(config)
+    def _client_factory(transport):
+        captured["transport"] = transport
         return AsyncMock()
 
-    monkeypatch.setattr(svc, "MultiServerMCPClient", _client_factory)
+    monkeypatch.setattr(svc, "MCPAdapter", _client_factory)
+    monkeypatch.setattr(svc, "FastMCPClient", lambda transport, **_kwargs: transport)
     await client.connect()
-    assert captured["default"]["headers"] == {"x-test": "1"}
+    assert isinstance(captured["transport"], svc.SSETransport)
+    assert captured["transport"].url == "https://srv"
+    assert captured["transport"].headers == {"x-test": "1"}
 
 
 @pytest.mark.asyncio
@@ -654,14 +609,108 @@ async def test_mcpclient_connect_stdio_args(monkeypatch):
     client = svc.MCPClient(cfg)
     captured = {}
 
-    def _client_factory(config):
-        captured.update(config)
+    def _client_factory(transport):
+        captured["transport"] = transport
         return AsyncMock()
 
-    monkeypatch.setattr(svc, "MultiServerMCPClient", _client_factory)
+    monkeypatch.setattr(svc, "MCPAdapter", _client_factory)
+    monkeypatch.setattr(svc, "FastMCPClient", lambda transport, **_kwargs: transport)
     await client.connect()
-    assert captured["default"]["command"] == "python"
-    assert captured["default"]["args"] == ["server.py"]
+    assert isinstance(captured["transport"], svc.StdioTransport)
+    assert captured["transport"].command == "python"
+    assert captured["transport"].args == ["server.py"]
+
+
+@pytest.mark.asyncio
+async def test_mcpclient_connect_streamable_http_transport(monkeypatch):
+    cfg = svc.MCPServerConfig(url="https://srv/mcp", transport="streamable_http", headers={"Authorization": "Bearer t"})
+    client = svc.MCPClient(cfg)
+    captured = {}
+
+    def _client_factory(transport):
+        captured["transport"] = transport
+        return AsyncMock()
+
+    monkeypatch.setattr(svc, "MCPAdapter", _client_factory)
+    monkeypatch.setattr(svc, "FastMCPClient", lambda transport, **_kwargs: transport)
+    await client.connect()
+    assert isinstance(captured["transport"], svc.StreamableHttpTransport)
+    assert captured["transport"].url == "https://srv/mcp"
+    assert captured["transport"].headers == {"Authorization": "Bearer t"}
+
+
+def test_mcpclient_build_transport_rejects_unsupported_transport():
+    client = svc.MCPClient(svc.MCPServerConfig(url="https://srv", transport="sse"))
+    client.config.transport = "websocket"
+    with pytest.raises(ValueError, match="Unsupported MCP transport: websocket"):
+        client._build_transport()
+
+
+def _llmchat_extra_installed() -> bool:
+    """Return whether the optional ``llmchat`` extra is installed, without importing it."""
+    return importlib.util.find_spec("langchain") is not None and importlib.util.find_spec("fastmcp") is not None
+
+
+@pytest.mark.skipif(not _llmchat_extra_installed(), reason="llmchat extra not installed")
+def test_llmchat_dependencies_import_against_installed_mcp_sdk():
+    """Import the real LLM chat stack, so an MCP SDK upgrade that breaks it fails here."""
+    # Third-Party
+    from langchain.mcp import MCPAdapter  # noqa: F401  # pylint: disable=import-outside-toplevel,unused-import
+
+    assert svc._LLMCHAT_AVAILABLE is True, f"LLM chat imports failed: {svc._LLMCHAT_IMPORT_ERROR}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not _llmchat_extra_installed(), reason="llmchat extra not installed")
+async def test_llmchat_declines_elicitation_instead_of_interrupting():
+    """A tool that asks for user input completes with a decline instead of an empty interrupt."""
+    # Third-Party
+    from fastmcp import Context, FastMCP  # pylint: disable=import-outside-toplevel
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel  # pylint: disable=import-outside-toplevel
+    from langchain_core.messages import AIMessage as RealAIMessage  # pylint: disable=import-outside-toplevel
+    from mcp.types import ElicitRequest, ElicitRequestFormParams, InputRequiredResult  # pylint: disable=import-outside-toplevel
+
+    server = FastMCP("elicitation-probe")
+
+    @server.tool
+    async def confirm(ctx: Context) -> str | InputRequiredResult:
+        """Ask the user to confirm."""
+        if getattr(ctx, "input_responses", None):
+            return f"answered: {ctx.input_responses['confirm'].action}"
+        params = ElicitRequestFormParams(message="Confirm?", requested_schema={"type": "object", "properties": {"approved": {"type": "boolean"}}, "required": ["approved"]})
+        return InputRequiredResult(input_requests={"confirm": ElicitRequest(method="elicitation/create", params=params)})
+
+    class _ToolCallingModel(FakeMessagesListChatModel):
+        def bind_tools(self, tools, **kwargs):  # noqa: ARG002
+            return self
+
+    client = svc.MCPClient(svc.MCPServerConfig(url="https://unused.example/mcp", transport="streamable_http"))
+    client._client = svc.MCPAdapter(svc.FastMCPClient(server, elicitation_handler=svc._decline_elicitation))
+    client._connected = True
+    tools = await client.get_tools()
+    model = _ToolCallingModel(responses=[RealAIMessage(content="", tool_calls=[{"name": "confirm", "args": {}, "id": "c1", "type": "tool_call"}]), RealAIMessage(content="done")])
+
+    result = await asyncio.wait_for(svc.create_react_agent(model, tools).ainvoke({"messages": [("user", "confirm")]}), 30)
+
+    assert not result.get("__interrupt__")
+    assert result["messages"][-1].content == "done"
+    assert any("answered: decline" in str(m.content) for m in result["messages"] if m.type == "tool")
+
+
+@pytest.mark.asyncio
+async def test_mcpclient_connect_builds_client_with_decline_handler(monkeypatch):
+    """connect() hands MCPAdapter a FastMCP client that declines elicitation."""
+    captured = {}
+
+    def _client(transport, **kwargs):
+        captured.update(kwargs, transport=transport)
+        return MagicMock()
+
+    monkeypatch.setattr(svc, "FastMCPClient", _client)
+    monkeypatch.setattr(svc, "MCPAdapter", MagicMock())
+    client = svc.MCPClient(svc.MCPServerConfig(url="https://srv/mcp", transport="streamable_http"))
+    await client.connect()
+    assert captured["elicitation_handler"] is svc._decline_elicitation
 
 
 @pytest.mark.asyncio
@@ -672,7 +721,7 @@ async def test_mcpclient_connect_error(monkeypatch):
     def _client_factory(_config):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(svc, "MultiServerMCPClient", _client_factory)
+    monkeypatch.setattr(svc, "MCPAdapter", _client_factory)
     with pytest.raises(ConnectionError):
         await client.connect()
     assert client.is_connected is False
@@ -943,7 +992,7 @@ async def test_trim_messages_and_clear(monkeypatch):
 async def test_mcpclient_double_connect(monkeypatch):
     mock_client = AsyncMock()
     mock_client.connect = AsyncMock()
-    monkeypatch.setattr(svc, "MultiServerMCPClient", MagicMock(return_value=mock_client))
+    monkeypatch.setattr(svc, "MCPAdapter", MagicMock(return_value=mock_client))
     cfg = svc.MCPServerConfig(url="https://srv", transport="sse")
     c = svc.MCPClient(cfg)
     await c.connect()
@@ -955,7 +1004,7 @@ async def test_mcpclient_double_connect(monkeypatch):
 async def test_mcpclient_tools_cache(monkeypatch):
     mock_client = AsyncMock()
     mock_client.list_tools = AsyncMock(return_value=["Tool"])
-    monkeypatch.setattr(svc, "MultiServerMCPClient", MagicMock(return_value=mock_client))
+    monkeypatch.setattr(svc, "MCPAdapter", MagicMock(return_value=mock_client))
     cfg = svc.MCPServerConfig(url="https://srv", transport="sse")
     c = svc.MCPClient(cfg)
     c._client = mock_client
@@ -1017,8 +1066,12 @@ def test_optional_langchain_import_block_executes():
         "langchain_core.language_models",
         "langchain_core.messages",
         "langchain_core.tools",
-        "langchain_mcp_adapters",
-        "langchain_mcp_adapters.client",
+        "fastmcp",
+        "fastmcp.client",
+        "fastmcp.client.transports",
+        "fastmcp.client.elicitation",
+        "langchain",
+        "langchain.mcp",
         "langchain_ollama",
         "langchain_openai",
         "langgraph",
@@ -1041,11 +1094,25 @@ def test_optional_langchain_import_block_executes():
         langchain_core.messages = langchain_core_messages
         langchain_core.tools = langchain_core_tools
 
-        langchain_mcp_adapters = types.ModuleType("langchain_mcp_adapters")
-        langchain_mcp_adapters.__path__ = []
-        langchain_mcp_client = types.ModuleType("langchain_mcp_adapters.client")
-        langchain_mcp_client.MultiServerMCPClient = object
-        langchain_mcp_adapters.client = langchain_mcp_client
+        fastmcp = types.ModuleType("fastmcp")
+        fastmcp.__path__ = []
+        fastmcp_client = types.ModuleType("fastmcp.client")
+        fastmcp_client.__path__ = []
+        fastmcp_transports = types.ModuleType("fastmcp.client.transports")
+        fastmcp_transports.SSETransport = object
+        fastmcp_transports.StdioTransport = object
+        fastmcp_transports.StreamableHttpTransport = object
+        fastmcp_client.transports = fastmcp_transports
+        fastmcp_elicitation = types.ModuleType("fastmcp.client.elicitation")
+        fastmcp_elicitation.ElicitResult = object
+        fastmcp_client.elicitation = fastmcp_elicitation
+        fastmcp.client = fastmcp_client
+        fastmcp.Client = object
+        langchain = types.ModuleType("langchain")
+        langchain.__path__ = []
+        langchain_mcp = types.ModuleType("langchain.mcp")
+        langchain_mcp.MCPAdapter = object
+        langchain.mcp = langchain_mcp
 
         langchain_ollama = types.ModuleType("langchain_ollama")
         langchain_ollama.ChatOllama = object
@@ -1069,8 +1136,12 @@ def test_optional_langchain_import_block_executes():
                 "langchain_core.language_models": langchain_core_language_models,
                 "langchain_core.messages": langchain_core_messages,
                 "langchain_core.tools": langchain_core_tools,
-                "langchain_mcp_adapters": langchain_mcp_adapters,
-                "langchain_mcp_adapters.client": langchain_mcp_client,
+                "fastmcp": fastmcp,
+                "fastmcp.client": fastmcp_client,
+                "fastmcp.client.transports": fastmcp_transports,
+                "fastmcp.client.elicitation": fastmcp_elicitation,
+                "langchain": langchain,
+                "langchain.mcp": langchain_mcp,
                 "langchain_ollama": langchain_ollama,
                 "langchain_openai": langchain_openai,
                 "langgraph": langgraph,

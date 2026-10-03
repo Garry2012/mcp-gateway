@@ -226,9 +226,9 @@ async def delete_tool_plugin_bindings_by_reference(
 ) -> ToolPluginBindingListResponse:
     """Delete all bindings associated with an external reference ID.
 
-    Intended for use by external systems that need to remove all MCP Gateway
+    Intended for use by external systems that need to remove all ContextForge
     bindings tied to one of their own reference objects without knowing the
-    internal MCP Gateway UUIDs.
+    internal ContextForge UUIDs.
 
     Returns the deleted records (empty list if none matched — not an error).
 

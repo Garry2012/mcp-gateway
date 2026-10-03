@@ -3,8 +3,8 @@
 Copyright contributors to the MCP-CONTEXT-FORGE project
 SPDX-License-Identifier: Apache-2.0
 
-Admin UI Routes for MCP Gateway.
-This module contains all the administrative UI endpoints for MCP Gateway.
+Admin UI Routes for ContextForge AI Gateway.
+This module contains all the administrative UI endpoints for ContextForge AI Gateway.
 It provides a comprehensive interface for managing servers, tools, resources,
 prompts, gateways, and roots through RESTful API endpoints. The module handles
 all aspects of CRUD operations for these entities, including creation,
@@ -178,6 +178,7 @@ from mcpgateway.services.gateway_service import (
     GatewayLookupConflictError,
     GatewayNameConflictError,
     GatewayNotFoundError,
+    GatewayToolNameConflictError,
     GatewayService,
     test_gateway_connectivity,
 )
@@ -205,7 +206,6 @@ from mcpgateway.utils.error_formatter import ErrorFormatter, sanitize_validation
 from mcpgateway.utils.log_sanitizer import sanitize_for_log
 from mcpgateway.utils.metadata_capture import MetadataCapture
 from mcpgateway.utils.oauth_resource import parse_oauth_resource_form
-from mcpgateway.utils.origin import is_allowed_redirect, normalize_origin_parts, origin_from_url
 from mcpgateway.utils.orjson_response import ORJSONResponse
 from mcpgateway.utils.pagination import paginate_query
 from mcpgateway.utils.passthrough_headers import PassthroughHeadersError
@@ -214,8 +214,8 @@ from mcpgateway.utils.paths import resolve_root_path as _resolve_root_path
 from mcpgateway.utils.security_cookies import clear_auth_cookie, CookieTooLargeError, set_auth_cookie
 from mcpgateway.utils.services_auth import encode_auth
 from mcpgateway.utils.sqlalchemy_modifier import json_contains_tag_expr
-from mcpgateway.utils.trace_redaction import sanitize_trace_text
 from mcpgateway.utils.validate_signature import sign_data
+from mcpgateway.utils.origin import is_allowed_redirect, normalize_origin_parts, origin_from_url
 from mcpgateway.utils.verify_credentials import verify_jwt_token_cached
 
 # Conditional imports for gRPC support (only if grpcio is installed)
@@ -2267,7 +2267,7 @@ async def get_overview_partial(
     """Render the overview dashboard partial HTML template.
 
     This endpoint returns a rendered HTML partial containing an architecture
-    diagram showing MCP Gateway inputs (Virtual Servers), middleware (Plugins),
+    diagram showing ContextForge inputs (Virtual Servers), middleware (Plugins),
     and outputs (A2A Agents, Gateways, Tools, etc.) along with key metrics.
 
     Args:
@@ -3735,6 +3735,8 @@ async def admin_set_gateway_state(
         await gateway_service.set_gateway_state(db, gateway_id, activate, user_email=user_email)
     except PermissionError as e:
         LOGGER.warning("Permission denied for user %s setting gateway state %s: %s", SecurityValidator.sanitize_log_message(user_email), SecurityValidator.sanitize_log_message(gateway_id), e)
+        error_message = str(e)
+    except GatewayToolNameConflictError as e:
         error_message = str(e)
     except Exception as e:
         LOGGER.error(f"Error setting gateway state: {e}")
@@ -12915,6 +12917,8 @@ async def admin_add_gateway(
         return ORJSONResponse(content={"message": str(ex), "success": False}, status_code=409)
     except GatewayNameConflictError as ex:
         return ORJSONResponse(content={"message": str(ex), "success": False}, status_code=409)
+    except GatewayToolNameConflictError as ex:
+        return ORJSONResponse(content={"message": str(ex), "success": False}, status_code=409)
     except RuntimeError as ex:
         return ORJSONResponse(content={"message": str(ex), "success": False}, status_code=500)
     except ValidationError as ex:
@@ -13050,6 +13054,8 @@ async def admin_update_gateway_rest(
     except GatewayNotFoundError as e:
         return ORJSONResponse(content={"message": str(e), "success": False}, status_code=404)
     except Exception as ex:
+        if isinstance(ex, GatewayToolNameConflictError):
+            return ORJSONResponse(content={"message": str(ex), "success": False}, status_code=409)
         if isinstance(ex, GatewayCredentialError):
             return ORJSONResponse(content={"message": str(ex), "success": False}, status_code=422)
         if isinstance(ex, GatewayConnectionError):
@@ -13334,6 +13340,8 @@ async def admin_edit_gateway(
     except HTTPException:
         raise
     except Exception as ex:
+        if isinstance(ex, GatewayToolNameConflictError):
+            return ORJSONResponse(content={"message": str(ex), "success": False}, status_code=409)
         if isinstance(ex, GatewayCredentialError):
             return ORJSONResponse(content={"message": str(ex), "success": False}, status_code=422)
         if isinstance(ex, GatewayConnectionError):
@@ -13694,7 +13702,8 @@ async def admin_edit_resource(
         mod_metadata = MetadataCapture.extract_modification_metadata(request, user, 0)
         resource = ResourceUpdate(
             uri=str(form.get("uri", "")),
-            name=str(form.get("name", "")),
+            **({"name": str(form["name"])} if "name" in form else {}),
+            custom_name=str(form["customName"]) if "customName" in form else None,
             description=str(form.get("description")),
             mime_type=str(form.get("mimeType")),
             content=str(form.get("content", "")),
@@ -16881,7 +16890,7 @@ async def admin_test_a2a_agent(
         agent = await a2a_service.get_agent(db, agent_id, user_email=invoke_user_email, token_teams=token_teams)
 
         # Parse request body to get user-provided query
-        default_message = "Hello from MCP Gateway Admin UI test!"
+        default_message = "Hello from ContextForge Admin UI test!"
         try:
             body = await _read_request_json(request)
             # Use 'or' to also handle empty string queries
@@ -18645,7 +18654,7 @@ async def get_observability_stats(request: Request, hours: int = Query(24, ge=1,
     """
     db = next(get_db())
     try:
-        cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
+        cutoff_time = datetime.now() - timedelta(hours=hours)
 
         # Consolidate multiple count queries into a single aggregated select
         # Filter by start_time first (uses index), then aggregate by status
@@ -18672,61 +18681,6 @@ async def get_observability_stats(request: Request, hours: int = Query(24, ge=1,
             db.commit()  # Commit read-only transaction to avoid implicit rollback
         finally:
             db.close()
-
-
-def _summarize_observability_traces(db: Session, traces: list[ObservabilityTrace]) -> dict[str, dict[str, Any]]:
-    """Build display summaries using at most two queries for the whole trace page.
-
-    Args:
-        db: Authorized observability query session.
-        traces: Already filtered traces to display.
-
-    Returns:
-        Tool outcomes and current server names, keyed by trace ID. Missing identity
-        remains unknown; HTTP success is never treated as proof of tool success.
-    """
-    summaries: dict[str, dict[str, Any]] = {}
-    server_ids: set[str] = set()
-    for trace in traces:
-        attributes = trace.attributes or {}
-        route = attributes.get("http.route") or trace.http_url
-        path = urllib.parse.urlsplit(route).path if isinstance(route, str) else ""
-        parts = path.strip("/").split("/")
-        ids = {parts[1]} if len(parts) >= 3 and parts[0] == "servers" and parts[1] != "default_server_id" else set()
-        summaries[trace.trace_id] = {"tools": [], "server_ids": ids, "servers": [], "outcome": "No recorded call", "status": "none"}
-        server_ids.update(ids)
-    if not summaries:
-        return summaries
-    spans = db.query(ObservabilitySpan).filter(ObservabilitySpan.trace_id.in_(summaries), ObservabilitySpan.name == "tool.invoke").order_by(ObservabilitySpan.start_time).all()
-    for span in spans:
-        summary = summaries[span.trace_id]
-        attrs = span.attributes or {}
-        summary["tools"].append(
-            {
-                "name": attrs.get("tool.name") or span.resource_name or "Unnamed tool",
-                "original_name": attrs.get("tool.original_name"),
-                "mode": attrs.get("tool.execution_mode"),
-                "status": span.status,
-                "duration_ms": span.duration_ms,
-                "failure_reason": attrs.get("tool.failure_reason"),
-                "status_message": sanitize_trace_text(span.status_message)[:2000] if span.status_message else None,
-            }
-        )
-        server_id = attrs.get("server.id")
-        if isinstance(server_id, str) and server_id and server_id != "default_server_id":
-            summary["server_ids"].add(server_id)
-            server_ids.add(server_id)
-    names = dict(db.query(DbServer.id, DbServer.name).filter(DbServer.id.in_(server_ids)).all()) if server_ids else {}
-    for summary in summaries.values():
-        summary["servers"] = [{"id": server_id, "name": names.get(server_id, "Unavailable server")} for server_id in sorted(summary["server_ids"])]
-        statuses = [tool["status"] for tool in summary["tools"]]
-        if "error" in statuses:
-            summary.update(outcome="Failed", status="error")
-        elif statuses and any(status != "ok" for status in statuses):
-            summary.update(outcome="In progress", status="unset")
-        elif statuses:
-            summary.update(outcome="Succeeded", status="ok")
-    return summaries
 
 
 @admin_router.get("/observability/traces", response_class=HTMLResponse)
@@ -18773,7 +18727,7 @@ async def get_observability_traces(
         # Parse time range
         time_map = {"1h": 1, "6h": 6, "24h": 24, "7d": 168}
         hours = time_map.get(time_range, 24)
-        cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
+        cutoff_time = datetime.now() - timedelta(hours=hours)
 
         query = db.query(ObservabilityTrace).filter(ObservabilityTrace.start_time >= cutoff_time)
 
@@ -18812,10 +18766,7 @@ async def get_observability_traces(
                 db.query(ObservabilitySpan.trace_id)
                 .filter(
                     ObservabilitySpan.name == "tool.invoke",
-                    or_(
-                        extract_json_field(ObservabilitySpan.attributes, '$."tool.name"').ilike(f"%{tool_name}%"),
-                        extract_json_field(ObservabilitySpan.attributes, '$."tool.original_name"').ilike(f"%{tool_name}%"),
-                    ),
+                    extract_json_field(ObservabilitySpan.attributes, '$."tool.name"').ilike(f"%{tool_name}%"),
                 )
                 .distinct()
                 .subquery()
@@ -18826,9 +18777,7 @@ async def get_observability_traces(
         traces = query.order_by(ObservabilityTrace.start_time.desc()).limit(limit).all()
 
         root_path = _resolve_root_path(request)
-        return request.app.state.templates.TemplateResponse(
-            request, "observability_traces_list.html", {"request": request, "traces": traces, "summaries": _summarize_observability_traces(db, traces), "root_path": root_path}
-        )
+        return request.app.state.templates.TemplateResponse(request, "observability_traces_list.html", {"request": request, "traces": traces, "root_path": root_path})
     finally:
         # Ensure close() always runs even if commit() fails
         try:
@@ -18862,9 +18811,7 @@ async def get_observability_trace_detail(request: Request, trace_id: str, _user=
             raise HTTPException(status_code=404, detail="Trace not found")
 
         root_path = _resolve_root_path(request)
-        return request.app.state.templates.TemplateResponse(
-            request, "observability_trace_detail.html", {"request": request, "trace": trace, "summary": _summarize_observability_traces(db, [trace])[trace.trace_id], "root_path": root_path}
-        )
+        return request.app.state.templates.TemplateResponse(request, "observability_trace_detail.html", {"request": request, "trace": trace, "root_path": root_path})
     finally:
         # Ensure close() always runs even if commit() fails
         try:

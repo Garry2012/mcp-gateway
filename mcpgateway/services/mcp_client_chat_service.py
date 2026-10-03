@@ -30,23 +30,33 @@ try:
     # Third-Party
     from langchain_core.language_models import BaseChatModel
     from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+    from fastmcp import Client as FastMCPClient
+    from fastmcp.client.elicitation import ElicitResult
+    from fastmcp.client.transports import SSETransport, StdioTransport, StreamableHttpTransport
+    from langchain.mcp import MCPAdapter
     from langchain_core.tools import BaseTool
-    from langchain_mcp_adapters.client import MultiServerMCPClient
     from langchain_ollama import ChatOllama, OllamaLLM
     from langchain_openai import AzureChatOpenAI, AzureOpenAI, ChatOpenAI, OpenAI
     from langgraph.prebuilt import create_react_agent
 
     _LLMCHAT_AVAILABLE = True
-except ImportError:
+    _LLMCHAT_IMPORT_ERROR: Optional[ImportError] = None
+except ImportError as _import_error:
     # Optional dependencies for LLM chat feature not installed
     # These are only needed if LLMCHAT_ENABLED=true
     _LLMCHAT_AVAILABLE = False
+    _LLMCHAT_IMPORT_ERROR = _import_error
     BaseChatModel = None  # type: ignore
     AIMessage = None  # type: ignore
     BaseMessage = None  # type: ignore
     HumanMessage = None  # type: ignore
     BaseTool = None  # type: ignore
-    MultiServerMCPClient = None  # type: ignore
+    MCPAdapter = None  # type: ignore
+    FastMCPClient = None  # type: ignore
+    ElicitResult = None  # type: ignore
+    SSETransport = None  # type: ignore
+    StdioTransport = None  # type: ignore
+    StreamableHttpTransport = None  # type: ignore
     ChatOllama = None  # type: ignore
     OllamaLLM = None
     AzureChatOpenAI = None  # type: ignore
@@ -535,7 +545,7 @@ class WatsonxConfig(BaseModel):
 
 class GatewayConfig(BaseModel):
     """
-    Configuration for MCP Gateway internal LLM provider.
+    Configuration for ContextForge internal LLM provider.
 
     Allows LLM Chat to use models configured in the gateway's LLM Settings.
     The gateway routes requests to the appropriate configured provider.
@@ -1551,16 +1561,6 @@ class GatewayProvider:
                 "timeout": self.config.timeout,
             }
 
-            # OpenAI-family reasoning control. Reasoning models default to a
-            # server-side reasoning effort that some endpoints reject when
-            # function tools are present; a configured value (e.g. "none")
-            # is forwarded on the request. Only the OpenAI-family branches
-            # below (openai, azure_openai, openai_compatible) consume this
-            # shared kwargs dict, so this stays scoped to those providers.
-            reasoning_effort = config.get("reasoning_effort")
-            if reasoning_effort:
-                kwargs["reasoning_effort"] = reasoning_effort
-
             if provider_type == "openai":
                 kwargs.update(
                     {
@@ -2125,6 +2125,28 @@ class ChatHistoryManager:
 # ==================== MCP CLIENT ====================
 
 
+async def _decline_elicitation(message: str, _response_type: Any, _params: Any, _context: Any) -> Any:
+    """
+    Decline an MCP elicitation request raised during LLM chat.
+
+    LLM chat runs a LangGraph agent without a checkpointer, so it cannot pause a
+    tool call for user input. Without this handler, ``MCPAdapter`` turns the request
+    into a LangGraph interrupt and the chat returns an empty answer. Declining lets
+    the MCP server complete the call with a decline outcome.
+
+    Args:
+        message: The prompt the MCP server wants to show the user.
+        _response_type: Expected response type (unused).
+        _params: Raw elicitation request parameters (unused).
+        _context: MCP request context (unused).
+
+    Returns:
+        Any: An ``ElicitResult`` with ``action="decline"``.
+    """
+    logger.info("Declining MCP elicitation request during LLM chat (%s characters)", len(message or ""))
+    return ElicitResult(action="decline")
+
+
 class MCPClient:
     """
     Manages MCP server connections and tool loading.
@@ -2170,7 +2192,7 @@ class MCPClient:
             'streamable_http'
         """
         self.config = config
-        self._client: Optional[MultiServerMCPClient] = None
+        self._client: Optional[MCPAdapter] = None
         self._tools: Optional[List[BaseTool]] = None
         self._connected = False
         logger.info("MCP client initialized with transport: %s", config.transport)
@@ -2205,25 +2227,10 @@ class MCPClient:
         try:
             logger.info("Connecting to MCP server via %s...", self.config.transport)
 
-            # Build server configuration for MultiServerMCPClient
-            server_config = {
-                "transport": self.config.transport,
-            }
-
-            if self.config.transport in ["streamable_http", "sse"]:
-                server_config["url"] = self.config.url
-                if self.config.headers:
-                    server_config["headers"] = self.config.headers
-            elif self.config.transport == "stdio":
-                server_config["command"] = self.config.command
-                if self.config.args:
-                    server_config["args"] = self.config.args
-
-            if not MultiServerMCPClient:
+            if not MCPAdapter:
                 logger.error("Some dependencies are missing. Install those with: pip install '.[llmchat]'")
 
-            # Create MultiServerMCPClient with single server
-            self._client = MultiServerMCPClient({"default": server_config})
+            self._client = MCPAdapter(FastMCPClient(self._build_transport(), elicitation_handler=_decline_elicitation))
             self._connected = True
             logger.info("Successfully connected to MCP server")
 
@@ -2231,6 +2238,25 @@ class MCPClient:
             logger.error("Failed to connect to MCP server: %s", e)
             self._connected = False
             raise ConnectionError(f"Failed to connect to MCP server: {e}") from e
+
+    def _build_transport(self) -> Any:
+        """
+        Build the FastMCP client transport for the configured MCP server.
+
+        Returns:
+            Any: A ``StreamableHttpTransport``, ``SSETransport`` or ``StdioTransport``.
+
+        Raises:
+            ValueError: If the configured transport is not supported.
+        """
+        headers = self.config.headers or None
+        if self.config.transport == "streamable_http":
+            return StreamableHttpTransport(self.config.url, headers=headers)
+        if self.config.transport == "sse":
+            return SSETransport(self.config.url, headers=headers)
+        if self.config.transport == "stdio":
+            return StdioTransport(self.config.command, list(self.config.args or []))
+        raise ValueError(f"Unsupported MCP transport: {self.config.transport}")
 
     async def disconnect(self) -> None:
         """
@@ -2262,7 +2288,7 @@ class MCPClient:
 
         try:
             if self._client:
-                # MultiServerMCPClient manages connections internally
+                # MCPAdapter opens a session per tool listing and per tool call
                 self._client = None
 
             self._connected = False
@@ -2313,7 +2339,7 @@ class MCPClient:
 
         try:
             logger.info("Loading tools from MCP server...")
-            self._tools = await self._client.get_tools()
+            self._tools = await self._client.list_tools()
             logger.info("Successfully loaded %s tools", len(self._tools))
             return self._tools
 
@@ -2458,7 +2484,7 @@ class MCPChatService:
             return
 
         if not _LLMCHAT_AVAILABLE:
-            raise ImportError("LLM chat dependencies are missing. Install them with: pip install '.[llmchat]'")
+            raise ImportError(f"LLM chat dependencies are missing or incompatible ({_LLMCHAT_IMPORT_ERROR}). Install them with: pip install '.[llmchat]'")
 
         try:
             logger.info("Initializing chat service...")
@@ -3136,7 +3162,7 @@ class MCPChatService:
             raise RuntimeError("Chat service not initialized")
 
         if not _LLMCHAT_AVAILABLE:
-            raise ImportError("LLM chat dependencies are missing. Install them with: pip install '.[llmchat]'")
+            raise ImportError(f"LLM chat dependencies are missing or incompatible ({_LLMCHAT_IMPORT_ERROR}). Install them with: pip install '.[llmchat]'")
 
         try:
             logger.info("Reloading tools from MCP server...")

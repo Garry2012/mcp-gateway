@@ -349,7 +349,7 @@ class ToolPluginBindingService:
 
         Intended for use by external systems that need to
         remove all bindings associated with one of their own reference objects
-        without knowing the internal MCP Gateway UUIDs.
+        without knowing the internal ContextForge UUIDs.
 
         Args:
             db: SQLAlchemy session.

@@ -36,20 +36,24 @@ ok "default user password uses a dedicated secret reference"
 # the deploy landed. Activation is not instant, so poll rather than fail at once.
 # 12 x 10s. A rollover normally completes well inside a minute; this only costs
 # wall-clock on a genuine failure, since the success path breaks on the first pass.
+# Activation and traffic are separate in Container Apps: an active, running
+# revision can still receive 0% of requests, and then every HTTP check below would
+# be answered by the previous revision. Require the new image's revision to be
+# running, healthy (readiness passed) and to carry all ingress traffic.
 for i in $(seq 1 12); do
   SERVING_REV="$(az containerapp revision list -n "$APP_NAME_AZ" -g "$RESOURCE_GROUP" \
-    --query "[?properties.active && properties.template.containers[0].image=='${IMAGE}' && starts_with(properties.runningState, 'Running')] | [0].name" \
+    --query "[?properties.active && properties.trafficWeight==\`100\` && properties.healthState=='Healthy' && properties.template.containers[0].image=='${IMAGE}' && starts_with(properties.runningState, 'Running')] | [0].name" \
     -o tsv 2>/dev/null || true)"
   [ -n "$SERVING_REV" ] && break
   [ "$i" = "12" ] && {
     warn "active revisions:"
     az containerapp revision list -n "$APP_NAME_AZ" -g "$RESOURCE_GROUP" \
-      --query "[?properties.active].{rev:name,image:properties.template.containers[0].image,state:properties.runningState}" -o table >&2 || true
-    die "no running revision is serving '$IMAGE' - the update did not roll a new revision, or the new one failed to start"
+      --query "[?properties.active].{rev:name,image:properties.template.containers[0].image,state:properties.runningState,health:properties.healthState,traffic:properties.trafficWeight}" -o table >&2 || true
+    die "no healthy revision of '$IMAGE' carries 100% of traffic - the update did not roll, the new revision failed, or traffic still targets an older revision"
   }
   sleep 10
 done
-ok "serving $IMAGE (revision $SERVING_REV)"
+ok "serving $IMAGE (revision $SERVING_REV, 100% traffic, healthy)"
 
 # 1. Health. A cold start can take ~60s, so poll rather than fail immediately.
 for i in $(seq 1 12); do
@@ -67,21 +71,18 @@ curl -s --max-time 20 "$URL/health" 2>/dev/null | grep -q '"status":"healthy"' \
   || die "health endpoint reachable but status is not healthy"
 ok "database reachable"
 
-# 3. Login page renders.
-LOGIN="$(curl -s --max-time 20 "$URL/admin/login" 2>/dev/null)"
-echo "$LOGIN" | grep -q "<title>" || die "login page did not render"
-ok "login page renders"
+# 3. Login page renders when the Admin UI is enabled.
+if [ "$MCPGATEWAY_UI_ENABLED" = "true" ]; then
+  LOGIN="$(curl -s --max-time 20 "$URL/admin/login" 2>/dev/null)"
+  echo "$LOGIN" | grep -q "<title>" || die "login page did not render"
+  ok "login page renders"
+else
+  CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "$URL/admin/login" 2>/dev/null || echo 000)"
+  [ "$CODE" = "404" ] || die "headless deployment serves /admin/login ($CODE) - expected 404"
+  ok "Admin UI disabled (headless)"
+fi
 
-# 4. Branding. Guards against deploying a stale image built before the rebrand.
-TITLE="$(printf '%s' "$LOGIN" | grep -oE '<title>[^<]*</title>' | head -1)"
-printf '%s' "$LOGIN" | grep -q "$BRAND_NAME" || die "page does not mention '$BRAND_NAME' - stale image? ($TITLE)"
-ok "brand present: $TITLE"
-
-LEGACY="$(printf '%s' "$LOGIN" | grep -c 'ContextForge' || true)"
-[ "$LEGACY" = "0" ] || die "$LEGACY legacy brand references on the login page - stale image"
-ok "no legacy brand references"
-
-# 5. Authentication is enforced. A public admin API would be a serious
+# 4. Authentication is enforced. A public admin API would be a serious
 #    misconfiguration, so assert the unauthenticated path is rejected.
 CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "$URL/gateways" 2>/dev/null || echo 000)"
 case "$CODE" in
@@ -90,4 +91,4 @@ case "$CODE" in
 esac
 
 log "All checks passed"
-echo "  $URL/admin/login"
+echo "  $URL"

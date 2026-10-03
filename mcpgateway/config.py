@@ -3,12 +3,12 @@
 Copyright contributors to the MCP-CONTEXT-FORGE project
 SPDX-License-Identifier: Apache-2.0
 
-MCP Gateway Configuration.
-This module defines configuration settings for MCP Gateway using Pydantic.
+ContextForge AI Gateway Configuration.
+This module defines configuration settings for ContextForge AI Gateway using Pydantic.
 It loads configuration from environment variables with sensible defaults.
 
 Environment variables:
-- APP_NAME: Gateway name (default: "MCP Gateway")
+- APP_NAME: Gateway name (default: "ContextForge")
 - HOST: Host to bind to (default: "127.0.0.1")
 - PORT: Port to listen on (default: 4444)
 - DATABASE_URL: SQLite database URL (default: "sqlite:///./mcp.db")
@@ -65,10 +65,10 @@ from pydantic import AliasChoices, Field, field_validator, HttpUrl, model_valida
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 # First-Party
+from mcpgateway._security_constants import calculate_entropy
 from mcpgateway._security_constants import MIN_ENTROPY as _MIN_ENTROPY
 from mcpgateway._security_constants import MIN_SECRET_LENGTH as _MIN_SECRET_LENGTH
 from mcpgateway._security_constants import WEAK_VALUES as _CANONICAL_WEAK_VALUES
-from mcpgateway._security_constants import calculate_entropy
 from mcpgateway.utils.origin import is_exact_https_origin
 
 # Only configure basic logging if no handlers exist yet
@@ -175,7 +175,7 @@ class SecurityConfigurationError(Exception):
 
 class Settings(BaseSettings):
     """
-    MCP Gateway configuration settings.
+    ContextForge AI Gateway configuration settings.
 
     Examples:
         >>> from mcpgateway.config import Settings
@@ -195,7 +195,7 @@ class Settings(BaseSettings):
         True
         >>> s5 = Settings()
         >>> s5.app_name
-        'MCP Gateway'
+        'ContextForge'
         >>> s5.host in ('0.0.0.0', '127.0.0.1')  # Default can be either
         True
         >>> s5.port
@@ -223,7 +223,7 @@ class Settings(BaseSettings):
     """
 
     # Basic Settings
-    app_name: str = "MCP Gateway"
+    app_name: str = "ContextForge"
     host: str = "127.0.0.1"
     port: PositiveInt = Field(default=4444, ge=1, le=65535)
     client_mode: bool = False
@@ -506,8 +506,8 @@ class Settings(BaseSettings):
     sso_keycloak_client_secret: Optional[SecretStr] = Field(default=None, description="Keycloak client secret")
     sso_keycloak_map_realm_roles: bool = Field(default=True, description="Map Keycloak realm roles to gateway teams")
     sso_keycloak_map_client_roles: bool = Field(default=False, description="Map Keycloak client roles to gateway RBAC")
-    sso_keycloak_role_mappings: Dict[str, str] = Field(default_factory=dict, description="Map Keycloak groups/roles to MCP Gateway roles (JSON: {group_or_role: role_name})")
-    sso_keycloak_default_role: Optional[str] = Field(default=None, description="Default MCP Gateway role for Keycloak users without role mapping")
+    sso_keycloak_role_mappings: Dict[str, str] = Field(default_factory=dict, description="Map Keycloak groups/roles to ContextForge roles (JSON: {group_or_role: role_name})")
+    sso_keycloak_default_role: Optional[str] = Field(default=None, description="Default ContextForge role for Keycloak users without role mapping")
     sso_keycloak_resolve_team_scope_to_personal_team: bool = Field(default=False, description="Resolve team-scoped Keycloak role mappings to the user's personal team")
     sso_keycloak_username_claim: str = Field(default="preferred_username", description="JWT claim for username")
 
@@ -546,7 +546,7 @@ class Settings(BaseSettings):
     sso_entra_tenant_id: Optional[str] = Field(default=None, description="Microsoft Entra ID tenant ID")
     sso_entra_groups_claim: str = Field(default="groups", description="JWT claim for EntraID groups (groups/roles)")
     sso_entra_admin_groups: Annotated[list[str], NoDecode] = Field(default_factory=list, description="EntraID groups granting platform_admin role (CSV/JSON)")
-    sso_entra_role_mappings: Dict[str, str] = Field(default_factory=dict, description="Map EntraID groups to MCP Gateway roles (JSON: {group_id: role_name})")
+    sso_entra_role_mappings: Dict[str, str] = Field(default_factory=dict, description="Map EntraID groups to ContextForge roles (JSON: {group_id: role_name})")
     sso_entra_default_role: Optional[str] = Field(default=None, description="Default role for EntraID users without group mapping (None = no role assigned)")
     sso_entra_sync_roles_on_login: bool = Field(default=True, description="Synchronize role assignments on each login")
     sso_entra_graph_api_enabled: bool = Field(default=True, description="Enable Microsoft Graph fallback for EntraID groups overage claims")
@@ -577,7 +577,7 @@ class Settings(BaseSettings):
 
     sso_generic_groups_claim: str = Field(default="groups", description="JWT claim for Generic OIDC groups (groups/roles/custom)")
     sso_generic_admin_groups: Annotated[list[str], NoDecode] = Field(default_factory=list, description="Generic OIDC groups granting platform_admin role (CSV/JSON)")
-    sso_generic_role_mappings: Dict[str, str] = Field(default_factory=dict, description="Map Generic OIDC groups to MCP Gateway roles (JSON: {group_id: role_name})")
+    sso_generic_role_mappings: Dict[str, str] = Field(default_factory=dict, description="Map Generic OIDC groups to ContextForge roles (JSON: {group_id: role_name})")
     sso_generic_default_role: Optional[str] = Field(default=None, description="Default role for Generic OIDC users without group mapping (None = no role assigned)")
     sso_generic_sync_roles_on_login: bool = Field(default=True, description="Synchronize role assignments on each login for Generic OIDC")
 
@@ -657,6 +657,23 @@ class Settings(BaseSettings):
         description="Acknowledge and allow trusted proxy headers when MCP_CLIENT_AUTH_ENABLED=false (dangerous; only for strictly trusted proxy deployments).",
     )
     proxy_user_header: str = Field(default="X-Authenticated-User", description="Header containing authenticated username from proxy")
+    mcp_client_connect_mode: Literal["auto", "legacy"] = Field(
+        default="legacy",
+        description=(
+            "Upstream MCP connect mode: 'auto' negotiates modern protocol revisions (e.g. 2026-07-28) "
+            "via server/discover with legacy initialize fallback; 'legacy' forces the pre-2026 "
+            "initialize handshake (rollback for misbehaving upstreams)."
+        ),
+    )
+    mcp_inbound_protocol_mode: Literal["auto", "legacy"] = Field(
+        default="legacy",
+        description=(
+            "Inbound MCP protocol mode: 'auto' accepts all supported protocol versions "
+            "including 2026-07-28; 'legacy' accepts only handshake-era versions "
+            "(2024-11-05 through 2025-11-25), rejecting 2026-07-28 with 400 to steer "
+            "dual-era clients to legacy initialize negotiation."
+        ),
+    )
 
     #  Encryption key phrase for auth storage
     auth_encryption_secret: SecretStr = Field(
@@ -1058,7 +1075,7 @@ class Settings(BaseSettings):
     dcr_metadata_cache_ttl: int = Field(default=3600, description="AS metadata cache TTL in seconds (RFC 8414 discovery)")
 
     # Client name template
-    dcr_client_name_template: str = Field(default="MCP Gateway ({gateway_name})", description="Template for client_name in DCR requests")
+    dcr_client_name_template: str = Field(default="ContextForge ({gateway_name})", description="Template for client_name in DCR requests")
 
     # Refresh token behavior
     dcr_request_refresh_token_when_unsupported: bool = Field(
@@ -1142,7 +1159,7 @@ class Settings(BaseSettings):
     smtp_user: Optional[str] = Field(default=None, description="SMTP username")
     smtp_password: Optional[SecretStr] = Field(default=None, description="SMTP password")
     smtp_from_email: Optional[str] = Field(default=None, description="From email address used for auth notifications")
-    smtp_from_name: str = Field(default="MCP Gateway", description="From display name used for auth notifications")
+    smtp_from_name: str = Field(default="ContextForge", description="From display name used for auth notifications")
     smtp_use_tls: bool = Field(default=True, description="Use STARTTLS for SMTP connections")
     smtp_use_ssl: bool = Field(default=False, description="Use implicit SSL/TLS for SMTP connections")
     smtp_timeout_seconds: int = Field(default=15, description="SMTP connection timeout in seconds")
@@ -1261,8 +1278,8 @@ class Settings(BaseSettings):
     mcpgateway_catalog_cache_ttl: int = Field(default=3600, description="Catalog cache TTL in seconds")
     mcpgateway_catalog_page_size: int = Field(default=100, description="Number of catalog servers per page")
 
-    # MCP Gateway Bootstrap Roles In DB Configuration
-    mcpgateway_bootstrap_roles_in_db_enabled: bool = Field(default=False, description="Enable MCP Gateway add additional roles in db")
+    # ContextForge Bootstrap Roles In DB Configuration
+    mcpgateway_bootstrap_roles_in_db_enabled: bool = Field(default=False, description="Enable ContextForge add additional roles in db")
     mcpgateway_bootstrap_roles_in_db_file: str = Field(default="additional_roles_in_db.json", description="Path to add additional roles in db")
 
     # Elicitation support (MCP 2025-06-18)
@@ -2074,23 +2091,71 @@ class Settings(BaseSettings):
         description="Read timeout for admin UI operations (model fetching, health checks). Shorter than httpx_read_timeout to fail fast on admin pages.",
     )
 
-    @field_validator("allowed_origins", mode="before")
-    @classmethod
-    def _parse_allowed_origins(cls, v: Any) -> Set[str]:
-        """Parse allowed origins from environment variable or config value.
+    @staticmethod
+    def _parse_origin_set(v: Any, *, coerce_non_iterable_to_empty: bool = False) -> Set[str]:
+        """Parse an origin/host set from a JSON array, CSV string, or collection.
 
-        Handles multiple input formats for the allowed_origins field:
+        Handles multiple input formats:
         - JSON array string: '["http://localhost", "http://example.com"]'
         - Comma-separated string: "http://localhost, http://example.com"
-        - Already parsed set/list
+        - Already parsed set, frozenset, list, or tuple
 
-        Automatically strips whitespace and removes outer quotes if present.
+        Strips whitespace and removes a single outer quote pair when present.
 
         Args:
-            v: The input value to parse. Can be a string (JSON or CSV), set, list, or other iterable.
+            v: Raw value — a string (JSON or CSV), a collection, or any other type.
+            coerce_non_iterable_to_empty: When True, values that are not a string or
+                a recognised collection type (e.g. None, int) return an empty set
+                instead of being passed to set(). Used by fields that default to empty.
 
         Returns:
-            Set[str]: A set of allowed origin strings.
+            Set[str]: Parsed origin strings, or an empty set for blank/unknown input.
+
+        Examples:
+            >>> sorted(Settings._parse_origin_set('["https://a.com", "https://b.com"]'))
+            ['https://a.com', 'https://b.com']
+            >>> sorted(Settings._parse_origin_set("https://x.com , https://y.com"))
+            ['https://x.com', 'https://y.com']
+            >>> Settings._parse_origin_set('""')
+            set()
+            >>> Settings._parse_origin_set('"https://single.com"')
+            {'https://single.com'}
+            >>> sorted(Settings._parse_origin_set(['http://a.com', 'http://b.com']))
+            ['http://a.com', 'http://b.com']
+            >>> Settings._parse_origin_set({'http://existing.com'})
+            {'http://existing.com'}
+        """
+        if isinstance(v, str):
+            v = v.strip()
+            if v[:1] in "\"'" and v[-1:] == v[:1]:  # strip 1 outer quote pair
+                v = v[1:-1]
+            if not v:
+                return set()
+            try:
+                parsed = set(orjson.loads(v))
+            except orjson.JSONDecodeError:
+                parsed = {s.strip() for s in v.split(",") if s.strip()}
+            return parsed
+        if isinstance(v, (set, frozenset, list, tuple)):
+            return set(v)
+        if coerce_non_iterable_to_empty:
+            return set()
+        return set(v)  # type: ignore[arg-type]
+
+    @field_validator("allowed_origins", "mcp_allowed_origins", "mcp_allowed_hosts", mode="before")
+    @classmethod
+    def _parse_allowed_origins(cls, v: Any) -> Set[str]:
+        """Parse origin/host allowlist fields from a JSON array, CSV string, or collection.
+
+        Handles ``allowed_origins``, ``mcp_allowed_origins``, and ``mcp_allowed_hosts``.
+        Non-string, non-collection input (e.g. ``None``) returns an empty set rather
+        than propagating a ``TypeError``.
+
+        Args:
+            v: The input value to parse.
+
+        Returns:
+            Set[str]: A set of allowed origin/host strings.
 
         Examples:
             >>> sorted(Settings._parse_allowed_origins('["https://a.com", "https://b.com"]'))
@@ -2106,16 +2171,7 @@ class Settings(BaseSettings):
             >>> Settings._parse_allowed_origins({'http://existing.com'})
             {'http://existing.com'}
         """
-        if isinstance(v, str):
-            v = v.strip()
-            if v[:1] in "\"'" and v[-1:] == v[:1]:  # strip 1 outer quote pair
-                v = v[1:-1]
-            try:
-                parsed = set(orjson.loads(v))
-            except orjson.JSONDecodeError:
-                parsed = {s.strip() for s in v.split(",") if s.strip()}
-            return parsed
-        return set(v)
+        return cls._parse_origin_set(v, coerce_non_iterable_to_empty=True)
 
     # Logging
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = Field(default="ERROR")
@@ -2247,7 +2303,7 @@ class Settings(BaseSettings):
         default=32,
         ge=0,
         le=128,
-        description=("Max per-control result records exported per tool invocation. Env: CPEX_CONTROL_TELEMETRY_MAX_RESULTS."),
+        description=("Max per-control result records exported per tool invocation. Denials take priority; zero emits only the summary. Env: CPEX_CONTROL_TELEMETRY_MAX_RESULTS."),
     )
     cpex_control_telemetry_max_attributes: int = Field(
         default=256,
@@ -2264,8 +2320,9 @@ class Settings(BaseSettings):
     cpex_control_telemetry_emit_reason: bool = Field(
         default=False,
         description=(
-            "Emit cpex.control.result.reason and cpex.control.result.error_code on "
-            "per-control spans. Disabled by default because these fields may contain "
+            "Emit free-form execution reasons and error codes on per-control spans. "
+            "Validated denial outcome codes are emitted independently of this flag. "
+            "Disabled by default because free-form fields may contain "
             "PII, tool argument values, or exception content. Enable only when the "
             "observability sink is appropriately secured and a redaction boundary is "
             "in place. Env: CPEX_CONTROL_TELEMETRY_EMIT_REASON."
@@ -2343,7 +2400,6 @@ class Settings(BaseSettings):
 
     # SIEM Export Configuration
     # SIEM export can run independently of DB-backed security/audit logging.
-    siem_vendor_name: str = Field(default="InTimeTec", description="Vendor identity emitted in CEF/LEEF security event headers")
     siem_export_enabled: bool = Field(default=False, description="Enable asynchronous SIEM export pipeline")
     siem_export_batch_size: int = Field(default=100, ge=1, le=1000, description="Maximum events per export batch")
     siem_export_flush_interval_seconds: int = Field(default=5, ge=1, le=60, description="Queue poll/flush interval in seconds")
@@ -2914,6 +2970,11 @@ class Settings(BaseSettings):
     # Gateways can override this with their own refresh_interval_seconds
     gateway_auto_refresh_interval: int = Field(default=300, ge=60, description="Default refresh interval in seconds for gateway tools/resources/prompts sync (minimum 60 seconds)")
 
+    # Modern (2026-07-28) change-event listeners
+    # When enabled, the gateway holds one standing subscriptions/listen stream per
+    # server to get the list changed event
+    gateway_modern_listeners_enabled: bool = Field(default=False, description="Hold standing subscriptions/listen streams to 2026-era gateways for change-driven refresh")
+
     # Async gateway lifecycle processing
     gateway_async_lifecycle_enabled: bool = Field(default=False, description="Enable asynchronous gateway create/update/delete lifecycle processing with 202 Accepted responses")
     gateway_async_lifecycle_poll_interval: float = Field(default=5.0, gt=0, description="Polling interval in seconds for asynchronous gateway lifecycle background processing")
@@ -3124,6 +3185,16 @@ class Settings(BaseSettings):
     streamable_http_max_events_per_stream: int = 100  # Ring buffer capacity per stream
     streamable_http_event_ttl: int = 3600  # Event stream TTL in seconds (1 hour)
 
+    # MCP Origin allowlist — present-but-unlisted Origin returns HTTP 403 (MCP §transport-security).
+    # Empty (default) disables enforcement. Set via MCP_ALLOWED_ORIGINS.
+    mcp_allowed_origins: Annotated[Set[str], NoDecode] = set()
+
+    # MCP Host allowlist — present-but-unlisted Host returns HTTP 403.
+    # Empty (default) disables enforcement. Set via MCP_ALLOWED_HOSTS.
+    # Entries use exact "host:port" matching (browsers omit default ports; list
+    # both "example.com:80" and "example.com" when default port may be absent).
+    mcp_allowed_hosts: Annotated[Set[str], NoDecode] = set()
+
     # GET /mcp server-to-client stream (ADR-052)
     # When True, GET /mcp returns an SSE stream that delivers server-initiated
     # JSON-RPC messages (notifications and server-initiated requests) for the
@@ -3256,7 +3327,7 @@ class Settings(BaseSettings):
     well_known_robots_txt: str = """User-agent: *
 Disallow: /
 
-# MCP Gateway is a private API gateway
+# ContextForge is a private API gateway
 # Public crawling is disabled by default"""
 
     # security.txt content (optional, user-defined)
@@ -3760,6 +3831,7 @@ Disallow: /
     validation_dangerous_js_pattern: str = r"(?i)(?:^|\s|[\"'`<>=])(javascript:|vbscript:|data:\s*[^,]*[;\s]*(javascript|vbscript)|\bon[a-z]+\s*=|<\s*script\b)"
 
     validation_allowed_url_schemes: List[str] = ["http://", "https://", "ws://", "wss://"]
+    strict_scheme_enforcement: bool = False
 
     # Character validation patterns
     validation_name_pattern: str = r"^[a-zA-Z0-9_.\- ]+$"  # Allow spaces for names (literal space, not \s to reject control chars)
@@ -3882,6 +3954,17 @@ Disallow: /
     max_header_total_size_bytes: int = Field(default=16384, description="Maximum total size of all headers (16KB default)")
     max_header_field_size_bytes: int = Field(default=8192, description="Maximum size of individual header field (8KB default)")
     max_header_count: int = Field(default=100, description="Maximum number of header fields")
+    max_header_value_length: int = Field(
+        default=4096, description="Maximum length for individual header values during sanitization (4KB default). Increase for OAuth providers with large tokens (e.g., Atlassian Rovo ~8KB+)."
+    )
+
+    @field_validator("max_header_value_length")
+    @classmethod
+    def validate_max_header_value_length(cls, v: int) -> int:
+        """Validate max_header_value_length is a positive integer."""
+        if v <= 0:
+            raise ValueError("max_header_value_length must be positive")
+        return v
 
     # Header passthrough feature (disabled by default for security)
     enable_header_passthrough: bool = Field(default=False, description="Enable HTTP header passthrough feature (WARNING: Security implications - only enable if needed)")
@@ -4077,7 +4160,7 @@ Disallow: /
         elif not self.mcp_client_auth_enabled and not self.trust_proxy_auth:
             logger.warning(
                 "MCP client authentication is disabled but trust_proxy_auth is not set. "
-                "This is a security risk! Set TRUST_PROXY_AUTH=true only if MCP Gateway "
+                "This is a security risk! Set TRUST_PROXY_AUTH=true only if ContextForge "
                 "is behind a trusted authentication proxy."
             )
 

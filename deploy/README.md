@@ -8,6 +8,9 @@ cd deploy/scripts
 az login
 ./deploy.sh                 # infra -> build -> deploy -> verify
 ./deploy.sh --skip-build    # redeploy the image already in ACR
+
+# A named target: overrides live in profiles/<name>.env
+DEPLOY_PROFILE=profiles/healthcare-rg.env ./deploy.sh
 ```
 
 Every script is idempotent. Re-running against an existing deployment updates it
@@ -24,13 +27,39 @@ Revisit if per-tenant isolation ends up requiring separate network policies.
 
 ## What runs where
 
-| Piece | Where | Notes |
+| Piece | `vcare-rc-rg` (script defaults) | `healthcare-rg` (`profiles/healthcare-rg.env`) |
 |---|---|---|
-| Gateway | Container App `mcp-gateway` in `vcare-rc-cae` | 1 CPU / 2 GB, 1 replica |
-| Database | `vcare-mcpgw-db` (Postgres 16 Flexible, B1ms) | ~$13/month |
-| Image | `vcarercacr.azurecr.io/mcp-gateway` | built by ACR Tasks |
-| Secrets | Key Vault `vcare-rc-kv`, names prefixed `mcpgw-` | values never in this repo |
-| Identity | `vcare-rc-uami` | ACR pull + Key Vault read |
+| Gateway | Container App `mcp-gateway` in `vcare-rc-cae` | Container App `mcp-gateway` in `cae-frontdesk-demo-hospital` |
+| Database | Dedicated server `vcare-mcpgw-db` | Database `mcpgateway`, role `mcpgateway_app` on shared `pg-fd-demo-hospital-0574c1` |
+| Image | `vcarercacr.azurecr.io/mcp-gateway` | `acrfd399536.azurecr.io/mcp-gateway` |
+| Secrets | Key Vault `vcare-rc-kv`, prefix `mcpgw-` | Shared Key Vault `kv-fd-demo-hospi-0574c1`, prefix `mcpgw-` |
+| Identity | `vcare-rc-uami` | Dedicated `id-mcp-gateway` |
+
+The gateway's identity gets `AcrPull` on the registry and `Key Vault Secrets User`
+on each `mcpgw-*` secret, not on the vault. In a shared vault the gateway therefore
+cannot read other applications' secrets.
+
+## Shared Postgres servers
+
+When `PG_SERVER` already exists and `PG_ADMIN_URL_SECRET` names a Key Vault secret
+holding an admin connection URL, `01-prepare-azure.sh` creates a dedicated login
+role and database for the gateway. The admin URL is read only during that step and
+never reaches the container app. **Never reset the admin password of a shared
+server** - other applications depend on it.
+
+`provision_shared_db.py` changes nothing until it proves the role is the gateway's.
+The proof is an ownership marker, the role comment written in the same transaction
+as `CREATE ROLE`. A role without the marker is refused, so a configuration that names
+another application's role or database cannot change it. A marked role whose
+database is missing is an interrupted run, and the next run resumes it. To adopt a
+gateway role created before the marker existed, run once with
+`PG_ADOPT_EXISTING_ROLE=<exact role name>`; the privilege and ownership checks
+still apply.
+
+Size the connection pool to the server. A Burstable B1ms server allows
+`max_connections=50` across all of its databases. The gateway opens up to
+`GUNICORN_WORKERS x (DB_POOL_SIZE + DB_MAX_OVERFLOW)` connections, and the role's
+`CONNECTION LIMIT` enforces that budget plus a small margin on the server side.
 
 No password appears in any script, deploy command or environment variable. The
 managed identity covers both the registry pull and the secret reads, and secrets
@@ -62,7 +91,8 @@ reintroduce BuildKit-only directives, or ACR builds stop working.
 There is a third, smaller trap: ACR's dependency scanner cannot resolve
 `FROM ${WHEELS_REF}` where `WHEELS_REF` itself defaults to `${UBI_MINIMAL}`. The
 base images are therefore passed explicitly as `--build-arg` values from
-`00-config.sh`.
+`00-config.sh`. Their defaults are read from the `Containerfile`'s `ARG` lines,
+so upstream base-image updates apply without editing the scripts.
 
 ## Secrets
 
@@ -70,7 +100,7 @@ base images are therefore passed explicitly as `--build-arg` values from
 |---|---|
 | `mcpgw-jwt-secret` | Yes. Invalidates active sessions. |
 | `mcpgw-auth-encryption-secret` | **No.** Rotating makes every stored OAuth token undecryptable. |
-| `mcpgw-database-url` | Yes, together with the Postgres admin password. |
+| `mcpgw-database-url` | Yes, together with the gateway role's password. On a shared server, delete the secret and re-run `01-prepare-azure.sh` to rotate it. |
 | `mcpgw-platform-admin-password` | Yes. Bootstrap password only; used on first start. |
 | `mcpgw-default-user-password` | Yes. Required bootstrap default; keep distinct from the admin password. |
 
@@ -90,9 +120,15 @@ Writing secrets needs the **Key Vault Secrets Officer** role. Subscription Owner
 is not sufficient - that grants control-plane rights only, not data-plane.
 `01-prepare-azure.sh` grants it to the caller if missing, scoped to this vault.
 
+## Headless deployments
+
+Set `MCPGATEWAY_UI_ENABLED=false` and `MCPGATEWAY_ADMIN_API_ENABLED=false` in the
+profile. Consuming platforms then use only the REST, MCP and A2A endpoints, and
+`04-smoke.sh` asserts that `/admin/login` returns 404.
+
 ## A second environment
 
-Everything in `00-config.sh` is overridable, so no file needs editing:
+Add a profile under `profiles/`, or override `00-config.sh` values inline:
 
 ```bash
 RESOURCE_GROUP=my-rg APP_NAME_AZ=mcp-gateway-dev \

@@ -663,9 +663,7 @@ describe("showTab", () => {
     document.body.appendChild(link);
 
     const destroySpy = vi.fn();
-    // tabs.js reads the registry from Admin.chartRegistry (see app.js), not
-    // window.chartRegistry directly — mirror that so the cleanup path runs.
-    window.Admin = { chartRegistry: { destroyByPrefix: destroySpy } };
+    window.chartRegistry = { destroyByPrefix: destroySpy };
 
     const dispatchSpy = vi.spyOn(document, "dispatchEvent");
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
