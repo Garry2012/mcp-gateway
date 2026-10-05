@@ -1,0 +1,42 @@
+# Use with docker-compose.yml. Start only Jaeger with --no-deps jaeger.
+services:
+  gateway:
+    environment:
+      OTEL_ENABLE_OBSERVABILITY: "true"
+      OTEL_TRACES_EXPORTER: otlp
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+      OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+      OTEL_EXPORTER_OTLP_INSECURE: "true"
+      # ContextForge currently names captured tool payloads langfuse.observation.*.
+      OTEL_EMIT_LANGFUSE_ATTRIBUTES: "true"
+      OTEL_CAPTURE_IDENTITY_ATTRIBUTES: "false"
+      OTEL_CAPTURE_INPUT_SPANS: tool.invoke
+      OTEL_CAPTURE_OUTPUT_SPANS: tool.invoke
+      OTEL_REDACT_FIELDS: ${OTEL_REDACT_FIELDS:-}
+      LANGFUSE_OTEL_ENDPOINT: ""
+      OTEL_EXPORTER_OTLP_HEADERS: ""
+    depends_on:
+      jaeger:
+        condition: service_started
+
+  jaeger:
+    image: cr.jaegertracing.io/jaegertracing/jaeger:2.21.0@sha256:3d0ac795ff98aa04d1be04311d2dac6c25b4bfc8322dc02e53bc5b170c5018c3
+    restart: unless-stopped
+    command: ["--config", "/etc/jaeger/config.yaml"]
+    networks:
+      - mcpnet
+    ports:
+      - "127.0.0.1:${JAEGER_UI_PORT:-16686}:16686"
+      - "127.0.0.1:${JAEGER_OTLP_GRPC_PORT:-4317}:4317"
+    volumes:
+      - ./deploy/jaeger/config.yaml:/etc/jaeger/config.yaml:ro
+      # /tmp is writable by Jaeger's non-root user; the volume retains the Badger files.
+      - jaegerdata:/tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+
+volumes:
+  jaegerdata:

@@ -1,0 +1,68 @@
+location: ${LOCATION}
+name: mcp-gateway-jaeger
+type: Microsoft.App/containerApps
+identity:
+  type: UserAssigned
+  userAssignedIdentities:
+    ${JAEGER_IDENTITY_ID}: {}
+properties:
+  managedEnvironmentId: ${ENVIRONMENT_ID}
+  configuration:
+    activeRevisionsMode: Single
+    ingress:
+      external: false
+      targetPort: 8080
+      transport: http
+      allowInsecure: false
+      additionalPortMappings:
+        - external: false
+          targetPort: 4317
+          exposedPort: 4317
+    registries:
+      - server: ${REGISTRY}
+        identity: ${JAEGER_IDENTITY_ID}
+    secrets:
+      - name: dashboard-htpasswd
+        keyVaultUrl: ${KEYVAULT_URI}/secrets/jaeger-dashboard-htpasswd
+        identity: ${JAEGER_IDENTITY_ID}
+  template:
+    scale:
+      minReplicas: 1
+      maxReplicas: 1
+    containers:
+      - name: jaeger
+        image: ${JAEGER_IMAGE}
+        resources:
+          cpu: 0.25
+          memory: 0.5Gi
+        env:
+          - name: GOMEMLIMIT
+            value: 384MiB
+        probes:
+          - type: Readiness
+            tcpSocket:
+              port: 4317
+            periodSeconds: 10
+          - type: Liveness
+            tcpSocket:
+              port: 4317
+            initialDelaySeconds: 30
+            periodSeconds: 30
+      - name: dashboard
+        image: ${JAEGER_PROXY_IMAGE}
+        resources:
+          cpu: 0.25
+          memory: 0.5Gi
+        env:
+          - name: JAEGER_HTPASSWD
+            secretRef: dashboard-htpasswd
+        probes:
+          - type: Readiness
+            tcpSocket:
+              port: 8080
+            periodSeconds: 10
+          - type: Liveness
+            tcpSocket:
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 30

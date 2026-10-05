@@ -4,9 +4,9 @@ This repository (`Garry2012/mcp-gateway`) is a fork of
 [`IBM/mcp-context-forge`](https://github.com/IBM/mcp-context-forge).
 
 The fork tracks upstream as closely as possible. It carries only the divergences below.
-Do not add UI, branding, or cosmetic changes to this fork. Submit fixes upstream instead.
+Keep UI changes limited to the functional fixes listed below. Submit fixes upstream and avoid branding or cosmetic changes.
 
-Last updated: **2026-10-02**.
+Last updated: **2026-10-06**.
 
 ## Syncing with upstream
 
@@ -27,6 +27,9 @@ records `upstream/main` as a parent. Its tree equals upstream plus the divergenc
 All earlier fork work was dropped: the MCP Gateway rebrand, the CSP-safe Alpine
 observability fixes, the observability UI tool timelines, backend tool-execution
 observations, Tailwind and CSS build changes, and fork-local docs. Git history keeps that work.
+
+The CSP-safe Alpine observability fixes were restored on 2026-10-05 because the deployed
+dashboard remained stuck on its loading placeholders. Divergence 4 describes this restoration.
 
 Fixes still open upstream, which arrive on a later sync if merged:
 
@@ -94,3 +97,40 @@ replaces both `COPY --chmod=0755` lines with `COPY` plus `RUN chmod 0755`.
 **Merge guidance:** if upstream adds a new `COPY --chmod` line, convert it to the same form.
 Check new required settings (for example `DEFAULT_USER_PASSWORD`) against
 `deploy/scripts/03-deploy-gateway.sh` before rollout.
+
+The deployment scripts also forward opt-in OTLP exporter settings. The Jaeger Compose overlay
+uses private host ports, persistent Badger storage, and the existing tool payload instrumentation.
+Keep `OTEL_EMIT_LANGFUSE_ATTRIBUTES=true` for payload export until upstream adopts backend-neutral attribute names.
+The healthcare Azure profile uses a separate Jaeger app with bounded in-memory storage and a password-protected HTTPS dashboard.
+`deploy/jaeger/azure.template.yaml` keeps OTLP ingress private and references the dashboard hash through Key Vault.
+The app uses a dedicated identity, with registry pull access and permission to read only its dashboard hash.
+
+### 4. CSP-compatible Observability dashboards
+
+The Admin UI uses `@alpinejs/csp`. Its expression parser rejects methods inside inline
+`x-data` objects. The Observability dashboard therefore never initializes or requests traces.
+The four metrics views also reference unregistered controllers and contain unsupported expressions.
+
+The dashboard and its Metrics, Tools, Prompts, and Resources controllers now live in
+`mcpgateway/admin_ui/components/observability-*.js`. `alpine-setup.js` registers all five with
+`Alpine.data()`. Their templates use registered names and CSP-compatible expressions.
+Tab navigation uses `window.Admin.chartRegistry` for chart cleanup.
+
+This restores the Observability changes from `332ec35f8`, `ca685d1a3`, and the isolated
+dashboard fix `b197c1beb`. Unrelated changes from those commits remain excluded.
+
+**Merge guidance:** retain the registered components until upstream includes equivalent fixes.
+Port upstream template changes into the templates and controller changes into the JavaScript modules.
+Run `npm test` and `make build-ui` after merging. The regression test
+`tests/unit/js/observability-csp.test.js` initializes actual templates with the production Alpine
+runtime and checks trace requests, navigation, and rendered metrics data.
+
+### 5. Redaction inside JSON text payloads
+
+MCP tool results can contain identical data in `structuredContent` and JSON-encoded `content[].text`.
+The trace sanitizer previously masked sensitive fields only in the structured copy.
+`sanitize_trace_text()` now parses JSON objects and arrays and applies the same recursive redaction.
+This changes captured telemetry only; the tool response remains unchanged.
+
+**Merge guidance:** retain the JSON text redaction tests in `tests/unit/mcpgateway/utils/test_trace_redaction.py`
+until upstream provides equivalent protection. The Jaeger integration test exposed this gap using synthetic secrets.

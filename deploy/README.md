@@ -126,6 +126,136 @@ Set `MCPGATEWAY_UI_ENABLED=false` and `MCPGATEWAY_ADMIN_API_ENABLED=false` in th
 profile. Consuming platforms then use only the REST, MCP and A2A endpoints, and
 `04-smoke.sh` asserts that `/admin/login` returns 404.
 
+## Jaeger tool tracing
+
+The Jaeger overlay enables OpenTelemetry export without changing gateway request handling.
+The built-in Observability database remains separate. Tool payloads appear in Jaeger, not in that database.
+
+### Docker Compose
+
+After configuring the base Compose stack's required secrets, start the gateway with the overlay:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.with-jaeger.yml up -d gateway
+```
+
+Open `http://localhost:16686`, select service `mcp-gateway`, and search after making a tool call.
+Expand the `tool.invoke` span. Its attributes include:
+
+- `langfuse.observation.input`: the captured input arguments.
+- `langfuse.observation.output`: the captured successful tool result.
+- `tool.name`, `success`, and `duration.ms`: execution details.
+
+These attribute names do not require Langfuse. ContextForge currently uses the `langfuse.*` namespace for payloads.
+The overlay sets `OTEL_EMIT_LANGFUSE_ATTRIBUTES=true` so the exporter retains them.
+It explicitly disables caller identity attributes.
+
+Jaeger uses a named Docker volume with Badger storage and a 48-hour trace retention period.
+Traces survive container restarts. Removing the volume deletes them.
+Badger supports this single-instance deployment; scaling Jaeger requires a different storage design.
+The UI and collector bind to loopback on the host. Keep them private because payloads can contain hospital data.
+
+Set `JAEGER_UI_PORT` or `JAEGER_OTLP_GRPC_PORT` if another local service uses ports 16686 or 4317.
+To run only Jaeger for a gateway started outside Docker:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.with-jaeger.yml up -d --no-deps jaeger
+```
+
+Set the host gateway's exporter endpoint to `http://127.0.0.1:4317` and use the settings below.
+Install the gateway's `observability` extra when running outside the provided container image.
+
+### Azure exporter configuration
+
+Deploy Jaeger with private collector access before enabling gateway export.
+The local Compose overlay does not provision an Azure Jaeger service.
+Use authenticated or private access for its query UI; do not expose captured payloads through unauthenticated public ingress.
+
+Add these settings to the selected deployment profile, using the collector's reachable hostname:
+
+```bash
+OTEL_ENABLE_OBSERVABILITY=true
+OTEL_EXPORTER_OTLP_ENDPOINT=http://YOUR_PRIVATE_JAEGER_HOST:4317
+OTEL_EXPORTER_OTLP_PROTOCOL=grpc
+OTEL_EXPORTER_OTLP_INSECURE=true
+OTEL_EMIT_LANGFUSE_ATTRIBUTES=true
+OTEL_CAPTURE_IDENTITY_ATTRIBUTES=false
+OTEL_CAPTURE_INPUT_SPANS=tool.invoke
+OTEL_CAPTURE_OUTPUT_SPANS=tool.invoke
+```
+
+Use `https://` and `OTEL_EXPORTER_OTLP_INSECURE=false` for a TLS-enabled collector.
+Remove any previous `LANGFUSE_OTEL_ENDPOINT` override or exporter authentication headers when switching from another tracing backend.
+The Azure deployment script now forwards these settings on creation and update.
+It rejects enabled export without an endpoint or with an unsupported transport protocol.
+Export remains disabled unless `OTEL_ENABLE_OBSERVABILITY=true` is supplied.
+
+### Healthcare Azure deployment
+
+The `healthcare-rg` profile enables export to `http://mcp-gateway-jaeger:4317`.
+The receiver accepts traffic only from the existing Container Apps environment.
+The `mcp-gateway-jaeger` app contains Jaeger and a password-protected dashboard proxy.
+Each container receives 0.25 CPU and 0.5 GiB. The app runs exactly one replica.
+
+Azure uses `deploy/jaeger/config-memory.yaml`, which retains at most 1,000 traces in memory.
+Restarting or deploying Jaeger deletes all traces. Older traces are evicted as new traces arrive.
+The memory limiter can refuse ingestion under memory pressure. This setup provides temporary debugging storage.
+It does not provision a database, storage account, or persistent volume.
+
+Dashboard: `https://mcp-gateway-jaeger.icytree-6543aaa9.centralindia.azurecontainerapps.io`
+
+- Username: `garima`.
+- Password: secret `jaeger-dashboard-password` in Key Vault `kv-fd-demo-hospi-0574c1`.
+- Dashboard authentication uses HTTPS Basic authentication, separate from the gateway login.
+- Microsoft sign-in requires an Entra administrator to provision an application registration.
+
+The dedicated identity `id-mcp-gateway-jaeger` has `AcrPull` on `acrfd399536`.
+It can read only the `jaeger-dashboard-htpasswd` secret from Key Vault.
+The proxy receives a bcrypt hash through a secret reference. It never receives the plaintext password.
+HTTP access redirects to HTTPS. The proxy protects both the dashboard and query API.
+Port 4317 remains internal even when the dashboard ingress is external.
+Jaeger's unprotected query port 16686 has no ingress mapping.
+
+Build both images from the `deploy/jaeger` directory with unique tags:
+
+```bash
+az acr build --registry acrfd399536 --image mcp-gateway-jaeger:YOUR_TAG --file Containerfile .
+az acr build --registry acrfd399536 --image mcp-gateway-jaeger-proxy:YOUR_TAG --file Containerfile.proxy .
+```
+
+Render `azure.template.yaml` with `LOCATION`, `JAEGER_IDENTITY_ID`, `ENVIRONMENT_ID`, `REGISTRY`,
+`KEYVAULT_URI`, `JAEGER_IMAGE`, and `JAEGER_PROXY_IMAGE`.
+The template contains secret references only. Keep plaintext passwords outside deployment files and command arguments.
+The identity and Key Vault secrets must exist before deployment.
+Apply the rendered template with `az containerapp create --resource-group healthcare-rg --name mcp-gateway-jaeger --yaml RENDERED_FILE`.
+The template starts with private ingress. Verify the password boundary before enabling external dashboard ingress:
+
+```bash
+az containerapp ingress update --resource-group healthcare-rg --name mcp-gateway-jaeger \
+  --type external --target-port 8080 --transport http
+```
+
+Run the real-container authentication checks locally with Docker and `htpasswd` installed:
+
+```bash
+RUN_JAEGER_DOCKER_TESTS=1 .venv/bin/python -m pytest \
+  tests/integration/test_jaeger_dashboard_auth.py --noconftest --with-integration
+```
+
+These checks reject anonymous access, incorrect passwords, and unknown users on the UI and trace API.
+They also verify successful login and startup refusal when the secret is absent.
+After Azure deployment, repeat these checks against its HTTPS endpoint and verify a gateway tool trace.
+
+### Capture limits
+
+The existing tool path exports successful tool results only. Tool failures retain error tracing but may have no output payload.
+Payload serialization masks configured sensitive fields and truncates large values.
+The default payload limit is 32,768 characters before any additional backend limits.
+Default redaction targets secrets; it does not guarantee removal of patient information.
+Review `OTEL_REDACT_FIELDS` before capturing real hospital traffic.
+Custom field lists replace the defaults; retain the secret fields when adding hospital-specific fields.
+Gateway traces cover gateway operations; instrument the voice agent separately for conversations and model usage.
+
 ## A second environment
 
 Add a profile under `profiles/`, or override `00-config.sh` values inline:
