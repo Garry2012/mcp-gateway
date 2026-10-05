@@ -1,0 +1,36 @@
+service:
+  extensions: [jaeger_storage, jaeger_query]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [jaeger_storage_exporter]
+
+extensions:
+  jaeger_storage:
+    backends:
+      traces:
+        memory:
+          max_traces: 1000
+  jaeger_query:
+    storage:
+      traces: traces
+    http:
+      endpoint: 0.0.0.0:16686
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 350
+    spike_limit_mib: 64
+  batch: {}
+
+exporters:
+  jaeger_storage_exporter:
+    trace_storage: traces

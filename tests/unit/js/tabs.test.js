@@ -527,7 +527,7 @@ describe("showTab", () => {
     delete window.UI_HIDDEN_TABS;
     isAdminUser.mockReturnValue(true);
     window.ROOT_PATH = "";
-    window.chartRegistry = { destroyByPrefix: vi.fn() };
+    window.Admin = { chartRegistry: { destroyByPrefix: vi.fn() } };
     window.htmx = {
       trigger: vi.fn(),
       ajax: vi.fn().mockResolvedValue({}),
@@ -538,7 +538,7 @@ describe("showTab", () => {
   afterEach(() => {
     vi.useRealTimers();
     document.body.innerHTML = "";
-    delete window.chartRegistry;
+    delete window.Admin;
     delete window.htmx;
   });
 
@@ -663,7 +663,7 @@ describe("showTab", () => {
     document.body.appendChild(link);
 
     const destroySpy = vi.fn();
-    window.chartRegistry = { destroyByPrefix: destroySpy };
+    window.Admin = { chartRegistry: { destroyByPrefix: destroySpy } };
 
     const dispatchSpy = vi.spyOn(document, "dispatchEvent");
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
@@ -671,6 +671,8 @@ describe("showTab", () => {
     showTab("gateways");
     vi.runAllTimers();
 
+    expect(gatewaysPanel.classList.contains("hidden")).toBe(false);
+    expect(obsPanel.classList.contains("hidden")).toBe(true);
     expect(destroySpy).toHaveBeenCalledWith("metrics-");
     expect(destroySpy).toHaveBeenCalledWith("tools-");
     expect(destroySpy).toHaveBeenCalledWith("prompts-");

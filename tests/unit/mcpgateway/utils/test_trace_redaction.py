@@ -11,6 +11,7 @@ import json
 
 # Third-Party
 from pydantic import BaseModel
+import pytest
 
 # First-Party
 from mcpgateway.utils.trace_redaction import (
@@ -218,3 +219,46 @@ def test_sanitize_trace_attribute_value_sanitizes_generic_string_values(monkeypa
     assert "abc123" not in sanitized
     assert "token=REDACTED" in sanitized
     assert "Bearer ***" in sanitized
+
+
+@pytest.mark.parametrize("secret", ["synthetic-output-secret", 'quoted"secret\\tail'])
+def test_tool_result_json_text_redacts_secrets_without_changing_response(monkeypatch, secret):
+    """MCP text content must redact the same fields as structured content."""
+    monkeypatch.setenv("OTEL_REDACT_FIELDS", "access_token")
+    reload_trace_redaction_config()
+    response = {"appointment_id": "TEST-123", "access_token": secret}
+    payload = {"content": [{"type": "text", "text": json.dumps(response)}], "structuredContent": response}
+
+    captured = json.loads(serialize_trace_payload(payload))
+
+    expected = {"appointment_id": "TEST-123", "access_token": "***"}
+    assert json.loads(captured["content"][0]["text"]) == expected
+    assert captured["structuredContent"] == expected
+    assert response["access_token"] == secret
+    assert json.loads(payload["content"][0]["text"])["access_token"] == secret
+
+
+def test_json_text_array_redacts_nested_custom_fields(monkeypatch):
+    """Configured redaction fields also apply inside JSON text arrays."""
+    monkeypatch.setenv("OTEL_REDACT_FIELDS", "patient_id")
+    reload_trace_redaction_config()
+    payload = '[{"data":{"patient_id":"PATIENT-TEST","count":2}},{"ok":true}]'
+
+    assert json.loads(sanitize_trace_text(payload)) == [{"data": {"patient_id": "***", "count": 2}}, {"ok": True}]
+
+
+def test_invalid_json_text_keeps_free_text_redaction(monkeypatch):
+    """Invalid JSON must still pass through the existing free-text sanitizer."""
+    monkeypatch.setenv("OTEL_REDACT_FIELDS", "token")
+    reload_trace_redaction_config()
+
+    assert sanitize_trace_text("{status: failed, token=synthetic-secret}") == "{status: failed, token=***"
+
+
+def test_excessively_nested_json_text_is_not_exported(monkeypatch):
+    """Redaction must omit JSON that exceeds the decoder's nesting limit."""
+    monkeypatch.setenv("OTEL_REDACT_FIELDS", "token")
+    reload_trace_redaction_config()
+    payload = "[" * 2000 + '{"token":"synthetic-secret"}' + "]" * 2000
+
+    assert sanitize_trace_text(payload) == '{"_error":"redaction_depth_exceeded"}'

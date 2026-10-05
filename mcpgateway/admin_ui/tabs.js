@@ -353,11 +353,13 @@ export const showTab = function (tabName) {
       tabName !== "observability"
     ) {
       console.log("Leaving observability tab, triggering cleanup...");
-      // Destroy all observability charts
-      window.chartRegistry.destroyByPrefix("metrics-");
-      window.chartRegistry.destroyByPrefix("tools-");
-      window.chartRegistry.destroyByPrefix("prompts-");
-      window.chartRegistry.destroyByPrefix("resources-");
+      const chartRegistry = window.Admin && window.Admin.chartRegistry;
+      if (chartRegistry) {
+        chartRegistry.destroyByPrefix("metrics-");
+        chartRegistry.destroyByPrefix("tools-");
+        chartRegistry.destroyByPrefix("prompts-");
+        chartRegistry.destroyByPrefix("resources-");
+      }
       // Dispatch event so Alpine components can stop intervals and reset state
       document.dispatchEvent(new CustomEvent("observability:leave"));
     }

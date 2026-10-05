@@ -11,6 +11,17 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/00-config.sh"
 
 log "Preflight"
+case "$OTEL_ENABLE_OBSERVABILITY" in
+  true)
+    [ -n "$OTEL_EXPORTER_OTLP_ENDPOINT" ] || die "OTEL_EXPORTER_OTLP_ENDPOINT is required when tracing is enabled"
+    case "$OTEL_EXPORTER_OTLP_PROTOCOL" in
+      grpc|http) ;;
+      *) die "OTEL_EXPORTER_OTLP_PROTOCOL must be grpc or http" ;;
+    esac
+    ;;
+  false) ;;
+  *) die "OTEL_ENABLE_OBSERVABILITY must be true or false" ;;
+esac
 az account show -o none 2>/dev/null || die "not logged in - run 'az login'"
 [ -n "$UAMI_ID" ] || die "managed identity '$UAMI_NAME' not found"
 az acr repository show-tags -n "$ACR_NAME" --repository "$IMAGE_REPO" -o tsv 2>/dev/null \
@@ -60,11 +71,19 @@ ENV_VARS=(
   "DB_MAX_OVERFLOW=${DB_MAX_OVERFLOW}"
   "GUNICORN_WORKERS=${GUNICORN_WORKERS}"
   "OBSERVABILITY_ENABLED=${OBSERVABILITY_ENABLED}"
+  "OTEL_ENABLE_OBSERVABILITY=${OTEL_ENABLE_OBSERVABILITY}"
+  "OTEL_TRACES_EXPORTER=otlp"
+  "OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT}"
+  "OTEL_EXPORTER_OTLP_PROTOCOL=${OTEL_EXPORTER_OTLP_PROTOCOL}"
+  "OTEL_EXPORTER_OTLP_INSECURE=${OTEL_EXPORTER_OTLP_INSECURE}"
+  "OTEL_EMIT_LANGFUSE_ATTRIBUTES=${OTEL_EMIT_LANGFUSE_ATTRIBUTES}"
+  "OTEL_CAPTURE_IDENTITY_ATTRIBUTES=${OTEL_CAPTURE_IDENTITY_ATTRIBUTES}"
   "OTEL_CAPTURE_INPUT_SPANS=${OTEL_CAPTURE_INPUT_SPANS}"
   "OTEL_CAPTURE_OUTPUT_SPANS=${OTEL_CAPTURE_OUTPUT_SPANS}"
 )
 [ -n "$RESOLVED_APP_DOMAIN" ] && ENV_VARS+=("APP_DOMAIN=${RESOLVED_APP_DOMAIN}")
 [ -n "$DCR_ALLOWED_ISSUERS" ] && ENV_VARS+=("DCR_ALLOWED_ISSUERS=${DCR_ALLOWED_ISSUERS}")
+[ -n "${OTEL_REDACT_FIELDS:-}" ] && ENV_VARS+=("OTEL_REDACT_FIELDS=${OTEL_REDACT_FIELDS}")
 
 if az containerapp show -n "$APP_NAME_AZ" -g "$RESOURCE_GROUP" -o none 2>/dev/null; then
   log "Updating existing app: $APP_NAME_AZ"

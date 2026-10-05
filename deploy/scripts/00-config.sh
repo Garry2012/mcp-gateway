@@ -92,16 +92,17 @@ GUNICORN_WORKERS="${GUNICORN_WORKERS:-2}"
 # #3883), so raise DB_POOL_SIZE with this if call volume grows.
 OBSERVABILITY_ENABLED="${OBSERVABILITY_ENABLED:-true}"
 
-# Payload capture. INERT unless OTLP export is also configured: the DB span at
-# tool_service.py:5314 writes a fixed attribute set (name, id, integration_type,
-# gateway_id, arguments_count, has_headers) and never includes payloads. Only
-# the OpenTelemetry span at tool_service.py:5351 honours these, and it needs
-# OTEL_ENABLE_OBSERVABILITY plus an OTLP endpoint (e.g. Langfuse) to go
-# anywhere. Set here so payload capture works the moment an exporter is wired.
-# Note output capture is gated on `success` (tool_service.py:6777), so FAILED
-# calls capture no output even with an exporter attached.
+# Payload capture applies to exported spans, not the built-in observability database.
+# Tool output capture records successful results only.
 OTEL_CAPTURE_INPUT_SPANS="${OTEL_CAPTURE_INPUT_SPANS:-tool.invoke}"
 OTEL_CAPTURE_OUTPUT_SPANS="${OTEL_CAPTURE_OUTPUT_SPANS:-tool.invoke}"
+OTEL_ENABLE_OBSERVABILITY="${OTEL_ENABLE_OBSERVABILITY:-false}"
+OTEL_EXPORTER_OTLP_ENDPOINT="${OTEL_EXPORTER_OTLP_ENDPOINT:-}"
+OTEL_EXPORTER_OTLP_PROTOCOL="${OTEL_EXPORTER_OTLP_PROTOCOL:-grpc}"
+OTEL_EXPORTER_OTLP_INSECURE="${OTEL_EXPORTER_OTLP_INSECURE:-false}"
+# Tool payload attributes use the langfuse.* namespace even with other OTLP backends.
+OTEL_EMIT_LANGFUSE_ATTRIBUTES="${OTEL_EMIT_LANGFUSE_ATTRIBUTES:-true}"
+OTEL_CAPTURE_IDENTITY_ATTRIBUTES="${OTEL_CAPTURE_IDENTITY_ATTRIBUTES:-false}"
 
 # Container app.
 APP_NAME_AZ="${APP_NAME_AZ:-mcp-gateway}"

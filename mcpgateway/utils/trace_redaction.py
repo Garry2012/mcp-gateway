@@ -288,6 +288,15 @@ def sanitize_trace_text(text: str) -> str:
         Sanitized text safe to attach to trace metadata.
     """
     _ensure_loaded()
+    if text.lstrip().startswith(("{", "[")):
+        try:
+            decoded = json.loads(text)
+            return json.dumps(redact_sensitive_fields(decoded), ensure_ascii=False, separators=(",", ":"))
+        except json.JSONDecodeError:
+            pass
+        except RecursionError:
+            return '{"_error":"redaction_depth_exceeded"}'
+
     sanitized = sanitize_exception_message(text)
     sanitized = re.sub(r"(?i)\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+(?=$|[\s,;\x27\x22])", r"\1 ***", sanitized)
 
