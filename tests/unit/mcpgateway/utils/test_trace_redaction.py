@@ -262,3 +262,15 @@ def test_excessively_nested_json_text_is_not_exported(monkeypatch):
     payload = "[" * 2000 + '{"token":"synthetic-secret"}' + "]" * 2000
 
     assert sanitize_trace_text(payload) == '{"_error":"redaction_depth_exceeded"}'
+
+
+def test_oversized_json_integer_does_not_interrupt_capture_or_expose_secrets(monkeypatch):
+    """Omit JSON text when integer decoding fails before sensitive fields can be masked."""
+    monkeypatch.setenv("OTEL_REDACT_FIELDS", "access_token")
+    reload_trace_redaction_config()
+    payload = '{"number":' + "1" * 5000 + ',"access_token":"synthetic-secret"}'
+
+    captured = json.loads(serialize_trace_payload({"note": payload}))
+
+    assert captured["note"] == '{"_error":"redaction_value_exceeded"}'
+    assert "synthetic-secret" not in json.dumps(captured)

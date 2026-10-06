@@ -80,6 +80,11 @@ DB_MAX_OVERFLOW="${DB_MAX_OVERFLOW:-5}"
 # Keep roughly 2 workers per CPU, and raise APP_MEMORY before raising this.
 GUNICORN_WORKERS="${GUNICORN_WORKERS:-2}"
 
+TOKEN_EXPIRY="${TOKEN_EXPIRY:-20}"
+TOKEN_IDLE_TIMEOUT="${TOKEN_IDLE_TIMEOUT:-60}"
+MCP_CLIENT_CONNECT_MODE="${MCP_CLIENT_CONNECT_MODE:-auto}"
+MCP_INBOUND_PROTOCOL_MODE="${MCP_INBOUND_PROTOCOL_MODE:-auto}"
+
 # --- Observability -----------------------------------------------------------
 # Off by default in config.py. Enabling it writes traces/spans to Postgres
 # (observability_traces / observability_spans) and needs no collector, no key,
