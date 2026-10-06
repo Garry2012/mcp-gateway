@@ -10,6 +10,7 @@ Supports any OTLP-compatible backend (Jaeger, Zipkin, Tempo, Phoenix, etc.).
 # Standard
 import base64
 from contextlib import nullcontext
+from contextvars import ContextVar
 from dataclasses import dataclass
 from importlib import import_module as _im
 import inspect
@@ -830,6 +831,68 @@ def _should_trace_request_path(path: str) -> bool:
     return False
 
 
+@dataclass
+class ToolTraceContext:
+    """Store naming state for one gateway HTTP span across MCP task boundaries."""
+
+    span: Any
+    active: bool = True
+    server_id: Optional[str] = None
+    server_name: Optional[str] = None
+    first_call: Optional[tuple[str, str, str]] = None
+    multiple_servers: bool = False
+
+
+_tool_trace_context: ContextVar[Optional[ToolTraceContext]] = ContextVar("tool_trace_context", default=None)
+
+
+def get_tool_trace_context(scope: Optional[Mapping[str, Any]] = None) -> Optional[ToolTraceContext]:
+    """Get the gateway request context from ASGI state or the current task.
+
+    Args:
+        scope: Current MCP request scope, when the SDK crosses task boundaries.
+
+    Returns:
+        The active gateway context, or None when request tracing is unavailable.
+    """
+    context = scope.get("state", {}).get("tool_trace_context") if scope is not None else _tool_trace_context.get()
+    return context if isinstance(context, ToolTraceContext) and context.active else None
+
+
+def record_tool_trace_name(server_id: Optional[str], tool_name: str, original_name: str, request_trace: Optional[ToolTraceContext] = None) -> None:
+    """Name the gateway request span after an authorized virtual-server tool call.
+
+    Call this after tool access and virtual-server membership checks. Server validation
+    supplies the name through request context; this function performs no database I/O.
+
+    Args:
+        server_id: Resolved virtual server ID, or None for unscoped calls.
+        tool_name: Registered tool invocation name.
+        original_name: Original upstream tool name.
+        request_trace: Request context carried across an MCP task boundary.
+    """
+    context = request_trace if request_trace is not None else get_tool_trace_context()
+    if context is None or not context.active or not server_id or not context.span.is_recording():
+        return
+    try:
+        if context.first_call is None:
+            if context.server_id != server_id or not isinstance(context.server_name, str) or not context.server_name:
+                return
+            label = " ".join(sanitize_trace_text(context.server_name).split())[:200]
+            tool_label = " ".join(sanitize_trace_text(original_name or tool_name).split())[:200]
+            context.first_call = (server_id, tool_name, label)
+            context.span.update_name(f"{label} / {tool_label}")
+            for key, value in {"server.id": server_id, "contextforge.virtual_server.name": context.server_name, "tool.name": tool_name, "tool.original_name": original_name}.items():
+                set_span_attribute(context.span, key, value)
+        elif context.multiple_servers or context.first_call[0] != server_id:
+            context.multiple_servers = True
+            context.span.update_name("Multiple virtual servers / tools/call")
+        elif context.first_call[1] != tool_name:
+            context.span.update_name(f"{context.first_call[2]} / multiple tools")
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        logger.debug("Could not name tool request span: %s", type(exc).__name__)
+
+
 class OpenTelemetryRequestMiddleware:
     """Raw ASGI middleware that creates request-root spans for gateway transport flows."""
 
@@ -994,6 +1057,9 @@ class OpenTelemetryRequestMiddleware:
                 except Exception as exc:
                     logger.debug("Failed to inject baggage into request span: %s", exc)
 
+            request_trace = ToolTraceContext(span)
+            scope.setdefault("state", {})["tool_trace_context"] = request_trace
+            context_token = _tool_trace_context.set(request_trace)
             try:
                 await self.app(scope, receive, _send_with_span_status)
                 if span is not None and "status" not in status_code_holder and OTEL_AVAILABLE and Status and StatusCode:
@@ -1005,6 +1071,9 @@ class OpenTelemetryRequestMiddleware:
                     if OTEL_AVAILABLE and Status and StatusCode:
                         span.set_status(Status(StatusCode.ERROR, error_message))
                 raise
+            finally:
+                request_trace.active = False
+                _tool_trace_context.reset(context_token)
 
 
 def init_telemetry() -> Optional[Any]:

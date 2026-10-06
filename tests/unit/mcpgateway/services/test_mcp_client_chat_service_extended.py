@@ -17,6 +17,12 @@ import pytest
 
 import mcpgateway.services.mcp_client_chat_service as svc
 
+
+def _llmchat_extra_installed() -> bool:
+    """Return whether the optional ``llmchat`` extra is installed, without importing it."""
+    return importlib.util.find_spec("langchain") is not None and importlib.util.find_spec("fastmcp") is not None
+
+
 # --------------------------------------------------------------------------- #
 # LLM PROVIDER FACTORY TESTS
 # --------------------------------------------------------------------------- #
@@ -264,7 +270,8 @@ async def test_chat_non_streaming_response(monkeypatch):
 @pytest.mark.asyncio
 async def test_chat_service_disconnect_cleanup(monkeypatch):
     chatcfg = svc.MCPClientConfig(
-        mcp_server=svc.MCPServerConfig(url="https://x", transport="sse"), llm=svc.LLMConfig(provider="openai", config=svc.OpenAIConfig(api_key="ak", model="gpt-4"))  # pragma: allowlist secret
+        mcp_server=svc.MCPServerConfig(url="https://x", transport="sse"),
+        llm=svc.LLMConfig(provider="openai", config=svc.OpenAIConfig(api_key="ak", model="gpt-4")),  # pragma: allowlist secret
     )  # pragma: allowlist secret
     service = svc.MCPChatService(chatcfg)
     service._client = AsyncMock()
@@ -585,6 +592,7 @@ async def test_mcpclient_disconnect_when_not_connected():
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(not _llmchat_extra_installed(), reason="llmchat extra not installed")
 async def test_mcpclient_connect_with_headers(monkeypatch):
     cfg = svc.MCPServerConfig(url="https://srv", transport="sse", headers={"x-test": "1"})
     client = svc.MCPClient(cfg)
@@ -603,6 +611,7 @@ async def test_mcpclient_connect_with_headers(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(not _llmchat_extra_installed(), reason="llmchat extra not installed")
 async def test_mcpclient_connect_stdio_args(monkeypatch):
     monkeypatch.setattr(svc.settings, "mcpgateway_stdio_transport_enabled", True)
     cfg = svc.MCPServerConfig(command="python", args=["server.py"], transport="stdio")
@@ -622,6 +631,7 @@ async def test_mcpclient_connect_stdio_args(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(not _llmchat_extra_installed(), reason="llmchat extra not installed")
 async def test_mcpclient_connect_streamable_http_transport(monkeypatch):
     cfg = svc.MCPServerConfig(url="https://srv/mcp", transport="streamable_http", headers={"Authorization": "Bearer t"})
     client = svc.MCPClient(cfg)
@@ -644,11 +654,6 @@ def test_mcpclient_build_transport_rejects_unsupported_transport():
     client.config.transport = "websocket"
     with pytest.raises(ValueError, match="Unsupported MCP transport: websocket"):
         client._build_transport()
-
-
-def _llmchat_extra_installed() -> bool:
-    """Return whether the optional ``llmchat`` extra is installed, without importing it."""
-    return importlib.util.find_spec("langchain") is not None and importlib.util.find_spec("fastmcp") is not None
 
 
 @pytest.mark.skipif(not _llmchat_extra_installed(), reason="llmchat extra not installed")
@@ -698,6 +703,7 @@ async def test_llmchat_declines_elicitation_instead_of_interrupting():
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(not _llmchat_extra_installed(), reason="llmchat extra not installed")
 async def test_mcpclient_connect_builds_client_with_decline_handler(monkeypatch):
     """connect() hands MCPAdapter a FastMCP client that declines elicitation."""
     captured = {}
@@ -989,6 +995,7 @@ async def test_trim_messages_and_clear(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(not _llmchat_extra_installed(), reason="llmchat extra not installed")
 async def test_mcpclient_double_connect(monkeypatch):
     mock_client = AsyncMock()
     mock_client.connect = AsyncMock()
@@ -1010,7 +1017,7 @@ async def test_mcpclient_tools_cache(monkeypatch):
     c._client = mock_client
     c._connected = True
     await c.get_tools(force_reload=False)
-    tools = await c.get_tools(force_reload=True)
+    await c.get_tools(force_reload=True)
     tools_val = await c._client.list_tools()
     assert tools_val == ["Tool"]
     assert "Tool" in tools_val

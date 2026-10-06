@@ -73,7 +73,7 @@ from mcpgateway.db import Gateway as DbGateway
 from mcpgateway.db import Server as DbServer
 from mcpgateway.db import SessionLocal
 from mcpgateway.middleware.rbac import _ACCESS_DENIED_MSG
-from mcpgateway.observability import create_span, inject_trace_context_headers, set_span_attribute
+from mcpgateway.observability import create_span, get_tool_trace_context, inject_trace_context_headers, set_span_attribute
 from mcpgateway.services.completion_service import CompletionService
 from mcpgateway.services.http_client_service import get_http_client, get_http_limits
 from mcpgateway.services.logging_service import LoggingService
@@ -1933,6 +1933,7 @@ async def call_tool(
     mrtr_allowed = False
     inbound_input_responses = None
     inbound_request_state = None
+    ctx = None
     # Extract _meta from request context if available
     try:
         ctx = mcp_app.request_context  # pylint: disable=no-member
@@ -2161,6 +2162,8 @@ async def call_tool(
 
     # Cross-hook plugin state sharing on /mcp (issue #3879).
     plugin_global_context, plugin_context_table = _get_plugin_contexts_or_none()
+    trace_scope = getattr(getattr(ctx, "request", None), "scope", None)
+    request_trace = get_tool_trace_context(trace_scope if isinstance(trace_scope, dict) else None)
 
     try:
         async with get_db() as db:
@@ -2176,6 +2179,7 @@ async def call_tool(
                 server_id=server_id,
                 meta_data=meta_data,
                 require_model_visible=True,
+                request_trace=request_trace,
                 progress_callback=_relay_progress,
                 allow_input_required=mrtr_allowed,
                 input_responses=inbound_input_responses,
@@ -4536,14 +4540,21 @@ class SessionManagerWrapper:
             server_id = match.group("server_id")
             # SECURITY: Validate that the server_id exists in the database
             # to prevent unauthorized access via invalid server IDs.
-            # Uses the shared BaseService.entity_exists() for a lightweight
-            # EXISTS check — no row data is loaded.
             try:
                 # First-Party
                 from mcpgateway.services.server_service import server_service as _server_svc  # pylint: disable=import-outside-toplevel,no-name-in-module
 
                 async with get_db() as db:
-                    if not await _server_svc.entity_exists(db, server_id):
+                    trace_context = get_tool_trace_context(scope)
+                    if trace_context is not None and trace_context.span.is_recording():
+                        server_row = db.execute(select(DbServer.name).where(DbServer.id == server_id)).first()
+                        server_exists = server_row is not None
+                        if server_exists:
+                            trace_context.server_id = server_id
+                            trace_context.server_name = server_row[0]
+                    else:
+                        server_exists = await _server_svc.entity_exists(db, server_id)
+                    if not server_exists:
                         logger.warning("Invalid server ID in MCP request path: %s", server_id)
                         response = ORJSONResponse({"detail": "Server not found"}, status_code=404)
                         await response(scope, receive, send)

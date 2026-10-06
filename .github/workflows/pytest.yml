@@ -135,6 +135,15 @@ jobs:
             --cov-branch \
             --cov-fail-under=90
 
+      - name: Test tracing and LLM Chat extras
+        run: |
+          uv run --extra plugins --extra observability --extra llmchat pytest \
+            tests/unit/mcpgateway/test_tool_trace_names.py \
+            tests/unit/mcpgateway/services/test_mcp_client_chat_service_extended.py \
+            --cov=mcpgateway --cov-append \
+            --cov-config=.github/pytest-branch-coverage.coveragerc \
+            --cov-report=xml --cov-branch --cov-fail-under=90
+
       # -----------------------------------------------------------
       # 3.5  Diff-cover: enforce 90% coverage on changed lines (PRs only)
       #
