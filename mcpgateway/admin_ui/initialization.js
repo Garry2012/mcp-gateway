@@ -37,6 +37,7 @@ import {
   handleToolFormSubmit,
 } from "./formSubmitHandlers.js";
 import { closeModal, openModal } from "./modals.js";
+import { setupPartialLoadErrors } from "./partialLoadErrors.js";
 import { initPromptSelect } from "./prompts.js";
 import { initResourceSelect } from "./resources.js";
 import { escapeHtml, safeSetInnerHTML } from "./security.js";
@@ -231,6 +232,7 @@ export const initializeEventListeners = function () {
 
   setupTabNavigation();
   setupHTMXHooks();
+  setupPartialLoadErrors();
   console.log("✅ HTMX hooks registered");
   setupAuthenticationToggles();
   setupFormHandlers();

@@ -837,6 +837,8 @@ class ToolTraceContext:
 
     span: Any
     active: bool = True
+    server_id: Optional[str] = None
+    server_name: Optional[str] = None
     first_call: Optional[tuple[str, str, str]] = None
     multiple_servers: bool = False
 
@@ -860,8 +862,8 @@ def get_tool_trace_context(scope: Optional[Mapping[str, Any]] = None) -> Optiona
 def record_tool_trace_name(server_id: Optional[str], tool_name: str, original_name: str, request_trace: Optional[ToolTraceContext] = None) -> None:
     """Name the gateway request span after an authorized virtual-server tool call.
 
-    Call this after tool access and virtual-server membership checks. Metadata lookup
-    uses an independent session so telemetry failures cannot affect tool transactions.
+    Call this after tool access and virtual-server membership checks. Server validation
+    supplies the name through request context; this function performs no database I/O.
 
     Args:
         server_id: Resolved virtual server ID, or None for unscoped calls.
@@ -873,22 +875,14 @@ def record_tool_trace_name(server_id: Optional[str], tool_name: str, original_na
     if context is None or not context.active or not server_id or not context.span.is_recording():
         return
     try:
-        # Third-Party
-        from sqlalchemy import select  # pylint: disable=import-outside-toplevel
-
-        # First-Party
-        from mcpgateway.db import Server, SessionLocal  # pylint: disable=import-outside-toplevel
-
-        with SessionLocal() as db:
-            server_name = db.execute(select(Server.name).where(Server.id == server_id)).scalar_one_or_none()
-        if not isinstance(server_name, str) or not server_name:
-            return
-        label = " ".join(sanitize_trace_text(server_name).split())[:200]
-        tool_label = " ".join(sanitize_trace_text(original_name or tool_name).split())[:200]
         if context.first_call is None:
+            if context.server_id != server_id or not isinstance(context.server_name, str) or not context.server_name:
+                return
+            label = " ".join(sanitize_trace_text(context.server_name).split())[:200]
+            tool_label = " ".join(sanitize_trace_text(original_name or tool_name).split())[:200]
             context.first_call = (server_id, tool_name, label)
             context.span.update_name(f"{label} / {tool_label}")
-            for key, value in {"server.id": server_id, "server.name": server_name, "tool.name": tool_name, "tool.original_name": original_name}.items():
+            for key, value in {"server.id": server_id, "contextforge.virtual_server.name": context.server_name, "tool.name": tool_name, "tool.original_name": original_name}.items():
                 set_span_attribute(context.span, key, value)
         elif context.multiple_servers or context.first_call[0] != server_id:
             context.multiple_servers = True

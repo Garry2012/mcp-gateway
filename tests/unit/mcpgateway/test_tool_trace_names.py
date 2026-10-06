@@ -9,12 +9,10 @@ Verify exported request names and isolation across MCP task boundaries.
 # Standard
 import asyncio
 from contextvars import Context
+import re
 from typing import Any, cast
 
 # Third-Party
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import SimpleSpanProcessor
-from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
@@ -24,10 +22,20 @@ from mcpgateway import observability
 
 
 @pytest.fixture
-def tracing(monkeypatch: pytest.MonkeyPatch) -> InMemorySpanExporter:
+def tracing(monkeypatch: pytest.MonkeyPatch) -> Any:
     """Export real SDK spans and resolve server names from an isolated database."""
+    trace_sdk = pytest.importorskip("opentelemetry.sdk.trace")
+    if not hasattr(trace_sdk, "TracerProvider"):
+        pytest.skip("OpenTelemetry SDK is not installed")
+    # Third-Party
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    # First-Party
+    from mcpgateway.transports import streamablehttp_transport as transport
+
     exporter = InMemorySpanExporter()
-    provider = TracerProvider()
+    provider = trace_sdk.TracerProvider()
     provider.add_span_processor(SimpleSpanProcessor(exporter))
     monkeypatch.setattr(observability, "_TRACER", provider.get_tracer("trace-name-test"))
     engine = create_engine("sqlite://")
@@ -35,7 +43,10 @@ def tracing(monkeypatch: pytest.MonkeyPatch) -> InMemorySpanExporter:
         connection.execute(text("CREATE TABLE servers (id TEXT PRIMARY KEY, name TEXT)"))
         connection.execute(text("INSERT INTO servers VALUES ('a', 'Clinic Alpha'), ('b', 'Clinic Beta')"))
     monkeypatch.setattr("mcpgateway.db.SessionLocal", sessionmaker(bind=engine))
-    return exporter
+    monkeypatch.setattr(transport, "SessionLocal", sessionmaker(bind=engine))
+    yield exporter
+    provider.shutdown()
+    engine.dispose()
 
 
 async def request(app: Any, path: str = "/servers/a/mcp", headers: Any = ()) -> None:
@@ -48,11 +59,18 @@ async def request(app: Any, path: str = "/servers/a/mcp", headers: Any = ()) -> 
     async def send(message: dict[str, Any]) -> None:
         pass
 
-    await observability.OpenTelemetryRequestMiddleware(app)(scope, receive, send)
+    async def validated_app(scope: dict[str, Any], receive: Any, send: Any) -> None:
+        # First-Party
+        from mcpgateway.transports.streamablehttp_transport import SessionManagerWrapper
+
+        await SessionManagerWrapper._validate_server_id(re.search(r"/servers/(?P<server_id>[^/]+)/mcp", path), path, scope, receive, send)
+        await app(scope, receive, send)
+
+    await observability.OpenTelemetryRequestMiddleware(validated_app)(scope, receive, send)
 
 
 @pytest.mark.asyncio
-async def test_virtual_server_names_come_from_database(tracing: InMemorySpanExporter) -> None:
+async def test_virtual_server_names_come_from_database(tracing: Any) -> None:
     """Each server supplies its own name without deployment-specific configuration."""
 
     async def app(scope: dict[str, Any], receive: Any, send: Any) -> None:
@@ -66,11 +84,11 @@ async def test_virtual_server_names_come_from_database(tracing: InMemorySpanExpo
         assert span.attributes is not None
         assert span.attributes["tool.name"] == "registered-availability"
         assert span.attributes["http.request.method"] == "POST"
-        assert span.attributes["server.name"] in ("Clinic Alpha", "Clinic Beta")
+        assert span.attributes["contextforge.virtual_server.name"] in ("Clinic Alpha", "Clinic Beta")
 
 
 @pytest.mark.asyncio
-async def test_mcp_task_uses_scope_instead_of_inherited_context(tracing: InMemorySpanExporter) -> None:
+async def test_mcp_task_uses_scope_instead_of_inherited_context(tracing: Any) -> None:
     """A session task can rename the current request without inheriting its ContextVars."""
 
     async def app(scope: dict[str, Any], receive: Any, send: Any) -> None:
@@ -85,7 +103,7 @@ async def test_mcp_task_uses_scope_instead_of_inherited_context(tracing: InMemor
 
 
 @pytest.mark.asyncio
-async def test_remote_parent_is_preserved(tracing: InMemorySpanExporter) -> None:
+async def test_remote_parent_is_preserved(tracing: Any) -> None:
     """The gateway names its own span and preserves the caller's trace and parent IDs."""
 
     async def app(scope: dict[str, Any], receive: Any, send: Any) -> None:
@@ -102,7 +120,7 @@ async def test_remote_parent_is_preserved(tracing: InMemorySpanExporter) -> None
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("server_id, expected", [("a", "Clinic Alpha / multiple tools"), ("b", "Multiple virtual servers / tools/call")])
-async def test_multiple_tools_do_not_mislabel_request(tracing: InMemorySpanExporter, server_id: str, expected: str) -> None:
+async def test_multiple_tools_do_not_mislabel_request(tracing: Any, server_id: str, expected: str) -> None:
     """A request containing different tool calls receives an aggregate title."""
 
     async def app(scope: dict[str, Any], receive: Any, send: Any) -> None:
@@ -114,7 +132,7 @@ async def test_multiple_tools_do_not_mislabel_request(tracing: InMemorySpanExpor
 
 
 @pytest.mark.asyncio
-async def test_failed_tool_retains_readable_name(tracing: InMemorySpanExporter) -> None:
+async def test_failed_tool_retains_readable_name(tracing: Any) -> None:
     """Execution failures keep the resolved tool name and error status."""
 
     async def app(scope: dict[str, Any], receive: Any, send: Any) -> None:
@@ -129,7 +147,7 @@ async def test_failed_tool_retains_readable_name(tracing: InMemorySpanExporter) 
 
 
 @pytest.mark.asyncio
-async def test_unresolved_server_keeps_http_name(tracing: InMemorySpanExporter) -> None:
+async def test_unresolved_server_keeps_http_name(tracing: Any) -> None:
     """Missing server records do not produce invented names or break requests."""
 
     async def app(scope: dict[str, Any], receive: Any, send: Any) -> None:
@@ -140,7 +158,25 @@ async def test_unresolved_server_keeps_http_name(tracing: InMemorySpanExporter) 
 
 
 @pytest.mark.asyncio
-async def test_completed_request_cannot_be_renamed(tracing: InMemorySpanExporter) -> None:
+async def test_span_naming_failure_does_not_fail_request(tracing: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A telemetry update failure preserves request execution and its HTTP name."""
+
+    def unavailable(name: str) -> None:
+        raise RuntimeError("span update unavailable")
+
+    async def app(scope: dict[str, Any], receive: Any, send: Any) -> None:
+        context = observability.get_tool_trace_context(scope)
+        assert context is not None
+        monkeypatch.setattr(context.span, "update_name", unavailable)
+        observability.record_tool_trace_name("a", "search", "search", context)
+        await send({"type": "http.response.start", "status": 200})
+
+    await request(app)
+    assert tracing.get_finished_spans()[0].name == "POST /servers/a/mcp"
+
+
+@pytest.mark.asyncio
+async def test_completed_request_cannot_be_renamed(tracing: Any) -> None:
     """Session tasks cannot reuse a finished request's trace context."""
     contexts = []
 
@@ -154,7 +190,7 @@ async def test_completed_request_cannot_be_renamed(tracing: InMemorySpanExporter
 
 
 @pytest.mark.asyncio
-async def test_server_rename_updates_only_future_traces(tracing: InMemorySpanExporter) -> None:
+async def test_server_rename_updates_only_future_traces(tracing: Any) -> None:
     """Resolve the current name for each request and preserve completed trace names."""
     # First-Party
     from mcpgateway.db import SessionLocal
@@ -171,8 +207,8 @@ async def test_server_rename_updates_only_future_traces(tracing: InMemorySpanExp
 
 
 @pytest.mark.asyncio
-async def test_metadata_failure_does_not_fail_request(tracing: InMemorySpanExporter, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep the HTTP span and response when the metadata database is unavailable."""
+async def test_metadata_failure_does_not_fail_request(tracing: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Naming performs no database lookup after server validation."""
 
     def unavailable() -> None:
         raise RuntimeError("database unavailable")
@@ -185,7 +221,7 @@ async def test_metadata_failure_does_not_fail_request(tracing: InMemorySpanExpor
 
     await request(app)
     span = tracing.get_finished_spans()[0]
-    assert span.name == "POST /servers/a/mcp"
+    assert span.name == "Clinic Alpha / search"
     assert span.attributes is not None
     assert span.attributes["http.response.status_code"] == 200
 
@@ -205,5 +241,137 @@ async def test_disabled_tracing_does_not_query_metadata(monkeypatch: pytest.Monk
     async def app(scope: dict[str, Any], receive: Any, send: Any) -> None:
         observability.record_tool_trace_name("a", "search", "search")
 
-    await request(app)
+    await request(app, "/mcp")
     assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_real_tool_dispatch_uses_current_request_scope(tracing: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reuse an MCP session task without leaking names or naming denied calls."""
+    # Standard
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, PropertyMock, patch
+
+    # Third-Party
+    import httpx
+
+    # First-Party
+    from mcpgateway.db import Base, EmailUser, Server, Tool
+    from mcpgateway.services import tool_service as service_module
+    from mcpgateway.transports import streamablehttp_transport as transport
+
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    sessions = sessionmaker(bind=engine, expire_on_commit=False)
+    with sessions() as db:
+        user = EmailUser(email="trace@example.com", password_hash="unused", is_admin=True, is_active=True)
+        tool = Tool(
+            id="tool-a",
+            name="registered-search",
+            original_name="search",
+            integration_type="REST",
+            request_type="GET",
+            url="https://example.com/search",
+            enabled=True,
+            reachable=True,
+            custom_name="registered-search",
+            custom_name_slug="registered-search",
+            input_schema={"type": "object"},
+            visibility="public",
+        )
+        db.add_all([user, tool, Server(id="a", name="Clinic Alpha", tools=[tool]), Server(id="b", name="Clinic Beta")])
+        db.commit()
+    monkeypatch.setattr(transport, "SessionLocal", sessions)
+    monkeypatch.setattr("mcpgateway.db.SessionLocal", sessions)
+    monkeypatch.setattr(transport.settings, "mcpgateway_session_affinity_enabled", False)
+    monkeypatch.setattr(transport.settings, "ssrf_protection_enabled", False)
+    monkeypatch.setattr(transport.settings, "observability_enabled", False)
+    monkeypatch.setattr(service_module.SecurityValidator, "validate_url_for_connection_pinning", AsyncMock(return_value={}))
+    cache = SimpleNamespace(enabled=False, set=AsyncMock(), set_negative=AsyncMock())
+    monkeypatch.setattr(service_module, "_get_tool_lookup_cache", lambda: cache)
+    user_context = {"email": "trace@example.com", "teams": None, "is_admin": True, "is_authenticated": True}
+    monkeypatch.setattr(transport, "_get_request_context_or_default", AsyncMock(return_value=("a", {}, user_context)))
+    calls = []
+
+    def upstream(req: httpx.Request) -> httpx.Response:
+        calls.append(req.url.path)
+        return httpx.Response(200, json={"result": "found"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(upstream)) as client:
+        monkeypatch.setattr(transport.tool_service, "_http_client", client)
+        ctx = SimpleNamespace(meta=None, request=None)
+        requests = asyncio.Queue()
+
+        async def session_task() -> None:
+            while True:
+                scope, done = await requests.get()
+                if scope is None:
+                    return
+                ctx.request = SimpleNamespace(scope=scope)
+                try:
+                    result = await asyncio.wait_for(transport.call_tool("registered-search", {}), timeout=5)
+                    done.set_result(result)
+                except Exception as exc:
+                    done.set_exception(exc)
+
+        async def app(scope: dict[str, Any], receive: Any, send: Any) -> None:
+            done = asyncio.get_running_loop().create_future()
+            await requests.put((scope, done))
+            result = await done
+            if scope["path"] == "/servers/b/mcp":
+                assert result.is_error
+            else:
+                assert not getattr(result, "is_error", False), result
+
+        with patch.object(type(transport.mcp_app), "request_context", new_callable=PropertyMock, return_value=ctx):
+            task = asyncio.create_task(session_task(), context=Context())
+            try:
+                await request(app)
+                with sessions() as db:
+                    db.execute(text("UPDATE servers SET name = 'Renamed Clinic' WHERE id = 'a'"))
+                    db.commit()
+                await request(app)
+                monkeypatch.setattr(transport, "_get_request_context_or_default", AsyncMock(return_value=("b", {}, user_context)))
+                await request(app, "/servers/b/mcp")
+            finally:
+                await requests.put((None, None))
+                await task
+    roots = [span for span in tracing.get_finished_spans() if span.name != "tool.invoke"]
+    names = [span.name for span in roots]
+    assert "Clinic Alpha / search" in names
+    assert "Renamed Clinic / search" in names
+    assert "POST /servers/b/mcp" in names
+    assert "Clinic Beta / search" not in names
+    assert calls == ["/search", "/search"]
+    engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure, expected", [("missing", 404), ("database", 503)])
+async def test_traced_server_validation_fails_closed(tracing: Any, monkeypatch: pytest.MonkeyPatch, failure: str, expected: int) -> None:
+    """Enabling trace metadata preserves missing-server and database-error denials."""
+    # First-Party
+    from mcpgateway.transports import streamablehttp_transport as transport
+
+    messages = []
+
+    def unavailable() -> None:
+        raise RuntimeError("database unavailable")
+
+    if failure == "database":
+        monkeypatch.setattr(transport, "SessionLocal", unavailable)
+
+    async def app(scope: dict[str, Any], receive: Any, send: Any) -> None:
+        result = await transport.SessionManagerWrapper._validate_server_id(re.search(r"/servers/(?P<server_id>[^/]+)/mcp", scope["path"]), scope["path"], scope, receive, send)
+        assert result is transport._REJECT
+
+    async def receive() -> dict[str, Any]:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message: dict[str, Any]) -> None:
+        messages.append(message)
+
+    scope = {"type": "http", "method": "POST", "path": "/servers/missing/mcp", "headers": []}
+    await observability.OpenTelemetryRequestMiddleware(app)(scope, receive, send)
+    assert messages[0]["status"] == expected
+    assert tracing.get_finished_spans()[0].name == "POST /servers/missing/mcp"

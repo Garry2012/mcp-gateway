@@ -89,7 +89,7 @@ Gateway HTTP spans for authorized virtual-server tool calls use
 The gateway reads the current virtual-server name automatically. New servers need no naming configuration.
 Renaming a virtual server affects subsequent traces; stored traces retain their original names.
 
-The span includes `server.id`, `server.name`, `tool.name` (the registered invocation name), and
+The span includes `server.id`, `contextforge.virtual_server.name`, `tool.name` (the registered invocation name), and
 `tool.original_name`. The `tool.invoke` child span and its input/output attributes remain available.
 HTTP method, path, status, and trace relationships are preserved.
 
@@ -97,7 +97,8 @@ A request with different tools uses `<virtual server name> / multiple tools`.
 A request spanning different virtual servers uses `Multiple virtual servers / tools/call`.
 The identifying attributes on these aggregate spans describe the first call; inspect child spans for each tool.
 Requests without a resolved virtual-server tool retain their HTTP names, including discovery and authentication failures.
-Naming failures do not interrupt tool execution.
+Naming failures do not interrupt tool execution. The name comes from the existing server-validation query,
+so naming adds no database queries or connections.
 
 The gateway renames only its own HTTP span. If a voice agent supplies a parent trace,
 Jaeger can display that agent's root name for the complete trace; the gateway span still carries the readable name.
