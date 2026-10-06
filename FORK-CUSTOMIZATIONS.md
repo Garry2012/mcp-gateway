@@ -10,6 +10,11 @@ Last updated: **2026-10-06**.
 
 ## Syncing with upstream
 
+The 2026-10-06 integration targets upstream `faa31eaf5`. It retains the divergences below.
+The healthcare profile pins both MCP protocol modes to `legacy` to preserve deployed handshake behavior.
+Automatic negotiation fails discovery against an older sample server that omits modern cache metadata.
+Test modern negotiation separately before changing this profile.
+
 The `upstream` remote has pushing disabled, so `git push upstream` fails loudly.
 
 ```bash
@@ -104,6 +109,7 @@ Keep `OTEL_EMIT_LANGFUSE_ATTRIBUTES=true` for payload export until upstream adop
 The healthcare Azure profile uses a separate Jaeger app with bounded in-memory storage and a password-protected HTTPS dashboard.
 `deploy/jaeger/azure.template.yaml` keeps OTLP ingress private and references the dashboard hash through Key Vault.
 The app uses a dedicated identity, with registry pull access and permission to read only its dashboard hash.
+The healthcare profile sets token expiry and idle timeout to 480 minutes for eight-hour dashboard sessions.
 
 ### 4. CSP-compatible Observability dashboards
 

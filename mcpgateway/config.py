@@ -658,7 +658,7 @@ class Settings(BaseSettings):
     )
     proxy_user_header: str = Field(default="X-Authenticated-User", description="Header containing authenticated username from proxy")
     mcp_client_connect_mode: Literal["auto", "legacy"] = Field(
-        default="legacy",
+        default="auto",
         description=(
             "Upstream MCP connect mode: 'auto' negotiates modern protocol revisions (e.g. 2026-07-28) "
             "via server/discover with legacy initialize fallback; 'legacy' forces the pre-2026 "
@@ -666,7 +666,7 @@ class Settings(BaseSettings):
         ),
     )
     mcp_inbound_protocol_mode: Literal["auto", "legacy"] = Field(
-        default="legacy",
+        default="auto",
         description=(
             "Inbound MCP protocol mode: 'auto' accepts all supported protocol versions "
             "including 2026-07-28; 'legacy' accepts only handshake-era versions "
@@ -827,7 +827,9 @@ class Settings(BaseSettings):
     ssrf_dns_fail_closed: bool = Field(
         default=True,
         description=(
-            "Fail closed on DNS resolution errors. When true, URLs that cannot be resolved are rejected. When false, unresolvable hostnames are allowed through (hostname blocklist still applies)."
+            "Fail closed on DNS resolution errors. When true, URLs that cannot be resolved are rejected. When false, unresolvable hostnames are allowed through (hostname blocklist still applies). "
+            "Most outbound connection pinning call sites honor this setting: an unresolvable hostname is sent unpinned rather than rejected. The A2A protocol path (a2a_protocol.py) and the REST arm of "
+            "tool invocation (invoke_tool in tool_service.py) keep their own guard and reject an unresolvable hostname regardless of this setting."
         ),
     )
 
@@ -2786,6 +2788,26 @@ class Settings(BaseSettings):
         ge=1,
         le=16,
         description="Number of forked jq worker processes per gateway worker. Default: 2.",
+    )
+
+    # Schema validation sandbox: bounds a JSON Schema regex keyword in a killable worker.
+    regex_timeout_seconds: float = Field(
+        default=1.0,
+        gt=0,
+        le=60,
+        description="Wall-clock limit for one schema validation that carries a regex keyword. Exceeding it kills the worker and fails validation. Default: 1.0 seconds.",
+    )
+    regex_workers: int = Field(
+        default=2,
+        ge=1,
+        le=16,
+        description="Number of forked schema-validation worker processes per gateway worker. Default: 2.",
+    )
+    regex_max_subject_bytes: int = Field(
+        default=262144,
+        ge=1024,
+        le=10485760,
+        description="Maximum serialized instance size sent to the validation sandbox. A larger instance fails validation closed. Default: 256KB.",
     )
 
     # Content Security - Size Limits

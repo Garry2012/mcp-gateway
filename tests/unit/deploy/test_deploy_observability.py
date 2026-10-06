@@ -46,7 +46,7 @@ def run_deploy(tmp_path: Path, **settings: str) -> tuple[subprocess.CompletedPro
         "    print('https://gateway.example' if 'APP_DOMAIN' in query else 'gateway.example')\n"
     )
     fake_az.chmod(0o755)
-    env = {key: value for key, value in os.environ.items() if not key.startswith(("OTEL_", "LANGFUSE_", "DEPLOY_PROFILE"))}
+    env = {key: value for key, value in os.environ.items() if not key.startswith(("OTEL_", "LANGFUSE_", "DEPLOY_PROFILE", "MCP_CLIENT_CONNECT_MODE", "MCP_INBOUND_PROTOCOL_MODE"))}
     env.update(PATH=f"{tmp_path}:{env['PATH']}", AZ_CALLS=str(calls_path), IMAGE_TAG="test-image", APP_DOMAIN="https://gateway.example")
     env.update(settings)
     result = subprocess.run(["bash", str(ROOT / "deploy/scripts/03-deploy-gateway.sh")], env=env, text=True, capture_output=True, check=False)
@@ -89,6 +89,24 @@ def test_disabled_export_does_not_enable_network_export(tmp_path):
     assert result.returncode == 0, result.stderr
     update = next(call for call in calls if call[:2] == ["containerapp", "update"])
     assert "OTEL_ENABLE_OBSERVABILITY=false" in update
+
+
+def test_healthcare_deployment_preserves_protocol_and_session_behavior(tmp_path):
+    """Keep existing MCP handshakes and eight-hour sessions during upstream updates."""
+    result, calls = run_deploy(tmp_path, DEPLOY_PROFILE="profiles/healthcare-rg.env")
+    assert result.returncode == 0, result.stderr
+    update = next(call for call in calls if call[:2] == ["containerapp", "update"])
+    for setting in ("MCP_CLIENT_CONNECT_MODE=legacy", "MCP_INBOUND_PROTOCOL_MODE=legacy", "TOKEN_EXPIRY=480", "TOKEN_IDLE_TIMEOUT=480"):
+        assert setting in update
+
+
+def test_default_deployment_uses_upstream_protocol_defaults(tmp_path):
+    """Keep automatic negotiation available outside the healthcare profile."""
+    result, calls = run_deploy(tmp_path)
+    assert result.returncode == 0, result.stderr
+    update = next(call for call in calls if call[:2] == ["containerapp", "update"])
+    assert "MCP_CLIENT_CONNECT_MODE=auto" in update
+    assert "MCP_INBOUND_PROTOCOL_MODE=auto" in update
 
 
 @pytest.mark.parametrize("endpoint,protocol", [("", "grpc"), ("http://jaeger:4317", "invalid")])

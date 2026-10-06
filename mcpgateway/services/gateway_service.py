@@ -140,9 +140,11 @@ from mcpgateway.utils.pagination import unified_paginate
 from mcpgateway.utils.passthrough_headers import get_passthrough_headers
 from mcpgateway.utils.redis_client import get_redis_client
 from mcpgateway.utils.retry_manager import ResilientHttpClient
+from mcpgateway.utils.safe_jsonschema import warn_unprovable_patterns
 from mcpgateway.utils.services_auth import decode_auth, encode_auth
 from mcpgateway.utils.sqlalchemy_modifier import json_contains_tag_expr
 from mcpgateway.utils.ssl_context_cache import get_cached_ssl_context
+from mcpgateway.utils.ssrf_pinning import resolve_pinned_target, SniPinningTransport as _SniPinningTransport
 from mcpgateway.utils.subject_token import extract_subject_jwt
 from mcpgateway.utils.token_exchange_audit import audit_token_exchange
 from mcpgateway.utils.url_auth import apply_query_param_auth, sanitize_exception_message, sanitize_url_for_logging
@@ -1926,6 +1928,13 @@ class GatewayService(BaseService):  # pylint: disable=too-many-instance-attribut
                             visibility=visibility,
                         )
                     )
+                    # Warn after the tool is already in db_tools, not before: this call is
+                    # diagnostic-only and must never be able to remove a tool from federation.
+                    # It shares this try/except with the DbTool construction above, so if it
+                    # ran first, a future change that made it raise would silently drop the
+                    # tool here instead of merely failing to log.
+                    warn_unprovable_patterns(tool.input_schema, source=f"gateway:{preparation.normalized_url}/tool:{tool.name}")
+                    warn_unprovable_patterns(tool.output_schema, source=f"gateway:{preparation.normalized_url}/tool:{tool.name}")
                 except Exception as e:
                     logger.warning("Failed to process tool %s during gateway registration: %s", getattr(tool, "name", "unknown"), e)
                     continue
@@ -2494,12 +2503,22 @@ class GatewayService(BaseService):  # pylint: disable=too-many-instance-attribut
                 resources=resources,
                 prompts=prompts,
                 created_via="oauth",
+                stale_created_via_values=MCP_SYNC_CREATED_VIA_VALUES,
             )
+
+            skip_stale_cleanup = not tools and not resources and not prompts
+            if skip_stale_cleanup:
+                logger.warning("Empty catalog from auth_code gateway %s during OAuth fetch, preserving existing items", SecurityValidator.sanitize_log_message(gateway.name))
+
+            # Only prune entries that came from MCP discovery. API/UI and legacy
+            # entries can share the gateway but are not authoritative upstream data.
             reconcile_result = self._reconcile_gateway_catalog(
                 db,
                 gateway=gateway,
                 catalog_sync=catalog_sync,
                 log_context="gateway OAuth fetch",
+                stale_created_via_values=MCP_SYNC_CREATED_VIA_VALUES,
+                skip_stale_cleanup=skip_stale_cleanup,
             )
 
             # Update gateway capabilities and last_seen
@@ -5045,15 +5064,17 @@ class GatewayService(BaseService):  # pylint: disable=too-many-instance-attribut
                     httpx2.AsyncClient: Configured HTTPX async client
                 """
                 return httpx2.AsyncClient(
-                    verify=ssl_context if ssl_context else get_default_verify(),
                     follow_redirects=False,
                     headers=headers,
                     timeout=timeout if timeout else get_httpx2_timeout(),
                     auth=auth,
-                    limits=httpx2.Limits(
-                        max_connections=settings.httpx_max_connections,
-                        max_keepalive_connections=settings.httpx_max_keepalive_connections,
-                        keepalive_expiry=settings.httpx_keepalive_expiry,
+                    **pinned_target.client_kwargs(
+                        verify=ssl_context if ssl_context else get_default_verify(),
+                        limits=httpx2.Limits(
+                            max_connections=settings.httpx_max_connections,
+                            max_keepalive_connections=settings.httpx_max_keepalive_connections,
+                            keepalive_expiry=settings.httpx_keepalive_expiry,
+                        ),
                     ),
                 )
 
@@ -5149,10 +5170,25 @@ class GatewayService(BaseService):  # pylint: disable=too-many-instance-attribut
                         # checks self-heal without requiring a manual re-save.
                         headers = {k: SecurityValidator.sanitize_credential_value(v) for k, v in headers.items()}
 
+                    try:
+                        pinned_target = await resolve_pinned_target(gateway_base_url, "Gateway URL")
+                    except ValueError as pin_exc:
+                        if span:
+                            set_span_attribute(span, "health.status", "unhealthy")
+                            set_span_error(span, pin_exc)
+                        await self._handle_gateway_failure(gateway, error=pin_exc, auth_query_params=auth_query_params_decrypted)
+                        return
+
                     # Perform the GET and raise on 4xx/5xx
                     if (gateway_transport).lower() == "sse":
                         timeout = httpx.Timeout(settings.health_check_timeout)
-                        async with client.stream("GET", gateway_url, headers=headers, timeout=timeout) as response:
+                        async with client.stream(
+                            "GET",
+                            pinned_target.pin(gateway_url),
+                            headers=pinned_target.apply_headers(headers),
+                            timeout=timeout,
+                            extensions=pinned_target.extensions,
+                        ) as response:
                             # This will raise immediately if status is 4xx/5xx
                             response.raise_for_status()
                             if span:
@@ -6534,6 +6570,7 @@ class GatewayService(BaseService):  # pylint: disable=too-many-instance-attribut
         project_gateway_rename: bool = False,
         project_gateway_visibility: bool = False,
         original_gateway_visibility: str | None = None,
+        retained_tool_original_names: set[str] | None = None,
     ) -> None:
         """Reject federated tool names that collide in their persisted visibility scope.
 
@@ -6587,7 +6624,7 @@ class GatewayService(BaseService):  # pylint: disable=too-many-instance-attribut
 
         for candidate_name, visibility, team_id, owner_email in sorted(external_conflict_candidates, key=lambda item: item[0]):
             for existing in matching_tools:
-                if gateway_id is not None and str(existing.gateway_id) == str(gateway_id):
+                if gateway_id is not None and str(existing.gateway_id) == str(gateway_id) and (not retained_tool_original_names or existing.original_name not in retained_tool_original_names):
                     continue
                 if existing.name != candidate_name:
                     continue
@@ -6611,10 +6648,19 @@ class GatewayService(BaseService):  # pylint: disable=too-many-instance-attribut
         include_resources: bool = True,
         include_prompts: bool = True,
         project_gateway_rename: bool = False,
+        stale_created_via_values: Optional[Set[str]] = None,
     ) -> GatewayCatalogSyncResult:
         """Update/create fetched catalog rows inside caller transaction."""
         tools = [tool for tool in tools if tool is not None]
         existing_tools_by_original_name = {tool.original_name: tool for tool in gateway.tools}
+        fetched_tool_names = {tool.name for tool in tools}
+        # Match the caller's pruning policy: retained local aliases must still
+        # participate in namespace validation, unlike stale discovered tools.
+        retained_tool_original_names = {
+            tool.original_name
+            for tool in gateway.tools
+            if stale_created_via_values is not None and tool.original_name not in fetched_tool_names and getattr(tool, "created_via", None) not in stale_created_via_values
+        }
         self._validate_tool_name_collisions(
             db,
             gateway_name=gateway.name,
@@ -6626,6 +6672,7 @@ class GatewayService(BaseService):  # pylint: disable=too-many-instance-attribut
             existing_tools_by_original_name=existing_tools_by_original_name,
             update_visibility=update_visibility,
             project_gateway_rename=project_gateway_rename,
+            retained_tool_original_names=retained_tool_original_names,
         )
         return GatewayCatalogSyncResult(
             new_tool_names=[tool.name for tool in tools],
@@ -7433,9 +7480,44 @@ class GatewayService(BaseService):  # pylint: disable=too-many-instance-attribut
         if validation_warnings is None:
             validation_warnings = []
 
+        try:
+            pinned_target = await resolve_pinned_target(server_url, "Gateway URL")
+        except ValueError as exc:
+            raise GatewayConnectionError(f"Outbound gateway URL blocked by URL policy: {sanitize_url_for_logging(server_url)}") from exc
+
+        def get_httpx_client_factory(
+            headers: dict[str, str] | None = None,
+            timeout: httpx2.Timeout | None = None,
+            auth: httpx2.Auth | None = None,
+        ) -> httpx2.AsyncClient:
+            """Build the SDK's httpx client so it dials the address pinned at validation time.
+
+            Args:
+                headers: Optional headers for the client
+                timeout: Optional timeout for the client
+                auth: Optional auth for the client
+
+            Returns:
+                httpx2.AsyncClient: Configured HTTPX async client
+            """
+            return httpx2.AsyncClient(
+                follow_redirects=False,
+                headers=headers,
+                timeout=timeout if timeout else get_httpx2_timeout(),
+                auth=auth,
+                **pinned_target.client_kwargs(
+                    verify=get_default_verify(),
+                    limits=httpx2.Limits(
+                        max_connections=settings.httpx_max_connections,
+                        max_keepalive_connections=settings.httpx_max_keepalive_connections,
+                        keepalive_expiry=settings.httpx_keepalive_expiry,
+                    ),
+                ),
+            )
+
         # Client auto-initializes on entry; no manual initialize() needed.
         try:
-            async with mcp_proxy_client(url=server_url, headers=authentication, transport="sse") as client:
+            async with mcp_proxy_client(url=server_url, headers=authentication, httpx_client_factory=get_httpx_client_factory, transport="sse") as client:
                 # Read negotiated capabilities from the auto-initialized session
                 capabilities = client.server_capabilities.model_dump(by_alias=True, exclude_none=True)
                 logger.debug("Server capabilities: %s", capabilities)
@@ -7572,6 +7654,11 @@ class GatewayService(BaseService):  # pylint: disable=too-many-instance-attribut
         if authentication is None:
             authentication = {}
 
+        try:
+            pinned_target = await resolve_pinned_target(server_url, "Gateway URL")
+        except ValueError as exc:
+            raise GatewayConnectionError(f"Outbound gateway URL blocked by URL policy: {sanitize_url_for_logging(server_url)}") from exc
+
         def get_httpx_client_factory(
             headers: dict[str, str] | None = None,
             timeout: httpx2.Timeout | None = None,
@@ -7595,15 +7682,17 @@ class GatewayService(BaseService):  # pylint: disable=too-many-instance-attribut
                 ctx = None
 
             return httpx2.AsyncClient(
-                verify=ctx if ctx else get_default_verify(),
                 follow_redirects=False,
                 headers=headers,
                 timeout=timeout if timeout else get_httpx2_timeout(),
                 auth=auth,
-                limits=httpx2.Limits(
-                    max_connections=settings.httpx_max_connections,
-                    max_keepalive_connections=settings.httpx_max_keepalive_connections,
-                    keepalive_expiry=settings.httpx_keepalive_expiry,
+                **pinned_target.client_kwargs(
+                    verify=ctx if ctx else get_default_verify(),
+                    limits=httpx2.Limits(
+                        max_connections=settings.httpx_max_connections,
+                        max_keepalive_connections=settings.httpx_max_keepalive_connections,
+                        keepalive_expiry=settings.httpx_keepalive_expiry,
+                    ),
                 ),
             )
 
@@ -7735,6 +7824,11 @@ class GatewayService(BaseService):  # pylint: disable=too-many-instance-attribut
         if authentication is None:
             authentication = {}
 
+        try:
+            pinned_target = await resolve_pinned_target(server_url, "Gateway URL")
+        except ValueError as exc:
+            raise GatewayConnectionError(f"Outbound gateway URL blocked by URL policy: {sanitize_url_for_logging(server_url)}") from exc
+
         # Use authentication directly instead
         def get_httpx_client_factory(
             headers: dict[str, str] | None = None,
@@ -7759,15 +7853,17 @@ class GatewayService(BaseService):  # pylint: disable=too-many-instance-attribut
                 ctx = None
 
             return httpx2.AsyncClient(
-                verify=ctx if ctx else get_default_verify(),
                 follow_redirects=False,
                 headers=headers,
                 timeout=timeout if timeout else get_httpx2_timeout(),
                 auth=auth,
-                limits=httpx2.Limits(
-                    max_connections=settings.httpx_max_connections,
-                    max_keepalive_connections=settings.httpx_max_keepalive_connections,
-                    keepalive_expiry=settings.httpx_keepalive_expiry,
+                **pinned_target.client_kwargs(
+                    verify=ctx if ctx else get_default_verify(),
+                    limits=httpx2.Limits(
+                        max_connections=settings.httpx_max_connections,
+                        max_keepalive_connections=settings.httpx_max_keepalive_connections,
+                        keepalive_expiry=settings.httpx_keepalive_expiry,
+                    ),
                 ),
             )
 
@@ -7874,48 +7970,6 @@ _HANDSHAKE_PROTOCOL_COPY = (
     "The server responded but MCP negotiation failed. Confirm the URL points at an MCP endpoint (for example /mcp or /sse) and supports an MCP protocol this gateway understands."
 )
 _HANDSHAKE_INVALID_COPY = "The server's response is not valid MCP. The URL may point at a service that does not speak MCP."
-
-
-class _SniPinningTransport(httpx2.AsyncHTTPTransport):
-    """Dial a DNS-pinned address while keeping the request's hostname authority and TLS identity.
-
-    The MCP SDK compares the origin it connected to against the origin the
-    server advertises (``mcp.client.sse`` raises on a mismatch), so pinning has
-    to happen below the SDK: requests keep the validated hostname in their URL
-    and ``Host`` header, while every connection goes to the address resolved at
-    validation time and TLS is verified against that hostname. Built on httpx2
-    because the SDK 2.0 client transports run on that stack.
-    """
-
-    def __init__(self, sni_hostname: str, pinned_host: str, **kwargs: Any) -> None:
-        """Record the validated hostname and the address to dial in its place.
-
-        Args:
-            sni_hostname: Validated hostname whose certificate must match.
-            pinned_host: Address resolved at validation time, dialled instead of re-resolving.
-            **kwargs: Forwarded to ``httpx2.AsyncHTTPTransport``.
-        """
-        super().__init__(**kwargs)
-        self._sni_hostname = sni_hostname
-        self._pinned_host = pinned_host
-
-    async def handle_async_request(self, request: "httpx2.Request") -> "httpx2.Response":
-        """Send the request to the pinned address with TLS pinned to the validated hostname.
-
-        Args:
-            request: Outbound request addressed to the validated hostname.
-
-        Returns:
-            httpx2.Response: The upstream response.
-
-        Raises:
-            httpx2.UnsupportedProtocol: If the request targets any other host.
-        """
-        if request.url.raw_host.decode("ascii") != self._sni_hostname:
-            raise httpx2.UnsupportedProtocol(f"Gateway test refused a request to unvalidated host {request.url.host}", request=request)
-        request.extensions.setdefault("sni_hostname", self._sni_hostname)
-        request.url = request.url.copy_with(host=self._pinned_host)
-        return await super().handle_async_request(request)
 
 
 def _gateway_test_visibility_filters(db: Session, user: Any) -> List[Any]:
@@ -8643,13 +8697,25 @@ async def test_gateway_handshake(
     hostname_url = _gateway_test_endpoint_url(validated_base_url, path_suffix)
     full_url = _gateway_test_endpoint_url(target["pinned_base_url"], path_suffix)
 
+    exact_gateway_requested = request.gateway_id is not None
     try:
-        query = select(DbGateway).where(DbGateway.url.in_(_gateway_url_match_variants(validated_base_url)), DbGateway.enabled, or_(*_gateway_test_visibility_filters(db, user)))
+        if exact_gateway_requested:
+            query = select(DbGateway).where(DbGateway.id == request.gateway_id, DbGateway.enabled, or_(*_gateway_test_visibility_filters(db, user)))
+        else:
+            query = select(DbGateway).where(DbGateway.url.in_(_gateway_url_match_variants(validated_base_url)), DbGateway.enabled, or_(*_gateway_test_visibility_filters(db, user)))
         if team_id:
             query = query.where(DbGateway.team_id == team_id)
         gateway = db.execute(query).scalars().first()
     except Exception:
         gateway = None
+
+    if exact_gateway_requested and (gateway is None or gateway.url not in _gateway_url_match_variants(validated_base_url)):
+        return GatewayHandshakeResponse(
+            success=False,
+            latency_ms=_latency_ms(),
+            failure_class="transport",
+            error="The requested MCP gateway is unavailable for this handshake.",
+        )
 
     credential_source: Literal["stored", "form", "none"] = "none"
     headers: Dict[str, str] = {}
@@ -8658,10 +8724,11 @@ async def test_gateway_handshake(
     # A caller-supplied Host would aim the stored credentials at another virtual host on the
     # pinned address, and a differently-cased key would be sent as a second Host header.
     form_headers = {key: value for key, value in (request.headers or {}).items() if key.lower() != "host"}
+    candidate_only = request.credential_mode == "candidate_only"
     # A form-supplied Authorization header replaces stored credentials, so don't fail the
     # handshake on an unobtainable stored OAuth token the caller is not going to use.
     form_supplies_authorization = any(key.lower() == "authorization" for key in form_headers)
-    if gateway and gateway.auth_type == "oauth" and gateway.oauth_config and not form_supplies_authorization:
+    if not candidate_only and gateway and gateway.auth_type == "oauth" and gateway.oauth_config and not form_supplies_authorization:
         grant_type = gateway.oauth_config.get("grant_type", "client_credentials")
         try:
             if grant_type == "authorization_code":
@@ -8691,7 +8758,7 @@ async def test_gateway_handshake(
                 failure_class="auth",
                 error=f"Token retrieval failed for MCP server '{gateway.name}': {sanitize_exception_message(str(e))}. Check the OAuth client credentials and token URL.",
             )
-    elif gateway and gateway.auth_type in ("basic", "bearer", "authheaders") and gateway.auth_value:
+    elif not candidate_only and gateway and gateway.auth_type in ("basic", "bearer", "authheaders") and gateway.auth_value:
         if isinstance(gateway.auth_value, dict):
             headers.update(gateway.auth_value)
         elif isinstance(gateway.auth_value, str):
@@ -8709,12 +8776,14 @@ async def test_gateway_handshake(
             # instead of both being sent to the target.
             headers = {key: value for key, value in headers.items() if key.lower() not in overridden_stored_keys}
         headers.update(form_headers)
-        if "authorization" in form_header_keys or overridden_stored_keys:
+        if candidate_only or "authorization" in form_header_keys or overridden_stored_keys:
             credential_source = "form"
 
     handshake_verify: Any = get_default_verify()
     if gateway and gateway.ca_certificate and not validated_base_url.lower().startswith("http://"):
-        handshake_verify = get_cached_ssl_context(gateway.ca_certificate, client_cert=gateway.client_cert, client_key=gateway.client_key)
+        client_cert = None if candidate_only else gateway.client_cert
+        client_key = None if candidate_only else gateway.client_key
+        handshake_verify = get_cached_ssl_context(gateway.ca_certificate, client_cert=client_cert, client_key=client_key)
 
     def get_httpx_client_factory(
         headers: Optional[Dict[str, str]] = None,
@@ -8740,7 +8809,7 @@ async def test_gateway_handshake(
             auth=auth,
             transport=_SniPinningTransport(
                 sni_hostname=validated_hostname,
-                pinned_host=target["resolved_ip"],
+                pinned_hosts=[target["resolved_ip"]],
                 verify=handshake_verify,
                 limits=httpx2.Limits(
                     max_connections=settings.httpx_max_connections,
