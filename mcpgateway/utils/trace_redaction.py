@@ -294,6 +294,8 @@ def sanitize_trace_text(text: str) -> str:
             return json.dumps(redact_sensitive_fields(decoded), ensure_ascii=False, separators=(",", ":"))
         except json.JSONDecodeError:
             pass
+        except ValueError:
+            return '{"_error":"redaction_value_exceeded"}'
         except RecursionError:
             return '{"_error":"redaction_depth_exceeded"}'
 

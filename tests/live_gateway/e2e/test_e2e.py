@@ -837,69 +837,6 @@ def _get_gateway_tools(admin_api: APIRequestContext, gateway_id: str, probe: str
     return _assert_replica_response(response, read_index)
 
 
-# Keep synchronous Playwright cases after the async MCP protocol cases: its
-# session-scoped driver owns the thread's event loop until fixture teardown.
-def test_resource_namespacing_admin_rename(playwright: Playwright, jwt_token: str, resource_namespacing_upstreams: list[dict[str, str]], create_user: Any) -> None:
-    """The shipped Admin form edits a base and never prefixes it twice."""
-    separator = os.getenv("GATEWAY_TOOL_NAME_SEPARATOR", "-")
-    gateway_name = f"adminrename{uuid.uuid4().hex[:12]}"
-    peer = resource_namespacing_upstreams[0]
-    admin_email, _, created = create_user(is_admin=True, password="V7!mQ2@zR8#pL5$xT9%wN4&k")  # pragma: allowlist secret
-    assert created.status == 201, created.text()
-    headers = {"Authorization": f"Bearer {jwt_token}"}
-    with httpx.Client(base_url=BASE_URL, headers=headers, timeout=60) as http:
-        response = http.post("/gateways", json={"name": gateway_name, "url": peer["url"], "transport": "STREAMABLEHTTP", "visibility": "public"})
-        assert response.status_code in (200, 201, 202), response.text
-        gateway_id = response.json()["id"]
-        try:
-            deadline = time.monotonic() + 60
-            resource = None
-            while time.monotonic() < deadline:
-                response = http.get("/resources", params={"gateway_id": gateway_id, "limit": 100})
-                assert response.status_code == 200, response.text
-                resource = next((row for row in response.json() if row["uri"] == peer["uri"]), None)
-                if resource:
-                    break
-                time.sleep(0.5)
-            assert resource, "Gateway did not discover the Admin rename fixture"
-            expected = f"{gateway_name}{separator}shared{separator}report"
-            assert resource["name"] == expected
-            browser = playwright.chromium.launch()
-            try:
-                context = browser.new_context()
-                admin_token = make_test_jwt(admin_email, is_admin=True, teams=None, secret=JWT_SECRET)
-                context.add_cookies([{"name": "jwt_token", "value": admin_token, "url": f"{BASE_URL}/", "httpOnly": True, "sameSite": "Lax"}])
-                page = context.new_page()
-                for attempt in range(2):
-                    page.goto(f"{BASE_URL}/admin/?resources_q={gateway_name}#resources")
-                    assert page.url.split("?")[0].rstrip("/") == f"{BASE_URL}/admin", f"Admin authentication failed: {page.url}"
-                    row = page.locator("#resources-table-body tr").filter(has_text=expected)
-                    row.get_by_role("button", name="Actions", exact=True).click()
-                    with page.expect_response(lambda result: result.request.method == "GET" and result.url.endswith(f"/admin/resources/{resource['id']}")) as detail:
-                        page.get_by_role("menuitem", name="Edit", exact=True).click()
-                    field = page.locator("#edit-resource-custom-name")
-                    field.wait_for(state="visible")
-                    base = f"shared{separator}report" if attempt == 0 else f"weekly{separator}report"
-                    assert detail.value.json()["resource"]["customNameSlug"] == base
-                    expect(field).to_have_value(base)
-                    field.fill("Weekly Report" if attempt == 0 else f"weekly{separator}report")
-                    page.locator("#edit-resource-description").fill(f"Admin rename regression {attempt}")
-                    with page.expect_navigation(wait_until="domcontentloaded"):
-                        with page.expect_response(lambda result: result.request.method == "POST" and result.url.endswith(f"/admin/resources/{resource['id']}/edit")) as saved:
-                            page.locator("#edit-resource-form").get_by_role("button", name="Save Changes").click()
-                    assert saved.value.status == 200
-                    response = http.get("/resources", params={"gateway_id": gateway_id, "limit": 100})
-                    updated = next(row for row in response.json() if row["id"] == resource["id"])
-                    expected = f"{gateway_name}{separator}weekly{separator}report"
-                    assert updated["name"] == expected
-                    assert updated["customNameSlug"] == f"weekly{separator}report"
-                    assert updated["originalName"] == "Shared Report"
-            finally:
-                browser.close()
-        finally:
-            http.delete(f"/gateways/{gateway_id}")
-
-
 # ---------------------------------------------------------------------------
 # RBAC helper: resolve role name -> UUID
 # ---------------------------------------------------------------------------
@@ -1833,6 +1770,69 @@ def _mcp_tool_call(access_token: str, tool_name: str, arguments: dict[str, Any] 
 
 def _mcp_initialize_only(access_token: str, server_url: str = BASE_URL) -> bool:
     return _run_async(_async_mcp_initialize(access_token, server_url))
+
+
+# Keep synchronous Playwright cases after the async MCP protocol cases: its
+# session-scoped driver owns the thread's event loop until fixture teardown.
+def test_resource_namespacing_admin_rename(playwright: Playwright, jwt_token: str, resource_namespacing_upstreams: list[dict[str, str]], create_user: Any) -> None:
+    """The shipped Admin form edits a base and never prefixes it twice."""
+    separator = os.getenv("GATEWAY_TOOL_NAME_SEPARATOR", "-")
+    gateway_name = f"adminrename{uuid.uuid4().hex[:12]}"
+    peer = resource_namespacing_upstreams[0]
+    admin_email, _, created = create_user(is_admin=True, password="V7!mQ2@zR8#pL5$xT9%wN4&k")  # pragma: allowlist secret
+    assert created.status == 201, created.text()
+    headers = {"Authorization": f"Bearer {jwt_token}"}
+    with httpx.Client(base_url=BASE_URL, headers=headers, timeout=60) as http:
+        response = http.post("/gateways", json={"name": gateway_name, "url": peer["url"], "transport": "STREAMABLEHTTP", "visibility": "public"})
+        assert response.status_code in (200, 201, 202), response.text
+        gateway_id = response.json()["id"]
+        try:
+            deadline = time.monotonic() + 60
+            resource = None
+            while time.monotonic() < deadline:
+                response = http.get("/resources", params={"gateway_id": gateway_id, "limit": 100})
+                assert response.status_code == 200, response.text
+                resource = next((row for row in response.json() if row["uri"] == peer["uri"]), None)
+                if resource:
+                    break
+                time.sleep(0.5)
+            assert resource, "Gateway did not discover the Admin rename fixture"
+            expected = f"{gateway_name}{separator}shared{separator}report"
+            assert resource["name"] == expected
+            browser = playwright.chromium.launch()
+            try:
+                context = browser.new_context()
+                admin_token = make_test_jwt(admin_email, is_admin=True, teams=None, secret=JWT_SECRET)
+                context.add_cookies([{"name": "jwt_token", "value": admin_token, "url": f"{BASE_URL}/", "httpOnly": True, "sameSite": "Lax"}])
+                page = context.new_page()
+                for attempt in range(2):
+                    page.goto(f"{BASE_URL}/admin/?resources_q={gateway_name}#resources")
+                    assert page.url.split("?")[0].rstrip("/") == f"{BASE_URL}/admin", f"Admin authentication failed: {page.url}"
+                    row = page.locator("#resources-table-body tr").filter(has_text=expected)
+                    row.get_by_role("button", name="Actions", exact=True).click()
+                    with page.expect_response(lambda result: result.request.method == "GET" and result.url.endswith(f"/admin/resources/{resource['id']}")) as detail:
+                        page.get_by_role("menuitem", name="Edit", exact=True).click()
+                    field = page.locator("#edit-resource-custom-name")
+                    field.wait_for(state="visible")
+                    base = f"shared{separator}report" if attempt == 0 else f"weekly{separator}report"
+                    assert detail.value.json()["resource"]["customNameSlug"] == base
+                    expect(field).to_have_value(base)
+                    field.fill("Weekly Report" if attempt == 0 else f"weekly{separator}report")
+                    page.locator("#edit-resource-description").fill(f"Admin rename regression {attempt}")
+                    with page.expect_navigation(wait_until="domcontentloaded"):
+                        with page.expect_response(lambda result: result.request.method == "POST" and result.url.endswith(f"/admin/resources/{resource['id']}/edit")) as saved:
+                            page.locator("#edit-resource-form").get_by_role("button", name="Save Changes").click()
+                    assert saved.value.status == 200
+                    response = http.get("/resources", params={"gateway_id": gateway_id, "limit": 100})
+                    updated = next(row for row in response.json() if row["id"] == resource["id"])
+                    expected = f"{gateway_name}{separator}weekly{separator}report"
+                    assert updated["name"] == expected
+                    assert updated["customNameSlug"] == f"weekly{separator}report"
+                    assert updated["originalName"] == "Shared Report"
+            finally:
+                browser.close()
+        finally:
+            http.delete(f"/gateways/{gateway_id}")
 
 
 # ---------------------------------------------------------------------------
@@ -4297,6 +4297,7 @@ class TestGatewayLifecycle:
                     with suppress(Exception):
                         admin_api.delete(f"/gateways/{gateway_id}")
 
+
 # ---------------------------------------------------------------------------
 # Schema ReDoS: a hostile input-schema pattern must not stall the gateway
 # ---------------------------------------------------------------------------
@@ -4390,7 +4391,7 @@ class TestSchemaRegexReDoS:
             # adds more round trips to this path.
             assert elapsed < 3 * _CLIENT_TIMEOUT, f"hostile call took {elapsed:.1f}s across session setup/initialize/call_tool; expected under {3 * _CLIENT_TIMEOUT:.1f}s"
             print(f"    -> hostile call rejected in {elapsed:.2f}s (bound: {3 * _CLIENT_TIMEOUT:.1f}s)")
-            assert result.isError, f"expected the hostile argument to be rejected, got: {result}"
+            assert result.is_error, f"expected the hostile argument to be rejected, got: {result}"
             text = result.content[0].text if result.content else ""
             assert _REDOS_BOUNDED_PHRASE in text, f"the timeout must be what stopped it; got {text!r}"
 

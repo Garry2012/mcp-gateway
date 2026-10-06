@@ -71,7 +71,8 @@ imports MCP 1.x APIs and fails at import time. Reported as
 `MCPClient` in `mcpgateway/services/mcp_client_chat_service.py` now loads tools through
 `langchain.mcp.MCPAdapter` with FastMCP transports (`StreamableHttpTransport`, `SSETransport`,
 `StdioTransport`). The `llmchat` extra replaces `langchain-mcp-adapters` with `langchain[mcp]` and
-raises the `langchain-core` and `langgraph` caps. `langgraph-sdk` caps `websockets<17`, so the lock
+raises the `langchain-core` cap. It pins the directly imported FastMCP client to the tested version.
+`langgraph-sdk` caps `websockets<17`, so the lock
 resolves `websockets` 16.x. The import guard keeps the original `ImportError` in the error message.
 
 LLM Chat runs a LangGraph agent without a checkpointer, so it cannot pause for user input. The
@@ -140,3 +141,22 @@ This changes captured telemetry only; the tool response remains unchanged.
 
 **Merge guidance:** retain the JSON text redaction tests in `tests/unit/mcpgateway/utils/test_trace_redaction.py`
 until upstream provides equivalent protection. The Jaeger integration test exposed this gap using synthetic secrets.
+JSON text that exceeds decoder depth or integer limits is replaced with an error marker before export.
+
+### 6. Readable virtual-server tool traces
+
+MCP request traces show the virtual server name and original tool name for every virtual server.
+The transport reuses its authorization lookup for the server name and passes request trace context into tool invocation.
+Trace naming adds no separate database lookup and occurs after tool authorization.
+
+**Merge guidance:** preserve `ToolTraceContext`, `record_tool_trace_name`, and their transport integration until upstream provides equivalent behavior.
+Run `tests/unit/mcpgateway/test_tool_trace_names.py` and `tests/live_gateway/test_jaeger_trace_names.py`.
+
+### 7. Deferred dashboard loading and partial errors
+
+Admin panels fetch content when visible instead of loading every panel at startup.
+The shared `partialLoadErrors.js` handler replaces failed loading placeholders with actionable errors.
+Server edit requests remain serialized to avoid connection bursts.
+
+**Merge guidance:** preserve lazy loading and the shared partial-error handler during template updates.
+Run `tests/unit/js/partialLoadErrors.test.js`, the CSP tests, and the live Jaeger dashboard-concurrency check.

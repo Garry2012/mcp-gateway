@@ -224,6 +224,7 @@ postgres = [
 ]
 
 llmchat = [
+    "fastmcp==4.0.10",
     "langchain[mcp]<=1.4.2", # langchain.mcp replaces langchain-mcp-adapters, which does not support MCP SDK 2.x
     "langchain-core<=1.6.4",
     "langchain-ollama>=1.1.0",

@@ -2886,6 +2886,7 @@ grpc = [
     { name = "protobuf" },
 ]
 llmchat = [
+    { name = "fastmcp" },
     { name = "langchain", extra = ["mcp"] },
     { name = "langchain-core" },
     { name = "langchain-ollama" },
@@ -3029,6 +3030,7 @@ requires-dist = [
     { name = "cpex-url-reputation", marker = "extra == 'plugins'", specifier = ">=0.3.9" },
     { name = "cryptography", specifier = ">=50.0.0" },
     { name = "fastapi", specifier = ">=0.140.0" },
+    { name = "fastmcp", marker = "extra == 'llmchat'", specifier = "==4.0.10" },
     { name = "filelock", specifier = ">=3.32.0,<3.33.0" },
     { name = "grpcio", marker = "extra == 'grpc'", specifier = ">=1.83.0" },
     { name = "grpcio-reflection", marker = "extra == 'grpc'", specifier = ">=1.83.0" },
