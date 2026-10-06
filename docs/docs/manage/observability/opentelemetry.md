@@ -82,6 +82,27 @@ See the [Langfuse Integration Guide](langfuse.md) for setup instructions.
 
 **Transport**: Supports both native Jaeger protocol and OTLP
 
+#### Virtual-server tool trace names
+
+Gateway HTTP spans for authorized virtual-server tool calls use
+`<virtual server name> / <original tool name>`, for example `Clinic Alpha / get_availability`.
+The gateway reads the current virtual-server name automatically. New servers need no naming configuration.
+Renaming a virtual server affects subsequent traces; stored traces retain their original names.
+
+The span includes `server.id`, `server.name`, `tool.name` (the registered invocation name), and
+`tool.original_name`. The `tool.invoke` child span and its input/output attributes remain available.
+HTTP method, path, status, and trace relationships are preserved.
+
+A request with different tools uses `<virtual server name> / multiple tools`.
+A request spanning different virtual servers uses `Multiple virtual servers / tools/call`.
+The identifying attributes on these aggregate spans describe the first call; inspect child spans for each tool.
+Requests without a resolved virtual-server tool retain their HTTP names, including discovery and authentication failures.
+Naming failures do not interrupt tool execution.
+
+The gateway renames only its own HTTP span. If a voice agent supplies a parent trace,
+Jaeger can display that agent's root name for the complete trace; the gateway span still carries the readable name.
+This naming applies to the Python gateway execution path. A separate Rust execution path does not use this hook.
+
 ### Grafana Tempo - Cost-Efficient High-Scale Tracing
 
 **Best for**: High-volume environments, cost-conscious deployments, and Grafana ecosystem users

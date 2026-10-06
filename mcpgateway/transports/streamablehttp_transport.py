@@ -73,7 +73,7 @@ from mcpgateway.db import Gateway as DbGateway
 from mcpgateway.db import Server as DbServer
 from mcpgateway.db import SessionLocal
 from mcpgateway.middleware.rbac import _ACCESS_DENIED_MSG
-from mcpgateway.observability import create_span, inject_trace_context_headers, set_span_attribute
+from mcpgateway.observability import create_span, get_tool_trace_context, inject_trace_context_headers, set_span_attribute
 from mcpgateway.services.completion_service import CompletionService
 from mcpgateway.services.http_client_service import get_http_client, get_http_limits
 from mcpgateway.services.logging_service import LoggingService
@@ -2161,6 +2161,11 @@ async def call_tool(
 
     # Cross-hook plugin state sharing on /mcp (issue #3879).
     plugin_global_context, plugin_context_table = _get_plugin_contexts_or_none()
+    try:
+        trace_scope = getattr(getattr(mcp_app.request_context, "request", None), "scope", None)
+    except LookupError:
+        trace_scope = None
+    request_trace = get_tool_trace_context(trace_scope if isinstance(trace_scope, dict) else None)
 
     try:
         async with get_db() as db:
@@ -2176,6 +2181,7 @@ async def call_tool(
                 server_id=server_id,
                 meta_data=meta_data,
                 require_model_visible=True,
+                request_trace=request_trace,
                 progress_callback=_relay_progress,
                 allow_input_required=mrtr_allowed,
                 input_responses=inbound_input_responses,

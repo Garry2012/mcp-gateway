@@ -75,7 +75,7 @@ from mcpgateway.db import Gateway as DbGateway
 from mcpgateway.db import get_for_update, server_tool_association
 from mcpgateway.db import Tool as DbTool
 from mcpgateway.db import ToolMetric, ToolMetricsHourly
-from mcpgateway.observability import create_child_span, create_span, inject_trace_context_headers, otel_context_active, set_span_attribute, set_span_error
+from mcpgateway.observability import create_child_span, create_span, inject_trace_context_headers, otel_context_active, record_tool_trace_name, set_span_attribute, set_span_error, ToolTraceContext
 from mcpgateway.plugins.control_telemetry import ControlTelemetryAccumulator, record_control_telemetry
 from mcpgateway.plugins.utils import build_request_extensions, record_plugin_metrics
 from mcpgateway.schemas import AuthenticationValues, ToolCreate, ToolMetrics, ToolPreviewResponse, ToolPreviewTarget, ToolPreviewWarning, ToolRead, ToolUpdate, TopPerformer
@@ -5639,6 +5639,7 @@ class ToolService(BaseService):
         require_model_visible: bool = False,
         retry_attempt: int = 0,
         *,
+        request_trace: Optional[ToolTraceContext] = None,
         progress_callback: Optional[Any] = None,
         allow_input_required: bool = False,
         input_responses: Optional[Any] = None,
@@ -5672,6 +5673,7 @@ class ToolService(BaseService):
             require_model_visible: When True, deny execution unless the resolved tool is model-visible.
             retry_attempt: Zero-based retry counter; 0 = original call.  Incremented by the retry
                 loop and compared against ``settings.max_tool_retries``.
+            request_trace: Gateway request trace context from the MCP transport.
             progress_callback: Optional async callable (progress, total, message) invoked for
                 each progress update the upstream server emits during the call.
             allow_input_required: When True, an upstream InputRequiredResult (2026 MRTR)
@@ -5740,6 +5742,7 @@ class ToolService(BaseService):
         # ═══════════════════════════════════════════════════════════════════════════
         tool_id = tool_payload.get("id") or (str(tool.id) if tool else "")
         tool_name_original = tool_payload.get("original_name") or tool_payload.get("name") or name
+        record_tool_trace_name(server_id, name, tool_name_original, request_trace)
         tool_name_computed = tool_payload.get("name") or name
         tool_url = tool_payload.get("url")
         tool_integration_type = tool_payload.get("integration_type")
