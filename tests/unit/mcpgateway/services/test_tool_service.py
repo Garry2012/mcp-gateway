@@ -9,6 +9,7 @@ Tests for tool service implementation.
 # Standard
 import asyncio
 import base64
+from collections.abc import Iterator
 from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timezone
 import json
@@ -196,6 +197,16 @@ def reset_tool_lookup_cache():
 
 
 @pytest.fixture
+def isolated_validator_cache() -> Iterator[None]:
+    """Clear cached validator classes before and after tests that replace validators."""
+    _get_validator_class_and_check.cache_clear()
+    try:
+        yield
+    finally:
+        _get_validator_class_and_check.cache_clear()
+
+
+@pytest.fixture
 def mock_global_config_obj():
     """Create a mock GlobalConfig object for tests.
 
@@ -238,6 +249,7 @@ def setup_db_execute_mock(test_db, mock_tool, mock_global_config):
 class TestToolServiceHelpersExtended:
     """Tests for helper utilities in tool_service."""
 
+    @pytest.mark.usefixtures("isolated_validator_cache")
     def test_get_validator_class_and_check_fallback_success(self, monkeypatch):
         """Fallback validators should be used when primary schema check fails."""
         schema_json = orjson.dumps({"type": "object"}).decode()
@@ -257,7 +269,6 @@ class TestToolServiceHelpersExtended:
             def check_schema(_schema):
                 return None
 
-        _get_validator_class_and_check.cache_clear()
         monkeypatch.setattr("mcpgateway.services.tool_service.validators.validator_for", lambda _schema: BaseValidator)
         monkeypatch.setattr("mcpgateway.services.tool_service.Draft7Validator", FallbackFail)
         monkeypatch.setattr("mcpgateway.services.tool_service.Draft6Validator", FallbackPass)
@@ -266,6 +277,7 @@ class TestToolServiceHelpersExtended:
         validator_cls, _schema = _get_validator_class_and_check(schema_json)
         assert validator_cls is FallbackPass
 
+    @pytest.mark.usefixtures("isolated_validator_cache")
     def test_get_validator_class_and_check_all_fallbacks_fail(self, monkeypatch):
         """When all fallbacks fail, the primary validator is used."""
         schema_json = orjson.dumps({"type": "object"}).decode()
@@ -283,7 +295,6 @@ class TestToolServiceHelpersExtended:
             def check_schema(_schema):
                 raise jsonschema.exceptions.SchemaError("boom")
 
-        _get_validator_class_and_check.cache_clear()
         monkeypatch.setattr("mcpgateway.services.tool_service.validators.validator_for", lambda _schema: BaseValidator)
         monkeypatch.setattr("mcpgateway.services.tool_service.Draft7Validator", FallbackFail)
         monkeypatch.setattr("mcpgateway.services.tool_service.Draft6Validator", FallbackFail)
@@ -8873,12 +8884,11 @@ class TestToolTimeoutsAndRetries:
 
 
 class TestToolServiceHelpers:
+    @pytest.mark.usefixtures("isolated_validator_cache")
     def test_get_validator_class_and_check_fallback_draft7(self, monkeypatch):
         """Ensure schema fallback uses Draft7 when auto-detect fails."""
         # First-Party
         from mcpgateway.services import tool_service
-
-        tool_service._get_validator_class_and_check.cache_clear()
 
         class DummyValidator:
             @staticmethod
