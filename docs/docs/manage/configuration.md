@@ -507,6 +507,10 @@ These settings control how the gateway authenticates inbound MCP client connecti
 
 `MCP_CLIENT_CONNECT_MODE` controls how the gateway, acting as an MCP **client**, opens **outbound** connections to upstream MCP servers. It applies to both upstream connection paths: the pooled session registry and the per-call (ad-hoc) proxy connections.
 
+LLM Chat also uses this setting for its MCP connections, including connections to gateway virtual servers and external MCP servers.
+With `legacy`, LLM Chat starts with `initialize` and skips the modern discovery probe.
+Use `auto` when LLM Chat must connect to a modern-only MCP server.
+
 | Setting                        | Description                                      | Default               | Options |
 | ------------------------------ | ------------------------------------------------ | --------------------- | ------- |
 | `MCP_CLIENT_CONNECT_MODE`     | Protocol negotiation for outbound connections to upstream MCP servers | `auto`                | `auto`, `legacy` |

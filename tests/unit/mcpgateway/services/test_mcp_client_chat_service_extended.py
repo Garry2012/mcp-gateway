@@ -704,8 +704,10 @@ async def test_llmchat_declines_elicitation_instead_of_interrupting():
 
 @pytest.mark.asyncio
 @pytest.mark.skipif(not _llmchat_extra_installed(), reason="llmchat extra not installed")
-async def test_mcpclient_connect_builds_client_with_decline_handler(monkeypatch):
-    """connect() hands MCPAdapter a FastMCP client that declines elicitation."""
+@pytest.mark.parametrize("mode", ["auto", "legacy"])
+@pytest.mark.parametrize("transport", ["streamable_http", "sse", "stdio"])
+async def test_mcpclient_connect_builds_client_with_decline_handler(monkeypatch, mode, transport):
+    """Use the configured connection mode and retain the elicitation decline handler."""
     captured = {}
 
     def _client(transport, **kwargs):
@@ -714,9 +716,29 @@ async def test_mcpclient_connect_builds_client_with_decline_handler(monkeypatch)
 
     monkeypatch.setattr(svc, "FastMCPClient", _client)
     monkeypatch.setattr(svc, "MCPAdapter", MagicMock())
-    client = svc.MCPClient(svc.MCPServerConfig(url="https://srv/mcp", transport="streamable_http"))
+    monkeypatch.setattr(svc.settings, "mcp_client_connect_mode", mode)
+    monkeypatch.setattr(svc.settings, "mcpgateway_stdio_transport_enabled", True)
+    client = svc.MCPClient(svc.MCPServerConfig(url="https://srv/mcp", transport=transport, command="python"))
     await client.connect()
     assert captured["elicitation_handler"] is svc._decline_elicitation
+    assert captured["mode"] == mode
+    assert isinstance(captured["transport"], {"streamable_http": svc.StreamableHttpTransport, "sse": svc.SSETransport, "stdio": svc.StdioTransport}[transport])
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not _llmchat_extra_installed(), reason="llmchat extra not installed")
+@pytest.mark.parametrize("mode", ["auto", "legacy"])
+async def test_mcpclient_connect_configures_real_fastmcp_mode(monkeypatch, mode):
+    """Verify the installed FastMCP client accepts the configured mode without network access."""
+    adapter = MagicMock()
+    monkeypatch.setattr(svc, "MCPAdapter", adapter)
+    monkeypatch.setattr(svc.settings, "mcp_client_connect_mode", mode)
+    client = svc.MCPClient(svc.MCPServerConfig(url="https://srv/mcp", transport="streamable_http"))
+    await client.connect()
+    real_client = adapter.call_args.args[0]
+    assert isinstance(real_client, svc.FastMCPClient)
+    assert real_client.mode == mode
+    await client.disconnect()
 
 
 @pytest.mark.asyncio
