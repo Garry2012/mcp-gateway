@@ -2230,7 +2230,7 @@ class MCPClient:
             if not MCPAdapter:
                 logger.error("Some dependencies are missing. Install those with: pip install '.[llmchat]'")
 
-            self._client = MCPAdapter(FastMCPClient(self._build_transport(), elicitation_handler=_decline_elicitation))
+            self._client = MCPAdapter(FastMCPClient(self._build_transport(), elicitation_handler=_decline_elicitation, mode=settings.mcp_client_connect_mode))
             self._connected = True
             logger.info("Successfully connected to MCP server")
 

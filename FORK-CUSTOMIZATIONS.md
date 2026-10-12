@@ -79,8 +79,13 @@ LLM Chat runs a LangGraph agent without a checkpointer, so it cannot pause for u
 FastMCP client therefore declines MCP elicitation requests (`_decline_elicitation`); without it,
 `MCPAdapter` turns them into a LangGraph interrupt and the chat returns an empty answer.
 
+LLM Chat uses `MCP_CLIENT_CONNECT_MODE` for its FastMCP connections, including external targets.
+The healthcare profile sets `legacy`, so chat skips the rejected modern discovery probe.
+Other deployments retain the setting's `auto` default.
+
 **Merge guidance:** when upstream fixes #7090, take upstream's version and drop this divergence.
 Keep `test_llmchat_dependencies_import_against_installed_mcp_sdk`: it imports the real chat stack.
+Keep `mode=settings.mcp_client_connect_mode` unless upstream preserves this behavior.
 
 ### 2. Azure deployment
 
