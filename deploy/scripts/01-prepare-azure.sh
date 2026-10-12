@@ -26,6 +26,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/00-config.sh"
 PSYCOPG_SPEC="psycopg[binary]==3.2.10"
 PG_APP_CONNECTION_LIMIT="${PG_APP_CONNECTION_LIMIT:-$(( GUNICORN_WORKERS * (DB_POOL_SIZE + DB_MAX_OVERFLOW) + 3 ))}"
 GATEWAY_SECRETS=("$KV_JWT_SECRET" "$KV_ENC_SECRET" "$KV_DB_URL" "$KV_ADMIN_PASSWORD" "$KV_DEFAULT_USER_PASSWORD")
+[ -n "${KV_OTEL_HEADERS:-}" ] && GATEWAY_SECRETS+=("$KV_OTEL_HEADERS")
 
 random_secret() { python3 -c "import secrets;print(secrets.token_urlsafe($1))"; }
 random_alnum() { python3 -c "import secrets,string; a=string.ascii_letters+string.digits; print('Mg'+''.join(secrets.choice(a) for _ in range($1)))"; }
