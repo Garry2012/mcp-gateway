@@ -28,7 +28,9 @@ az acr repository show-tags -n "$ACR_NAME" --repository "$IMAGE_REPO" -o tsv 2>/
   | grep -qx "$IMAGE_TAG" || die "image $IMAGE not in registry - run ./02-build-images.sh first"
 ok "image $IMAGE"
 
-for s in "$KV_JWT_SECRET" "$KV_ENC_SECRET" "$KV_DB_URL" "$KV_ADMIN_PASSWORD" "$KV_DEFAULT_USER_PASSWORD"; do
+REQUIRED_SECRETS=("$KV_JWT_SECRET" "$KV_ENC_SECRET" "$KV_DB_URL" "$KV_ADMIN_PASSWORD" "$KV_DEFAULT_USER_PASSWORD")
+[ -n "${KV_OTEL_HEADERS:-}" ] && REQUIRED_SECRETS+=("$KV_OTEL_HEADERS")
+for s in "${REQUIRED_SECRETS[@]}"; do
   az keyvault secret show --vault-name "$KEYVAULT_NAME" --name "$s" -o none 2>/dev/null \
     || die "Key Vault secret '$s' missing - run ./01-prepare-azure.sh first"
 done
@@ -41,6 +43,7 @@ SECRET_REFS=(
   "admin-password=keyvaultref:${KV_URI}/${KV_ADMIN_PASSWORD},identityref:${UAMI_ID}"
   "default-user-password=keyvaultref:${KV_URI}/${KV_DEFAULT_USER_PASSWORD},identityref:${UAMI_ID}"
 )
+[ -n "${KV_OTEL_HEADERS:-}" ] && SECRET_REFS+=("otel-headers=keyvaultref:${KV_URI}/${KV_OTEL_HEADERS},identityref:${UAMI_ID}")
 
 # APP_DOMAIN must be the gateway's own public URL. On a first deploy the FQDN
 # does not exist yet, so it is set on the follow-up update below.
@@ -89,6 +92,7 @@ ENV_VARS=(
 [ -n "$RESOLVED_APP_DOMAIN" ] && ENV_VARS+=("APP_DOMAIN=${RESOLVED_APP_DOMAIN}")
 [ -n "$DCR_ALLOWED_ISSUERS" ] && ENV_VARS+=("DCR_ALLOWED_ISSUERS=${DCR_ALLOWED_ISSUERS}")
 [ -n "${OTEL_REDACT_FIELDS:-}" ] && ENV_VARS+=("OTEL_REDACT_FIELDS=${OTEL_REDACT_FIELDS}")
+[ -n "${KV_OTEL_HEADERS:-}" ] && ENV_VARS+=("OTEL_EXPORTER_OTLP_HEADERS=secretref:otel-headers")
 
 if az containerapp show -n "$APP_NAME_AZ" -g "$RESOURCE_GROUP" -o none 2>/dev/null; then
   log "Updating existing app: $APP_NAME_AZ"

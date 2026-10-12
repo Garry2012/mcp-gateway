@@ -192,8 +192,21 @@ Export remains disabled unless `OTEL_ENABLE_OBSERVABILITY=true` is supplied.
 
 ### Healthcare Azure deployment
 
-The `healthcare-rg` profile enables export to `http://mcp-gateway-jaeger:4317`.
-The receiver accepts traffic only from the existing Container Apps environment.
+The `healthcare-rg` profile currently exports traces to Langfuse Cloud in Japan for an interface trial.
+The endpoint is `https://jp.cloud.langfuse.com/api/public/otel/v1/traces`, using HTTP with TLS verification.
+`KV_OTEL_HEADERS` names the Key Vault secret containing the OTLP authorization and `x-langfuse-ingestion-version=4` headers.
+Provision the secret before deployment. The preparation script grants the gateway identity access to that secret only.
+The deployment script uses a Key Vault reference; it never reads the header value.
+
+The trial uses the gateway's default credential masking, with no additional patient-field masking.
+Tool input and output capture remains enabled, including test names, phone numbers, summary text, and knowledge queries.
+Tool requests and responses remain unchanged. LLM Chat message and response capture remains disabled.
+Remove any previous `OTEL_REDACT_FIELDS` override from the container app to restore the defaults.
+
+Jaeger remains deployed for rollback. Restore endpoint `http://mcp-gateway-jaeger:4317`, protocol `grpc`, and `OTEL_EXPORTER_OTLP_INSECURE=true` to resume export.
+Remove `KV_OTEL_HEADERS` from the profile and `OTEL_EXPORTER_OTLP_HEADERS` from the container app when switching back.
+
+The Jaeger receiver accepts traffic only from the existing Container Apps environment.
 The `mcp-gateway-jaeger` app contains Jaeger and a password-protected dashboard proxy.
 Each container receives 0.25 CPU and 0.5 GiB. The app runs exactly one replica.
 
