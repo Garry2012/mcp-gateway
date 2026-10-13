@@ -9,14 +9,15 @@ Supports any OTLP-compatible backend (Jaeger, Zipkin, Tempo, Phoenix, etc.).
 
 # Standard
 import base64
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass
 from importlib import import_module as _im
 import inspect
 import logging
 import os
-from typing import Any, Callable, cast, Dict, Mapping, Optional
+import re
+from typing import Any, Callable, cast, Dict, Iterator, Mapping, Optional
 from urllib.parse import urlparse
 
 # Third-Party - Try to import OpenTelemetry core components - make them truly optional
@@ -27,7 +28,7 @@ try:
     from opentelemetry.propagate import extract as otel_extract
     from opentelemetry.propagate import inject as otel_inject
     from opentelemetry.sdk.resources import Resource
-    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace import SpanProcessor, TracerProvider
     from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter, SimpleSpanProcessor
     from opentelemetry.trace import SpanKind, Status, StatusCode
 
@@ -73,6 +74,7 @@ except ImportError:
 
     Resource = cast(Any, _ResourceShim)
     TracerProvider = None
+    SpanProcessor = object  # type: ignore[misc, assignment]
     BatchSpanProcessor = None
     ConsoleSpanExporter = None
     SimpleSpanProcessor = None
@@ -861,9 +863,56 @@ class ToolTraceContext:
     server_name: Optional[str] = None
     first_call: Optional[tuple[str, str, str]] = None
     multiple_servers: bool = False
+    call_id: Optional[str] = None
 
 
 _tool_trace_context: ContextVar[Optional[ToolTraceContext]] = ContextVar("tool_trace_context", default=None)
+_call_trace_session_id: ContextVar[Optional[str]] = ContextVar("call_trace_session_id", default=None)
+
+
+@contextmanager
+def call_trace_session(headers: Optional[Mapping[str, Any]], request_trace: Optional[ToolTraceContext] = None) -> Iterator[None]:
+    """Bind a voice call identifier for telemetry without changing MCP session state.
+
+    Args:
+        headers: HTTP headers used when no active request scope is available.
+        request_trace: Current ASGI context, authoritative across MCP task boundaries.
+
+    Yields:
+        None while the validated call identifier applies to new spans.
+    """
+    call_id = None
+    if _should_emit_langfuse_attributes():
+        if request_trace is not None and request_trace.active:
+            call_id = request_trace.call_id
+        else:
+            values = [value for key, value in (headers or {}).items() if key.lower() == "x-call-id"]
+            if len(values) == 1:
+                call_id = values[0]
+        if not isinstance(call_id, str) or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", call_id) is None:
+            call_id = None
+        elif sanitize_trace_attribute_value("langfuse.session.id", call_id) != call_id:
+            call_id = None
+    token = _call_trace_session_id.set(call_id)
+    try:
+        yield
+    finally:
+        _call_trace_session_id.reset(token)
+
+
+class CallSessionSpanProcessor(SpanProcessor):
+    """Attach the current voice call session to automatically instrumented child spans."""
+
+    def on_start(self, span: Any, parent_context: Any = None) -> None:  # pylint: disable=unused-argument
+        """Enrich a new span with the request-scoped call identifier.
+
+        Args:
+            span: Recording span to enrich.
+            parent_context: OpenTelemetry parent context, unused.
+        """
+        call_id = _call_trace_session_id.get()
+        if call_id:
+            set_span_attribute(span, "langfuse.session.id", call_id)
 
 
 def get_tool_trace_context(scope: Optional[Mapping[str, Any]] = None) -> Optional[ToolTraceContext]:
@@ -1040,7 +1089,7 @@ class OpenTelemetryRequestMiddleware:
                             span.set_status(Status(StatusCode.OK))
             await send(message)
 
-        with _TRACER.start_as_current_span(span_name, **start_span_kwargs) as span:
+        with call_trace_session(carrier), _TRACER.start_as_current_span(span_name, **start_span_kwargs) as span:
             # No valid inbound envelope: publish this new root span's context into
             # the ASGI headers so downstream raw-header copies (session-task handoff,
             # affinity envelopes, trusted-internal dispatch) carry the trace and
@@ -1077,7 +1126,7 @@ class OpenTelemetryRequestMiddleware:
                 except Exception as exc:
                     logger.debug("Failed to inject baggage into request span: %s", exc)
 
-            request_trace = ToolTraceContext(span)
+            request_trace = ToolTraceContext(span, call_id=_call_trace_session_id.get())
             scope.setdefault("state", {})["tool_trace_context"] = request_trace
             context_token = _tool_trace_context.set(request_trace)
             try:
@@ -1174,6 +1223,9 @@ def init_telemetry() -> Optional[Any]:
         # Register provider if trace API is present
         if trace is not None and hasattr(trace, "set_tracer_provider"):
             cast(Any, trace).set_tracer_provider(provider)
+
+        if _should_emit_langfuse_attributes():
+            provider.add_span_processor(CallSessionSpanProcessor())
 
         # Create a custom span processor to copy resource attributes to span attributes
         # This is needed because Arize requires arize.project.name as a span attribute
@@ -1454,7 +1506,7 @@ def create_span(name: str, attributes: Optional[Dict[str, Any]] = None) -> Any:
         team_scope = get_trace_team_scope()
         team_name = get_trace_team_name()
         auth_method = get_trace_auth_method()
-        session_id = get_trace_session_id()
+        session_id = _call_trace_session_id.get() or get_trace_session_id()
         environment = _get_deployment_environment()
 
         if _should_capture_identity_attributes():

@@ -75,7 +75,17 @@ from mcpgateway.db import Gateway as DbGateway
 from mcpgateway.db import get_for_update, server_tool_association
 from mcpgateway.db import Tool as DbTool
 from mcpgateway.db import ToolMetric, ToolMetricsHourly
-from mcpgateway.observability import create_child_span, create_span, inject_trace_context_headers, otel_context_active, record_tool_trace_name, set_span_attribute, set_span_error, ToolTraceContext
+from mcpgateway.observability import (
+    call_trace_session,
+    create_child_span,
+    create_span,
+    inject_trace_context_headers,
+    otel_context_active,
+    record_tool_trace_name,
+    set_span_attribute,
+    set_span_error,
+    ToolTraceContext,
+)
 from mcpgateway.plugins.control_telemetry import ControlTelemetryAccumulator, record_control_telemetry
 from mcpgateway.plugins.utils import build_request_extensions, record_plugin_metrics
 from mcpgateway.schemas import AuthenticationValues, ToolCreate, ToolMetrics, ToolPreviewResponse, ToolPreviewTarget, ToolPreviewWarning, ToolRead, ToolUpdate, TopPerformer
@@ -6094,7 +6104,7 @@ class ToolService(BaseService):
         if is_input_capture_enabled("tool.invoke"):
             span_attributes["langfuse.observation.input"] = serialize_trace_payload(arguments or {})
 
-        with create_span("tool.invoke", span_attributes) as span:
+        with call_trace_session(request_headers, request_trace), create_span("tool.invoke", span_attributes) as span:
             try:
                 # Create a lightweight lookup child span so Langfuse shows the invoke breakdown.
                 with create_child_span(
