@@ -109,12 +109,11 @@ replaces both `COPY --chmod=0755` lines with `COPY` plus `RUN chmod 0755`.
 Check new required settings (for example `DEFAULT_USER_PASSWORD`) against
 `deploy/scripts/03-deploy-gateway.sh` before rollout.
 
-The deployment scripts also forward opt-in OTLP exporter settings. The Jaeger Compose overlay
-uses private host ports, persistent Badger storage, and the existing tool payload instrumentation.
+The deployment scripts forward opt-in OTLP exporter settings. The healthcare Azure profile exports to Langfuse Cloud over HTTPS.
 Keep `OTEL_EMIT_LANGFUSE_ATTRIBUTES=true` for payload export until upstream adopts backend-neutral attribute names.
-The healthcare Azure profile uses a separate Jaeger app with bounded in-memory storage and a password-protected HTTPS dashboard.
-`deploy/jaeger/azure.template.yaml` keeps OTLP ingress private and references the dashboard hash through Key Vault.
-The app uses a dedicated identity, with registry pull access and permission to read only its dashboard hash.
+The gateway identity reads exporter headers through a secret-specific Key Vault grant.
+The dedicated Jaeger deployment, dashboard proxy, and deployment tests are retired.
+Shared trace naming, propagation, redaction, and call-ID grouping remain in use by Langfuse.
 The healthcare profile sets token expiry and idle timeout to 480 minutes for eight-hour dashboard sessions.
 
 ### 4. CSP-compatible Observability dashboards
@@ -145,7 +144,7 @@ The trace sanitizer previously masked sensitive fields only in the structured co
 This changes captured telemetry only; the tool response remains unchanged.
 
 **Merge guidance:** retain the JSON text redaction tests in `tests/unit/mcpgateway/utils/test_trace_redaction.py`
-until upstream provides equivalent protection. The Jaeger integration test exposed this gap using synthetic secrets.
+until upstream provides equivalent protection. Regression tests exercise this gap with synthetic secrets.
 JSON text that exceeds decoder depth or integer limits is replaced with an error marker before export.
 
 ### 6. Readable virtual-server tool traces
@@ -155,7 +154,8 @@ The transport reuses its authorization lookup for the server name and passes req
 Trace naming adds no separate database lookup and occurs after tool authorization.
 
 **Merge guidance:** preserve `ToolTraceContext`, `record_tool_trace_name`, and their transport integration until upstream provides equivalent behavior.
-Run `tests/unit/mcpgateway/test_tool_trace_names.py` and `tests/live_gateway/test_jaeger_trace_names.py`.
+Run `tests/unit/mcpgateway/test_tool_trace_names.py` and `tests/live_gateway/test_call_sessions.py`.
+Unit tests cover server renames and multiple servers. The live OTLP test verifies named roots and call-session grouping.
 
 ### 7. Deferred dashboard loading and partial errors
 
@@ -164,4 +164,5 @@ The shared `partialLoadErrors.js` handler replaces failed loading placeholders w
 Server edit requests remain serialized to avoid connection bursts.
 
 **Merge guidance:** preserve lazy loading and the shared partial-error handler during template updates.
-Run `tests/unit/js/partialLoadErrors.test.js`, the CSP tests, and the live Jaeger dashboard-concurrency check.
+Run `tests/unit/js/partialLoadErrors.test.js` and the CSP tests.
+The Jaeger test's concurrent dashboard-load check is retired with that test.

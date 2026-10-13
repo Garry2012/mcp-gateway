@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import secrets
+import socket
 import subprocess
 import sys
 import tempfile
@@ -21,10 +22,38 @@ import time
 import httpx
 from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
 
-# First-Party
-from tests.live_gateway.test_jaeger_trace_names import free_port, wait_ready
-
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def free_port() -> int:
+    """Find an available loopback port for an isolated test service."""
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def wait_ready(url: str, process: subprocess.Popen[bytes]) -> None:
+    """Wait for a test service to answer requests or exit.
+
+    Args:
+        url: Local readiness endpoint.
+        process: Test service process.
+
+    Raises:
+        RuntimeError: The service exits before it becomes ready.
+        TimeoutError: The service does not respond within 100 seconds.
+    """
+    deadline = time.monotonic() + 100
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError(f"Service exited: {process.returncode}")
+        try:
+            if httpx.get(url, timeout=2).status_code < 500:
+                return
+        except httpx.HTTPError:
+            pass
+        time.sleep(0.5)
+    raise TimeoutError(url)
 
 
 def test_call_sessions() -> None:
