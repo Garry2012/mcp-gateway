@@ -203,6 +203,16 @@ Tool input and output capture remains enabled, including test names, phone numbe
 Tool requests and responses remain unchanged. LLM Chat message and response capture remains disabled.
 Remove any previous `OTEL_REDACT_FIELDS` override from the container app to restore the defaults.
 
+When Langfuse attributes are enabled, send `X-Call-Id` with the same opaque identifier on each request in a voice conversation.
+The gateway maps it to `langfuse.session.id` on HTTP request spans, tool invocations, and their outbound child spans.
+Use Langfuse's Session ID filter or Sessions page to find the conversation's tool calls.
+The identifier must contain 1–128 ASCII letters, digits, periods, underscores, colons, or hyphens, starting with a letter or digit.
+The gateway omits call identifiers that existing redaction would alter, so masked values cannot merge different call labels.
+Missing or invalid identifiers leave existing MCP session tracing unchanged. They do not reject the request.
+This telemetry label does not establish caller identity or authorize appointment access.
+The MCP protocol session stays unchanged; the Langfuse session label uses the call ID when valid.
+Correlation IDs and forwarded request headers stay unchanged. The mapping applies only to new traces.
+
 Jaeger remains deployed for rollback. Restore endpoint `http://mcp-gateway-jaeger:4317`, protocol `grpc`, and `OTEL_EXPORTER_OTLP_INSECURE=true` to resume export.
 Remove `KV_OTEL_HEADERS` from the profile and `OTEL_EXPORTER_OTLP_HEADERS` from the container app when switching back.
 
