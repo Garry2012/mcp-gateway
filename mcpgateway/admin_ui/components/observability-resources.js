@@ -1,3 +1,5 @@
+import { replaceTableRows } from './observability-table.js';
+
 /**
  * Provide the Observability resources component.
  * Register methods through Alpine.data because the CSP parser rejects inline functions.
@@ -268,24 +270,18 @@ export function observabilityResources() {
       const tbody = document.querySelector('#resourcePerformanceTable tbody');
       if (!tbody) return;
 
-      tbody.innerHTML = data.resources
-        .map(
-          (resource, idx) => `
-            <tr class="hover:bg-gray-50 dark:hover:bg-gray-700/50">
-              <td class="px-4 py-2 text-sm text-gray-700 dark:text-gray-400">${idx + 1}</td>
-              <td class="px-4 py-2 text-sm font-mono text-gray-900 dark:text-gray-200">${resource.resource_uri}</td>
-              <td class="px-4 py-2 text-sm text-gray-600 dark:text-gray-400">${resource.count}</td>
-              <td class="px-4 py-2 text-sm text-orange-600 dark:text-orange-400 font-medium">${resource.avg_duration_ms} ms</td>
-              <td class="px-4 py-2 text-sm text-green-600 dark:text-green-400">${resource.min_duration_ms} ms</td>
-              <td class="px-4 py-2 text-sm text-blue-600 dark:text-blue-400">${resource.p50} ms</td>
-              <td class="px-4 py-2 text-sm text-indigo-600 dark:text-indigo-400">${resource.p90} ms</td>
-              <td class="px-4 py-2 text-sm text-purple-600 dark:text-purple-400">${resource.p95} ms</td>
-              <td class="px-4 py-2 text-sm text-pink-600 dark:text-pink-400">${resource.p99} ms</td>
-              <td class="px-4 py-2 text-sm text-red-600 dark:text-red-400">${resource.max_duration_ms} ms</td>
-            </tr>
-          `
-        )
-        .join('');
+      replaceTableRows(tbody, data.resources, [
+        ['px-4 py-2 text-sm text-gray-700 dark:text-gray-400', (resource, idx) => idx + 1],
+        ['px-4 py-2 text-sm font-mono text-gray-900 dark:text-gray-200', (resource) => resource.resource_uri],
+        ['px-4 py-2 text-sm text-gray-600 dark:text-gray-400', (resource) => resource.count],
+        ['px-4 py-2 text-sm text-orange-600 dark:text-orange-400 font-medium', (resource) => `${resource.avg_duration_ms} ms`],
+        ['px-4 py-2 text-sm text-green-600 dark:text-green-400', (resource) => `${resource.min_duration_ms} ms`],
+        ['px-4 py-2 text-sm text-blue-600 dark:text-blue-400', (resource) => `${resource.p50} ms`],
+        ['px-4 py-2 text-sm text-indigo-600 dark:text-indigo-400', (resource) => `${resource.p90} ms`],
+        ['px-4 py-2 text-sm text-purple-600 dark:text-purple-400', (resource) => `${resource.p95} ms`],
+        ['px-4 py-2 text-sm text-pink-600 dark:text-pink-400', (resource) => `${resource.p99} ms`],
+        ['px-4 py-2 text-sm text-red-600 dark:text-red-400', (resource) => `${resource.max_duration_ms} ms`],
+      ]);
     },
     renderResourceSlownessChart(data) {
       const canvas = document.getElementById('resourceSlownessChart');

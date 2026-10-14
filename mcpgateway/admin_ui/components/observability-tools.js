@@ -1,3 +1,5 @@
+import { replaceTableRows } from './observability-table.js';
+
 /**
  * Provide the Observability tools component.
  * Register methods through Alpine.data because the CSP parser rejects inline functions.
@@ -277,58 +279,40 @@ export function observabilityTools() {
       const tbody = document.querySelector('#toolPerformanceTable tbody');
       if (!tbody) return;
 
-      tbody.innerHTML = data.tools
-        .map(
-          (tool, idx) => `
-            <tr class="hover:bg-gray-50 dark:hover:bg-gray-700/50">
-              <td class="px-4 py-2 text-sm text-gray-700 dark:text-gray-400">${idx + 1}</td>
-              <td class="px-4 py-2 text-sm font-mono text-gray-900 dark:text-gray-200">${tool.tool_name}</td>
-              <td class="px-4 py-2 text-sm text-gray-600 dark:text-gray-400">${tool.count}</td>
-              <td class="px-4 py-2 text-sm text-orange-600 dark:text-orange-400 font-medium">${tool.avg_duration_ms} ms</td>
-              <td class="px-4 py-2 text-sm text-green-600 dark:text-green-400">${tool.min_duration_ms} ms</td>
-              <td class="px-4 py-2 text-sm text-blue-600 dark:text-blue-400">${tool.p50} ms</td>
-              <td class="px-4 py-2 text-sm text-indigo-600 dark:text-indigo-400">${tool.p90} ms</td>
-              <td class="px-4 py-2 text-sm text-purple-600 dark:text-purple-400">${tool.p95} ms</td>
-              <td class="px-4 py-2 text-sm text-pink-600 dark:text-pink-400">${tool.p99} ms</td>
-              <td class="px-4 py-2 text-sm text-red-600 dark:text-red-400">${tool.max_duration_ms} ms</td>
-            </tr>
-          `
-        )
-        .join('');
+      replaceTableRows(tbody, data.tools, [
+        ['px-4 py-2 text-sm text-gray-700 dark:text-gray-400', (tool, idx) => idx + 1],
+        ['px-4 py-2 text-sm font-mono text-gray-900 dark:text-gray-200', (tool) => tool.tool_name],
+        ['px-4 py-2 text-sm text-gray-600 dark:text-gray-400', (tool) => tool.count],
+        ['px-4 py-2 text-sm text-orange-600 dark:text-orange-400 font-medium', (tool) => `${tool.avg_duration_ms} ms`],
+        ['px-4 py-2 text-sm text-green-600 dark:text-green-400', (tool) => `${tool.min_duration_ms} ms`],
+        ['px-4 py-2 text-sm text-blue-600 dark:text-blue-400', (tool) => `${tool.p50} ms`],
+        ['px-4 py-2 text-sm text-indigo-600 dark:text-indigo-400', (tool) => `${tool.p90} ms`],
+        ['px-4 py-2 text-sm text-purple-600 dark:text-purple-400', (tool) => `${tool.p95} ms`],
+        ['px-4 py-2 text-sm text-pink-600 dark:text-pink-400', (tool) => `${tool.p99} ms`],
+        ['px-4 py-2 text-sm text-red-600 dark:text-red-400', (tool) => `${tool.max_duration_ms} ms`],
+      ]);
     },
     renderToolErrorsTable(data) {
       const tbody = document.querySelector('#toolErrorsTable tbody');
       if (!tbody) return;
 
-      tbody.innerHTML = data.tools
-        .map(
-          (tool, idx) => `
-            <tr class="hover:bg-gray-50 dark:hover:bg-gray-700/50">
-              <td class="px-4 py-2 text-sm text-gray-700 dark:text-gray-400">${idx + 1}</td>
-              <td class="px-4 py-2 text-sm font-mono text-gray-900 dark:text-gray-200">${tool.tool_name}</td>
-              <td class="px-4 py-2 text-sm text-gray-600 dark:text-gray-400">${tool.total_count}</td>
-              <td class="px-4 py-2 text-sm text-red-600 dark:text-red-400 font-medium">${tool.error_count}</td>
-              <td class="px-4 py-2 text-sm text-red-700 dark:text-red-300 font-bold">${tool.error_rate}%</td>
-            </tr>
-          `
-        )
-        .join('');
+      replaceTableRows(tbody, data.tools, [
+        ['px-4 py-2 text-sm text-gray-700 dark:text-gray-400', (tool, idx) => idx + 1],
+        ['px-4 py-2 text-sm font-mono text-gray-900 dark:text-gray-200', (tool) => tool.tool_name],
+        ['px-4 py-2 text-sm text-gray-600 dark:text-gray-400', (tool) => tool.total_count],
+        ['px-4 py-2 text-sm text-red-600 dark:text-red-400 font-medium', (tool) => tool.error_count],
+        ['px-4 py-2 text-sm text-red-700 dark:text-red-300 font-bold', (tool) => `${tool.error_rate}%`],
+      ]);
     },
     renderToolChainsTable(data) {
       const tbody = document.querySelector('#toolChainsTable tbody');
       if (!tbody) return;
 
-      tbody.innerHTML = data.chains
-        .map(
-          (chain, idx) => `
-            <tr class="hover:bg-gray-50 dark:hover:bg-gray-700/50">
-              <td class="px-4 py-2 text-sm text-gray-700 dark:text-gray-400">${idx + 1}</td>
-              <td class="px-4 py-2 text-sm font-mono text-gray-900 dark:text-gray-200">${chain.chain}</td>
-              <td class="px-4 py-2 text-sm text-blue-600 dark:text-blue-400 font-medium">${chain.count}</td>
-            </tr>
-          `
-        )
-        .join('');
+      replaceTableRows(tbody, data.chains, [
+        ['px-4 py-2 text-sm text-gray-700 dark:text-gray-400', (chain, idx) => idx + 1],
+        ['px-4 py-2 text-sm font-mono text-gray-900 dark:text-gray-200', (chain) => chain.chain],
+        ['px-4 py-2 text-sm text-blue-600 dark:text-blue-400 font-medium', (chain) => chain.count],
+      ]);
     },
     renderToolSlownessChart(data) {
       const canvas = document.getElementById('toolSlownessChart');

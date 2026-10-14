@@ -1,3 +1,5 @@
+import { replaceTableRows } from './observability-table.js';
+
 /**
  * Provide the Observability prompts component.
  * Register methods through Alpine.data because the CSP parser rejects inline functions.
@@ -259,24 +261,18 @@ export function observabilityPrompts() {
       const tbody = document.querySelector('#promptPerformanceTable tbody');
       if (!tbody) return;
 
-      tbody.innerHTML = data.prompts
-        .map(
-          (prompt, idx) => `
-            <tr class="hover:bg-gray-50 dark:hover:bg-gray-700/50">
-              <td class="px-4 py-2 text-sm text-gray-700 dark:text-gray-400">${idx + 1}</td>
-              <td class="px-4 py-2 text-sm font-mono text-gray-900 dark:text-gray-200">${prompt.prompt_id}</td>
-              <td class="px-4 py-2 text-sm text-gray-600 dark:text-gray-400">${prompt.count}</td>
-              <td class="px-4 py-2 text-sm text-orange-600 dark:text-orange-400 font-medium">${prompt.avg_duration_ms} ms</td>
-              <td class="px-4 py-2 text-sm text-green-600 dark:text-green-400">${prompt.min_duration_ms} ms</td>
-              <td class="px-4 py-2 text-sm text-blue-600 dark:text-blue-400">${prompt.p50} ms</td>
-              <td class="px-4 py-2 text-sm text-indigo-600 dark:text-indigo-400">${prompt.p90} ms</td>
-              <td class="px-4 py-2 text-sm text-purple-600 dark:text-purple-400">${prompt.p95} ms</td>
-              <td class="px-4 py-2 text-sm text-pink-600 dark:text-pink-400">${prompt.p99} ms</td>
-              <td class="px-4 py-2 text-sm text-red-600 dark:text-red-400">${prompt.max_duration_ms} ms</td>
-            </tr>
-          `
-        )
-        .join('');
+      replaceTableRows(tbody, data.prompts, [
+        ['px-4 py-2 text-sm text-gray-700 dark:text-gray-400', (prompt, idx) => idx + 1],
+        ['px-4 py-2 text-sm font-mono text-gray-900 dark:text-gray-200', (prompt) => prompt.prompt_id],
+        ['px-4 py-2 text-sm text-gray-600 dark:text-gray-400', (prompt) => prompt.count],
+        ['px-4 py-2 text-sm text-orange-600 dark:text-orange-400 font-medium', (prompt) => `${prompt.avg_duration_ms} ms`],
+        ['px-4 py-2 text-sm text-green-600 dark:text-green-400', (prompt) => `${prompt.min_duration_ms} ms`],
+        ['px-4 py-2 text-sm text-blue-600 dark:text-blue-400', (prompt) => `${prompt.p50} ms`],
+        ['px-4 py-2 text-sm text-indigo-600 dark:text-indigo-400', (prompt) => `${prompt.p90} ms`],
+        ['px-4 py-2 text-sm text-purple-600 dark:text-purple-400', (prompt) => `${prompt.p95} ms`],
+        ['px-4 py-2 text-sm text-pink-600 dark:text-pink-400', (prompt) => `${prompt.p99} ms`],
+        ['px-4 py-2 text-sm text-red-600 dark:text-red-400', (prompt) => `${prompt.max_duration_ms} ms`],
+      ]);
     },
     renderPromptSlownessChart(data) {
       const canvas = document.getElementById('promptSlownessChart');
