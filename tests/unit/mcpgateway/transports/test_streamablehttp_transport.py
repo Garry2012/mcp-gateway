@@ -38,6 +38,7 @@ from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
 from mcp_types import PromptArgument
 import mcp_types as types
+from mcp_types.version import HANDSHAKE_PROTOCOL_VERSIONS, MODERN_PROTOCOL_VERSIONS
 from mcp.shared.exceptions import MCPError
 import pytest
 from starlette.types import Scope
@@ -49,7 +50,7 @@ from starlette.types import Scope
 from mcpgateway.services.oauth_manager import OAuthEnforcementUnavailableError, OAuthRequiredError
 from mcpgateway.services.mcp_apps import MCP_UI_EXTENSION
 from mcpgateway.transports import streamablehttp_transport as tr  # noqa: E402
-from mcpgateway.services.prompt_service import PromptNotFoundError
+from mcpgateway.services.prompt_service import PromptNotFoundError, PromptUpstreamError, PromptValidationError
 from mcpgateway.services.resource_service import ResourceNotFoundError
 from mcpgateway.services.tool_service import ToolInputRequired, ToolInvocationError, ToolNotFoundError
 from mcpgateway.transports.streamablehttp_transport import (
@@ -109,6 +110,46 @@ def test_streamable_server_capabilities_advertise_mcp_apps(monkeypatch):
         user_context_var.reset(token)
 
     assert MCP_UI_EXTENSION in capabilities.extensions
+
+
+@pytest.mark.parametrize("protocol_version", MODERN_PROTOCOL_VERSIONS)
+def test_streamable_server_capabilities_hide_logging_for_modern_protocols(protocol_version):
+    """Modern capability derivation does not advertise deprecated logging."""
+    capabilities = tr.mcp_app.get_capabilities(protocol_version=protocol_version)
+
+    assert capabilities.logging is None
+
+
+@pytest.mark.parametrize("protocol_version", (*HANDSHAKE_PROTOCOL_VERSIONS, None, "1999-01-01"))
+def test_streamable_server_capabilities_keep_logging_for_legacy_protocols(protocol_version):
+    """Legacy, absent, and unknown protocol versions keep the logging capability."""
+    capabilities = tr.mcp_app.get_capabilities(protocol_version=protocol_version)
+
+    assert isinstance(capabilities.logging, types.LoggingCapability)
+
+
+def test_streamable_server_capabilities_modern_keep_mcp_apps_and_hide_logging(monkeypatch):
+    """Modern capability derivation keeps MCP Apps extensions and hides logging."""
+    monkeypatch.setattr("mcpgateway.services.mcp_apps.settings.mcpgateway_mcp_apps_enabled", True)
+
+    token = user_context_var.set({"email": "admin@example.com", "is_admin": True})
+    try:
+        capabilities = tr.mcp_app.get_capabilities(protocol_version="2026-07-28")
+    finally:
+        user_context_var.reset(token)
+
+    assert capabilities.extensions is not None
+    assert MCP_UI_EXTENSION in capabilities.extensions
+    assert capabilities.logging is None
+
+
+async def test_streamable_server_discover_omits_logging_key_for_modern_protocol():
+    """Modern server/discover omits the logging key from the serialized result."""
+    async with Client(tr.mcp_app, mode="2026-07-28", cache=None) as modern_client:
+        raw_result = await modern_client.session.send_discover("2026-07-28")
+
+    assert "tools" in raw_result["capabilities"]
+    assert "logging" not in raw_result["capabilities"]
 
 
 # ---------------------------------------------------------------------------
@@ -216,195 +257,6 @@ async def test_event_store_replay_events_after_multiple():
     assert len(sent) == 2
     assert sent[0].event_id == eid2
     assert sent[1].event_id == eid3
-
-
-@pytest.mark.asyncio
-async def test_rust_event_store_store_and_replay(monkeypatch):
-    """RustEventStore should proxy store/replay operations through the sidecar."""
-    captured_requests = []
-
-    class FakeResponse:
-        def __init__(self, payload):
-            self._payload = payload
-
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return self._payload
-
-    class FakeClient:
-        async def post(self, url, json=None, timeout=None, follow_redirects=None):  # noqa: A002
-            captured_requests.append((url, json, timeout.read, follow_redirects))
-            if url.endswith("/store"):
-                return FakeResponse({"eventId": "event-123"})
-            return FakeResponse(
-                {
-                    "streamId": "stream-1",
-                    "events": [
-                        {"eventId": "event-124", "message": {"id": 2}},
-                        {"eventId": "event-125", "message": {"id": 3}},
-                    ],
-                }
-            )
-
-    monkeypatch.setattr(tr, "_get_rust_event_store_client", AsyncMock(return_value=FakeClient()))
-    monkeypatch.setattr(tr.settings, "experimental_rust_mcp_runtime_timeout_seconds", 17)
-    monkeypatch.setattr(tr.settings, "experimental_rust_mcp_runtime_url", "http://127.0.0.1:8787")
-
-    store = tr.RustEventStore(max_events_per_stream=77, ttl=321, key_prefix="mcpgw:eventstore:test")
-    event_id = await store.store_event("stream-1", {"id": 1})
-
-    replayed = []
-
-    async def collector(msg):
-        replayed.append(msg)
-
-    stream_id = await store.replay_events_after(event_id, collector)
-
-    assert event_id == "event-123"
-    assert stream_id == "stream-1"
-    assert replayed == [{"id": 2}, {"id": 3}]
-    assert captured_requests[0][0] == "http://127.0.0.1:8787/_internal/event-store/store"
-    assert captured_requests[0][1] == {
-        "streamId": "stream-1",
-        "message": {"id": 1},
-        "keyPrefix": "mcpgw:eventstore:test",
-        "maxEventsPerStream": 77,
-        "ttlSeconds": 321,
-    }
-    assert captured_requests[0][2] == 17
-    assert captured_requests[0][3] is False
-    assert captured_requests[1][0] == "http://127.0.0.1:8787/_internal/event-store/replay"
-    assert captured_requests[1][1] == {
-        "lastEventId": "event-123",
-        "keyPrefix": "mcpgw:eventstore:test",
-    }
-    assert captured_requests[1][3] is False
-
-
-@pytest.mark.asyncio
-async def test_rust_event_store_replay_rejects_redirects_without_following(monkeypatch):
-    """Replay requests should fail closed on redirects from the Rust sidecar."""
-    requests_seen = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        requests_seen.append(str(request.url))
-        if request.url.path.endswith("/replay"):
-            return httpx.Response(
-                307,
-                headers={"location": "http://127.0.0.1:8787/final"},
-                request=request,
-            )
-        return httpx.Response(200, json={"streamId": "unexpected", "events": []}, request=request)
-
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    monkeypatch.setattr(tr, "_get_rust_event_store_client", AsyncMock(return_value=client))
-    monkeypatch.setattr(tr.settings, "experimental_rust_mcp_runtime_url", "http://127.0.0.1:8787")
-
-    store = tr.RustEventStore()
-
-    try:
-        with pytest.raises(httpx.HTTPStatusError, match="307 Temporary Redirect"):
-            await store.replay_events_after("event-123", AsyncMock())
-    finally:
-        await client.aclose()
-
-    assert requests_seen == ["http://127.0.0.1:8787/_internal/event-store/replay"]
-
-
-@pytest.mark.asyncio
-async def test_rust_event_store_store_rejects_invalid_event_id(monkeypatch):
-    """RustEventStore should reject empty or invalid event ids from the sidecar."""
-
-    class FakeResponse:
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return {"eventId": ""}
-
-    class FakeClient:
-        async def post(self, *_args, **_kwargs):
-            return FakeResponse()
-
-    monkeypatch.setattr(tr, "_get_rust_event_store_client", AsyncMock(return_value=FakeClient()))
-
-    store = tr.RustEventStore()
-    with pytest.raises(RuntimeError, match="invalid eventId"):
-        await store.store_event("stream-1", {"id": 1})
-
-
-@pytest.mark.asyncio
-async def test_rust_event_store_replay_skips_invalid_entries(monkeypatch):
-    """Replay should skip malformed entries and return None for invalid stream ids."""
-
-    class FakeResponse:
-        def __init__(self, payload):
-            self._payload = payload
-
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return self._payload
-
-    class FakeClient:
-        def __init__(self):
-            self.calls = 0
-
-        async def post(self, *_args, **_kwargs):
-            self.calls += 1
-            if self.calls == 1:
-                return FakeResponse({"streamId": "", "events": []})
-            return FakeResponse({"streamId": "stream-1", "events": ["bad", {"message": {"id": 2}}]})
-
-    client = FakeClient()
-    monkeypatch.setattr(tr, "_get_rust_event_store_client", AsyncMock(return_value=client))
-
-    store = tr.RustEventStore()
-    assert await store.replay_events_after("event-1", AsyncMock()) is None
-
-    replayed = []
-
-    async def collector(msg):
-        replayed.append(msg)
-
-    assert await store.replay_events_after("event-2", collector) == "stream-1"
-    assert replayed == [{"id": 2}]
-
-
-@pytest.mark.asyncio
-async def test_get_rust_event_store_client_uses_shared_http_client_without_uds(monkeypatch):
-    """Without UDS configured, the Rust event-store client should use the shared HTTP client."""
-    shared_client = AsyncMock()
-    monkeypatch.setattr(tr, "_rust_event_store_client", None)
-    monkeypatch.setattr(tr.settings, "experimental_rust_mcp_runtime_uds", None)
-    monkeypatch.setattr(tr, "get_http_client", AsyncMock(return_value=shared_client))
-
-    assert await tr._get_rust_event_store_client() is shared_client
-
-
-@pytest.mark.asyncio
-async def test_get_rust_event_store_client_reuses_uds_client(monkeypatch):
-    """UDS-backed Rust event-store client should be created once and then reused."""
-    constructed = {"count": 0, "kwargs": None}
-
-    class FakeAsyncClient:
-        def __init__(self, **_kwargs):
-            constructed["count"] += 1
-            constructed["kwargs"] = _kwargs
-
-    monkeypatch.setattr(tr, "_rust_event_store_client", None)
-    monkeypatch.setattr(tr.settings, "experimental_rust_mcp_runtime_uds", "/tmp/contextforge-mcp-rust.sock")
-    monkeypatch.setattr(tr, "httpx", MagicMock(AsyncClient=FakeAsyncClient, AsyncHTTPTransport=httpx.AsyncHTTPTransport, Timeout=httpx.Timeout))
-
-    first = await tr._get_rust_event_store_client()
-    second = await tr._get_rust_event_store_client()
-
-    assert first is second
-    assert constructed["count"] == 1
-    assert constructed["kwargs"]["follow_redirects"] is False
 
 
 def test_safe_str_attr_returns_str():
@@ -666,6 +518,44 @@ async def test_call_tool_session_affinity_forwarded_empty_dict_snake_case_fallba
         assert isinstance(unstructured[0], types.TextContent)
         assert unstructured[0].text == "ok"
         assert structured == {}
+    finally:
+        request_headers_var.reset(h_token)
+        user_context_var.reset(u_token)
+
+
+@pytest.mark.asyncio
+async def test_call_tool_session_affinity_forwarded_error_keeps_the_result_meta(monkeypatch):
+    """A worker-forwarded isError result keeps the error code the owning worker put in _meta."""
+    # First-Party
+    from mcpgateway.transports.streamablehttp_transport import call_tool, request_headers_var, types, user_context_var
+
+    monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport.settings.mcpgateway_session_affinity_enabled", True)
+
+    h_token = request_headers_var.set({"mcp-session-id": "abc-123-valid-session"})
+    u_token = user_context_var.set({"email": "user@test.com", "teams": ["t1"], "is_admin": False})
+
+    mock_pool = MagicMock()
+    mock_pool.forward_request_to_owner = AsyncMock(
+        return_value={"result": {"content": [{"type": "text", "text": "MCP server error: Invalid params"}], "isError": True, "_meta": {"io.contextforge/errorCode": {"code": -32602}}}}
+    )
+    mock_pool.register_session_mapping = AsyncMock()
+
+    mock_cache = AsyncMock()
+    mock_cache.get = AsyncMock(return_value=None)
+
+    mock_session_class = MagicMock()
+    mock_session_class.is_valid_mcp_session_id = MagicMock(return_value=True)
+
+    try:
+        with (
+            patch("mcpgateway.services.session_affinity.get_session_affinity", return_value=mock_pool),
+            patch("mcpgateway.services.session_affinity.SessionAffinity", mock_session_class),
+            patch("mcpgateway.cache.tool_lookup_cache.tool_lookup_cache", mock_cache),
+        ):
+            result = await call_tool("my_tool", {})
+        assert isinstance(result, types.CallToolResult)
+        assert result.is_error is True
+        assert result.meta == {"io.contextforge/errorCode": {"code": -32602}}
     finally:
         request_headers_var.reset(h_token)
         user_context_var.reset(u_token)
@@ -1078,26 +968,6 @@ async def test_validate_streamable_session_access_fake_session_not_found(monkeyp
     assert allowed is False
     assert status == 404
     assert "Session not found" in detail
-
-
-@pytest.mark.asyncio
-async def test_validate_streamable_session_access_skips_when_rust_already_validated(monkeypatch):
-    """Trusted Rust-validated session requests should skip duplicate Python owner checks."""
-    monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport.settings.use_stateful_sessions", True)
-
-    session_registry = MagicMock()
-    session_registry.get_session_owner = AsyncMock(side_effect=AssertionError("should not be called"))
-    monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport._get_shared_session_registry", lambda: session_registry)
-
-    allowed, status, detail = await tr._validate_streamable_session_access(
-        mcp_session_id="sess-rust",
-        user_context={"email": "user@example.com", "is_admin": False, "is_authenticated": True, "_rust_session_validated": True},
-        rpc_method="tools/call",
-    )
-
-    assert allowed is True
-    assert status == 200
-    assert detail == ""
 
 
 @pytest.mark.asyncio
@@ -5272,7 +5142,7 @@ async def test_list_resource_templates_outer_exception(monkeypatch, caplog):
 async def test_set_logging_level_debug():
     """Test set_logging_level with debug level."""
     # Third-Party
-    import mcp_types as mcp_types
+    import mcp_types
 
     # First-Party
     from mcpgateway.transports.streamablehttp_transport import set_logging_level
@@ -5483,8 +5353,34 @@ async def test_complete_dict_result(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_complete_forwards_request_metadata(monkeypatch):
+    """Forward request metadata to the completion service."""
+    # Third-Party
+    import mcp_types
+
+    # First-Party
+    from mcpgateway.transports.streamablehttp_transport import complete
+
+    @asynccontextmanager
+    async def fake_get_db():
+        yield MagicMock()
+
+    monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport.get_db", fake_get_db)
+    with patch("mcpgateway.transports.streamablehttp_transport.completion_service") as mock_cs:
+        mock_cs.handle_completion = AsyncMock(return_value={"completion": {"values": [], "total": 0, "hasMore": False}})
+        await complete(
+            mcp_types.PromptReference(type="ref/prompt", name="test"),
+            {"name": "arg", "value": "v"},
+            meta={"trace": "completion-1"},
+        )
+
+    assert mock_cs.handle_completion.await_args.args[1]["_meta"] == {"trace": "completion-1"}
+
+
+@pytest.mark.asyncio
 async def test_complete_defaults_non_admin_without_teams_to_public_only_scope(monkeypatch):
     """Completion should use public-only scope when non-admin context has teams=None."""
+    monkeypatch.setattr(tr, "_check_streamable_permission", AsyncMock(return_value=True))
     # Third-Party
     import mcp_types as mcp_types
 
@@ -5557,6 +5453,7 @@ async def test_complete_preserves_admin_bypass_for_null_teams_context(monkeypatc
 @pytest.mark.asyncio
 async def test_complete_preserves_explicit_team_scope(monkeypatch):
     """Completion should preserve explicit token team scope from user context."""
+    monkeypatch.setattr(tr, "_check_streamable_permission", AsyncMock(return_value=True))
     # Third-Party
     import mcp_types as mcp_types
 
@@ -5853,6 +5750,46 @@ async def test_complete_exception(monkeypatch):
     assert isinstance(result, mcp_types.CompleteResult)
     assert result.completion.values == []
     assert result.completion.total == 0
+
+
+@pytest.mark.asyncio
+async def test_complete_raises_mcperror_instead_of_swallowing_completion_error(monkeypatch):
+    """complete() surfaces a CompletionError as an MCPError instead of a fail-open empty result (#6629).
+
+    Before #6629 this path swallowed every exception, including a
+    CompletionError, into a *successful* empty CompleteResult (spec §8.5) —
+    a federated-forwarding failure was invisible to the client. This is a
+    deliberate, visible behavior change: a completion failure now surfaces
+    as a proper JSON-RPC error carrying the upstream-derived code.
+    """
+    # Third-Party
+    import mcp_types as mcp_types
+
+    # First-Party
+    from mcp.shared.exceptions import MCPError
+    from mcpgateway.services.completion_service import CompletionInternalError
+    from mcpgateway.transports.streamablehttp_transport import complete
+
+    mock_db = MagicMock()
+
+    @asynccontextmanager
+    async def fake_get_db():
+        yield mock_db
+
+    monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport.get_db", fake_get_db)
+
+    with patch("mcpgateway.transports.streamablehttp_transport.completion_service") as mock_cs:
+        mock_cs.handle_completion = AsyncMock(side_effect=CompletionInternalError("boom"))
+
+        ref = mcp_types.PromptReference(type="ref/prompt", name="test")
+        argument = MagicMock()
+        argument.model_dump.return_value = {"name": "arg", "value": "v"}
+
+        with pytest.raises(MCPError) as exc_info:
+            await complete(ref, argument)
+
+    assert exc_info.value.error.code == -32603
+    assert "boom" in exc_info.value.error.message
 
 
 # ---------------------------------------------------------------------------
@@ -7620,8 +7557,8 @@ async def test_session_manager_wrapper_redis_event_store(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_session_manager_wrapper_rust_event_store(monkeypatch):
-    """SessionManagerWrapper should use RustEventStore when the Rust event-store flag is enabled."""
+async def test_session_manager_wrapper_uses_redis_event_store(monkeypatch):
+    """SessionManagerWrapper should use RedisEventStore for stateful redis deployments."""
 
     captured_config = {}
 
@@ -7633,66 +7570,6 @@ async def test_session_manager_wrapper_rust_event_store(monkeypatch):
 
     monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport.settings.use_stateful_sessions", True)
     monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport.settings.json_response_enabled", False)
-    monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport.settings.experimental_rust_mcp_runtime_enabled", True)
-    monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport.settings.experimental_rust_mcp_session_auth_reuse_enabled", True)
-    monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport.settings.experimental_rust_mcp_event_store_enabled", True)
-    monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport.settings.streamable_http_max_events_per_stream", 75)
-    monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport.settings.streamable_http_event_ttl", 2700)
-    monkeypatch.setattr(tr, "StreamableHTTPSessionManager", capture_manager)
-
-    SessionManagerWrapper()
-
-    assert captured_config["stateless"] is False
-    assert isinstance(captured_config["event_store"], tr.RustEventStore)
-    assert captured_config["event_store"].max_events_per_stream == 75
-    assert captured_config["event_store"].ttl == 2700
-
-
-@pytest.mark.asyncio
-async def test_session_manager_wrapper_redis_event_store_when_rust_event_store_disabled(monkeypatch):
-    """SessionManagerWrapper should fall back to RedisEventStore when Rust event store is disabled."""
-
-    captured_config = {}
-
-    def capture_manager(**kwargs):
-        captured_config.update(kwargs)
-        dummy = MagicMock()
-        dummy.run = MagicMock(return_value=asynccontextmanager(lambda: (yield dummy))())
-        return dummy
-
-    monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport.settings.use_stateful_sessions", True)
-    monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport.settings.json_response_enabled", False)
-    monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport.settings.experimental_rust_mcp_runtime_enabled", True)
-    monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport.settings.experimental_rust_mcp_event_store_enabled", False)
-    monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport.settings.cache_type", "redis")
-    monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport.settings.redis_url", "redis://localhost:6379/0")
-    monkeypatch.setattr(tr, "StreamableHTTPSessionManager", capture_manager)
-
-    SessionManagerWrapper()
-
-    # First-Party
-    from mcpgateway.transports.redis_event_store import RedisEventStore
-
-    assert isinstance(captured_config["event_store"], RedisEventStore)
-
-
-@pytest.mark.asyncio
-async def test_session_manager_wrapper_falls_back_to_python_event_store_when_session_auth_reuse_disabled(monkeypatch):
-    """SessionManagerWrapper should not activate RustEventStore when public session auth reuse is disabled."""
-
-    captured_config = {}
-
-    def capture_manager(**kwargs):
-        captured_config.update(kwargs)
-        dummy = MagicMock()
-        dummy.run = MagicMock(return_value=asynccontextmanager(lambda: (yield dummy))())
-        return dummy
-
-    monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport.settings.use_stateful_sessions", True)
-    monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport.settings.json_response_enabled", False)
-    monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport.settings.experimental_rust_mcp_runtime_enabled", True)
-    monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport.settings.experimental_rust_mcp_session_auth_reuse_enabled", False)
-    monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport.settings.experimental_rust_mcp_event_store_enabled", True)
     monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport.settings.cache_type", "redis")
     monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport.settings.redis_url", "redis://localhost:6379/0")
     monkeypatch.setattr(tr, "StreamableHTTPSessionManager", capture_manager)
@@ -9320,12 +9197,8 @@ async def test_forwarded_post_routes_to_rpc(monkeypatch):
     mock_response.status_code = 200
     mock_response.content = b'{"jsonrpc":"2.0","result":{"tools":[]},"id":1}'
 
-    with patch("mcpgateway.transports.streamablehttp_transport.httpx.AsyncClient") as mock_client_cls:
-        mock_client = AsyncMock()
-        mock_client.post = AsyncMock(return_value=mock_response)
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=None)
-        mock_client_cls.return_value = mock_client
+    with patch("mcpgateway.transports.streamablehttp_transport.post_rpc_in_process") as mock_post_rpc:
+        mock_post_rpc.return_value = mock_response
 
         await wrapper.handle_streamable_http(scope, _make_receive(body), send)
 
@@ -9374,18 +9247,14 @@ async def test_forwarded_post_routes_to_rpc_multipart_body_and_auth_header(monke
         ]
     )
 
-    with patch("mcpgateway.transports.streamablehttp_transport.httpx.AsyncClient") as mock_client_cls:
-        mock_client = AsyncMock()
-        mock_client.post = AsyncMock(return_value=mock_response)
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=None)
-        mock_client_cls.return_value = mock_client
+    with patch("mcpgateway.transports.streamablehttp_transport.post_rpc_in_process") as mock_post_rpc:
+        mock_post_rpc.return_value = mock_response
 
         await wrapper.handle_streamable_http(scope, receive, send)
 
     await wrapper.shutdown()
     assert messages[0]["status"] == 200
-    assert mock_client.post.call_args.kwargs["headers"]["authorization"] == "Bearer abc"
+    assert mock_post_rpc.call_args.kwargs["headers"]["authorization"] == "Bearer abc"
     # No client mcp-session-id was provided -> should not be echoed back
     assert b"mcp-session-id" not in [h[0] for h in messages[0]["headers"]]
 
@@ -9492,12 +9361,8 @@ async def test_forwarded_post_exception_falls_through(monkeypatch):
     body = b'{"jsonrpc":"2.0","method":"tools/list","id":1}'
     scope = _make_scope("/mcp", method="POST", headers=[(b"x-forwarded-internally", b"true")])
 
-    with patch("mcpgateway.transports.streamablehttp_transport.httpx.AsyncClient") as mock_client_cls:
-        mock_client = AsyncMock()
-        mock_client.post = AsyncMock(side_effect=Exception("httpx fail"))
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=None)
-        mock_client_cls.return_value = mock_client
+    with patch("mcpgateway.transports.streamablehttp_transport.post_rpc_in_process") as mock_post_rpc:
+        mock_post_rpc.side_effect = Exception("httpx fail")
 
         await wrapper.handle_streamable_http(scope, _make_receive(body), send)
 
@@ -9543,18 +9408,14 @@ async def test_forwarded_post_injects_server_id_from_url(monkeypatch):
     mock_response.status_code = 200
     mock_response.content = b'{"jsonrpc":"2.0","result":{"tools":[]},"id":1}'
 
-    with patch("mcpgateway.transports.streamablehttp_transport.httpx.AsyncClient") as mock_client_cls:
-        mock_client = AsyncMock()
-        mock_client.post = AsyncMock(return_value=mock_response)
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=None)
-        mock_client_cls.return_value = mock_client
+    with patch("mcpgateway.transports.streamablehttp_transport.post_rpc_in_process") as mock_post_rpc:
+        mock_post_rpc.return_value = mock_response
 
         await wrapper.handle_streamable_http(scope, _make_receive(body), send)
 
         # Verify the POST to /rpc includes server_id in params (created if missing)
-        mock_client.post.assert_called_once()
-        posted_content = mock_client.post.call_args.kwargs["content"]
+        mock_post_rpc.assert_called_once()
+        posted_content = mock_post_rpc.call_args.kwargs["content"]
         posted_json = orjson.loads(posted_content)
 
         assert "params" in posted_json, "params dict should be created when missing"
@@ -9602,17 +9463,13 @@ async def test_forwarded_post_injects_server_id_with_existing_params(monkeypatch
     mock_response.status_code = 200
     mock_response.content = b'{"jsonrpc":"2.0","result":{"tools":[]},"id":1}'
 
-    with patch("mcpgateway.transports.streamablehttp_transport.httpx.AsyncClient") as mock_client_cls:
-        mock_client = AsyncMock()
-        mock_client.post = AsyncMock(return_value=mock_response)
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=None)
-        mock_client_cls.return_value = mock_client
+    with patch("mcpgateway.transports.streamablehttp_transport.post_rpc_in_process") as mock_post_rpc:
+        mock_post_rpc.return_value = mock_response
 
         await wrapper.handle_streamable_http(scope, _make_receive(body), send)
 
-        mock_client.post.assert_called_once()
-        posted_content = mock_client.post.call_args.kwargs["content"]
+        mock_post_rpc.assert_called_once()
+        posted_content = mock_post_rpc.call_args.kwargs["content"]
         posted_json = orjson.loads(posted_content)
 
         assert posted_json["params"]["server_id"] == server_id
@@ -9666,18 +9523,14 @@ async def test_forwarded_post_injects_server_id_with_non_dict_params(monkeypatch
     mock_response.status_code = 200
     mock_response.content = b'{"jsonrpc":"2.0","result":{"tools":[]},"id":1}'
 
-    with patch("mcpgateway.transports.streamablehttp_transport.httpx.AsyncClient") as mock_client_cls:
-        mock_client = AsyncMock()
-        mock_client.post = AsyncMock(return_value=mock_response)
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=None)
-        mock_client_cls.return_value = mock_client
+    with patch("mcpgateway.transports.streamablehttp_transport.post_rpc_in_process") as mock_post_rpc:
+        mock_post_rpc.return_value = mock_response
 
         await wrapper.handle_streamable_http(scope, _make_receive(params_json), send)
 
         # Must reach /rpc (not fall through to SDK)
-        mock_client.post.assert_called_once()
-        posted_content = mock_client.post.call_args.kwargs["content"]
+        mock_post_rpc.assert_called_once()
+        posted_content = mock_post_rpc.call_args.kwargs["content"]
         posted_json = orjson.loads(posted_content)
 
         assert isinstance(posted_json["params"], dict), f"params should be dict, was {type(posted_json['params'])}"
@@ -9722,18 +9575,14 @@ async def test_forwarded_post_no_server_id_in_url_no_injection(monkeypatch):
     mock_response.status_code = 200
     mock_response.content = b'{"jsonrpc":"2.0","result":{"tools":[]},"id":1}'
 
-    with patch("mcpgateway.transports.streamablehttp_transport.httpx.AsyncClient") as mock_client_cls:
-        mock_client = AsyncMock()
-        mock_client.post = AsyncMock(return_value=mock_response)
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=None)
-        mock_client_cls.return_value = mock_client
+    with patch("mcpgateway.transports.streamablehttp_transport.post_rpc_in_process") as mock_post_rpc:
+        mock_post_rpc.return_value = mock_response
 
         await wrapper.handle_streamable_http(scope, _make_receive(original_body), send)
 
         # Verify the POST to /rpc does NOT include server_id
-        mock_client.post.assert_called_once()
-        posted_content = mock_client.post.call_args.kwargs["content"]
+        mock_post_rpc.assert_called_once()
+        posted_content = mock_post_rpc.call_args.kwargs["content"]
         posted_json = orjson.loads(posted_content)
 
         # Body should be unchanged - no server_id injection
@@ -9767,16 +9616,10 @@ async def test_forwarded_post_denies_non_owner_session_access(monkeypatch):
     body = b'{"jsonrpc":"2.0","method":"ping","id":"x1"}'
     scope = _make_scope("/mcp", method="POST", headers=[(b"x-forwarded-internally", b"true"), (b"mcp-session-id", b"sess-abc")])
 
-    with patch("mcpgateway.transports.streamablehttp_transport.httpx.AsyncClient") as mock_client_cls:
-        mock_client = AsyncMock()
-        mock_client.post = AsyncMock()
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=None)
-        mock_client_cls.return_value = mock_client
-
+    with patch("mcpgateway.transports.streamablehttp_transport.post_rpc_in_process") as mock_post_rpc:
         await wrapper.handle_streamable_http(scope, _make_receive(body), send)
 
-        mock_client.post.assert_not_awaited()
+        mock_post_rpc.assert_not_awaited()
 
     await wrapper.shutdown()
     assert messages[0]["status"] == 403
@@ -9868,19 +9711,15 @@ async def test_local_affinity_post_injects_server_id_regression(monkeypatch):
         patch("mcpgateway.services.session_affinity.get_session_affinity", return_value=mock_pool),
         patch("mcpgateway.services.session_affinity.get_worker_id", return_value="worker-1"),
         patch("mcpgateway.services.session_affinity.SessionAffinity", mock_session_class),
-        patch("mcpgateway.transports.streamablehttp_transport.httpx.AsyncClient") as mock_client_cls,
+        patch("mcpgateway.transports.streamablehttp_transport.post_rpc_in_process") as mock_post_rpc,
     ):
-        mock_client = AsyncMock()
-        mock_client.post = AsyncMock(return_value=mock_response)
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=None)
-        mock_client_cls.return_value = mock_client
+        mock_post_rpc.return_value = mock_response
 
         await wrapper.handle_streamable_http(scope, receive, send)
 
         # Verify server_id was injected in local-owner branch
-        mock_client.post.assert_called_once()
-        posted_content = mock_client.post.call_args.kwargs["content"]
+        mock_post_rpc.assert_called_once()
+        posted_content = mock_post_rpc.call_args.kwargs["content"]
         posted_json = orjson.loads(posted_content)
 
         assert "params" in posted_json
@@ -9896,8 +9735,8 @@ async def test_local_affinity_post_dispatches_to_internal_endpoint_with_auth_con
     Closes the coverage gap for the local-owner path: instead of re-authenticating
     against public /rpc (which only understands ContextForge JWTs/cookies and would
     401 virtual-server OAuth or MCP_REQUIRE_AUTH=false public-only sessions), the
-    owner dispatches to the trusted-internal endpoint carrying the affinity runtime
-    marker, the HMAC, and the edge-validated auth context. The originating
+    owner dispatches through the trusted in-process helper with the edge-validated
+    auth context. The helper adds the affinity marker and HMAC. The originating
     Authorization header is preserved for the CSRF bearer short-circuit.
     """
     # Third-Party
@@ -9941,23 +9780,15 @@ async def test_local_affinity_post_dispatches_to_internal_endpoint_with_auth_con
         patch("mcpgateway.services.session_affinity.get_session_affinity", return_value=mock_pool),
         patch("mcpgateway.services.session_affinity.get_worker_id", return_value="worker-1"),
         patch("mcpgateway.services.session_affinity.SessionAffinity", mock_session_class),
-        patch("mcpgateway.transports.streamablehttp_transport.httpx.AsyncClient") as mock_client_cls,
+        patch("mcpgateway.transports.streamablehttp_transport.post_rpc_in_process") as mock_post_rpc,
     ):
-        mock_client = AsyncMock()
-        mock_client.post = AsyncMock(return_value=mock_response)
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=None)
-        mock_client_cls.return_value = mock_client
+        mock_post_rpc.return_value = mock_response
 
         await wrapper.handle_streamable_http(scope, receive, send)
 
-        mock_client.post.assert_called_once()
-        # Routed to the trusted-internal endpoint, NOT public /rpc.
-        assert mock_client.post.call_args.args[0] == "/_internal/mcp/rpc"
-        headers = mock_client.post.call_args.kwargs["headers"]
-        assert headers["x-contextforge-mcp-runtime"] == "affinity"
-        assert headers["x-contextforge-mcp-runtime-auth"]
-        assert headers["x-contextforge-auth-context"]
+        mock_post_rpc.assert_called_once()
+        assert mock_post_rpc.call_args.kwargs["auth_context"]
+        headers = mock_post_rpc.call_args.kwargs["headers"]
         # Authorization preserved for the CSRF bearer short-circuit.
         assert headers["authorization"] == "Bearer tok"
 
@@ -10010,18 +9841,14 @@ async def test_local_affinity_post_preserves_custom_auth_header(monkeypatch):
         patch("mcpgateway.services.session_affinity.get_session_affinity", return_value=mock_pool),
         patch("mcpgateway.services.session_affinity.get_worker_id", return_value="worker-1"),
         patch("mcpgateway.services.session_affinity.SessionAffinity", mock_session_class),
-        patch("mcpgateway.transports.streamablehttp_transport.httpx.AsyncClient") as mock_client_cls,
+        patch("mcpgateway.transports.streamablehttp_transport.post_rpc_in_process") as mock_post_rpc,
     ):
-        mock_client = AsyncMock()
-        mock_client.post = AsyncMock(return_value=mock_response)
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=None)
-        mock_client_cls.return_value = mock_client
+        mock_post_rpc.return_value = mock_response
 
         await wrapper.handle_streamable_http(scope, receive, send)
 
-        mock_client.post.assert_called_once()
-        headers = mock_client.post.call_args.kwargs["headers"]
+        mock_post_rpc.assert_called_once()
+        headers = mock_post_rpc.call_args.kwargs["headers"]
         # Configured header preserved (lowercased); hardcoded "authorization" not used.
         assert headers["x-mcp-gateway-auth"] == "Bearer custom-tok"
         assert "authorization" not in headers
@@ -10080,18 +9907,14 @@ async def test_local_affinity_post_injects_server_id_with_non_dict_params(monkey
         patch("mcpgateway.services.session_affinity.get_session_affinity", return_value=mock_pool),
         patch("mcpgateway.services.session_affinity.get_worker_id", return_value="worker-1"),
         patch("mcpgateway.services.session_affinity.SessionAffinity", mock_session_class),
-        patch("mcpgateway.transports.streamablehttp_transport.httpx.AsyncClient") as mock_client_cls,
+        patch("mcpgateway.transports.streamablehttp_transport.post_rpc_in_process") as mock_post_rpc,
     ):
-        mock_client = AsyncMock()
-        mock_client.post = AsyncMock(return_value=mock_response)
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=None)
-        mock_client_cls.return_value = mock_client
+        mock_post_rpc.return_value = mock_response
 
         await wrapper.handle_streamable_http(scope, receive, send)
 
-        mock_client.post.assert_called_once()
-        posted_content = mock_client.post.call_args.kwargs["content"]
+        mock_post_rpc.assert_called_once()
+        posted_content = mock_post_rpc.call_args.kwargs["content"]
         posted_json = orjson.loads(posted_content)
 
         assert isinstance(posted_json["params"], dict), f"params should be dict, was {type(posted_json['params'])}"
@@ -10429,13 +10252,9 @@ async def test_local_affinity_post_routes_to_rpc(monkeypatch):
         patch("mcpgateway.services.session_affinity.get_session_affinity", return_value=mock_pool),
         patch("mcpgateway.services.session_affinity.get_worker_id", return_value="worker-1"),
         patch("mcpgateway.services.session_affinity.SessionAffinity", mock_session_class),
-        patch("mcpgateway.transports.streamablehttp_transport.httpx.AsyncClient") as mock_client_cls,
+        patch("mcpgateway.transports.streamablehttp_transport.post_rpc_in_process") as mock_post_rpc,
     ):
-        mock_client = AsyncMock()
-        mock_client.post = AsyncMock(return_value=mock_response)
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=None)
-        mock_client_cls.return_value = mock_client
+        mock_post_rpc.return_value = mock_response
 
         await wrapper.handle_streamable_http(scope, _make_receive(body), send)
 
@@ -10538,17 +10357,11 @@ async def test_local_affinity_post_denies_non_owner_session_access(monkeypatch):
         patch("mcpgateway.services.session_affinity.get_session_affinity", return_value=mock_pool),
         patch("mcpgateway.services.session_affinity.get_worker_id", return_value="worker-1"),
         patch("mcpgateway.services.session_affinity.SessionAffinity", mock_session_class),
-        patch("mcpgateway.transports.streamablehttp_transport.httpx.AsyncClient") as mock_client_cls,
+        patch("mcpgateway.transports.streamablehttp_transport.post_rpc_in_process") as mock_post_rpc,
     ):
-        mock_client = AsyncMock()
-        mock_client.post = AsyncMock()
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=None)
-        mock_client_cls.return_value = mock_client
-
         await wrapper.handle_streamable_http(scope, _make_receive(body), send)
 
-        mock_client.post.assert_not_awaited()
+        mock_post_rpc.assert_not_awaited()
 
     await wrapper.shutdown()
     assert messages[0]["status"] == 403
@@ -10607,19 +10420,15 @@ async def test_local_affinity_post_routes_to_rpc_multipart_and_auth_header(monke
         patch("mcpgateway.services.session_affinity.get_session_affinity", return_value=mock_pool),
         patch("mcpgateway.services.session_affinity.get_worker_id", return_value="worker-1"),
         patch("mcpgateway.services.session_affinity.SessionAffinity", mock_session_class),
-        patch("mcpgateway.transports.streamablehttp_transport.httpx.AsyncClient") as mock_client_cls,
+        patch("mcpgateway.transports.streamablehttp_transport.post_rpc_in_process") as mock_post_rpc,
     ):
-        mock_client = AsyncMock()
-        mock_client.post = AsyncMock(return_value=mock_response)
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=None)
-        mock_client_cls.return_value = mock_client
+        mock_post_rpc.return_value = mock_response
 
         await wrapper.handle_streamable_http(scope, receive, send)
 
     await wrapper.shutdown()
     assert messages[0]["status"] == 200
-    assert mock_client.post.call_args.kwargs["headers"]["authorization"] == "Bearer abc"
+    assert mock_post_rpc.call_args.kwargs["headers"]["authorization"] == "Bearer abc"
 
 
 @pytest.mark.asyncio
@@ -10778,13 +10587,9 @@ async def test_local_affinity_post_exception_falls_through(monkeypatch):
         patch("mcpgateway.services.session_affinity.get_session_affinity", return_value=mock_pool),
         patch("mcpgateway.services.session_affinity.get_worker_id", return_value="worker-1"),
         patch("mcpgateway.services.session_affinity.SessionAffinity", mock_session_class),
-        patch("mcpgateway.transports.streamablehttp_transport.httpx.AsyncClient") as mock_client_cls,
+        patch("mcpgateway.transports.streamablehttp_transport.post_rpc_in_process") as mock_post_rpc,
     ):
-        mock_client = AsyncMock()
-        mock_client.post = AsyncMock(side_effect=Exception("httpx fail"))
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=None)
-        mock_client_cls.return_value = mock_client
+        mock_post_rpc.side_effect = Exception("httpx fail")
 
         await wrapper.handle_streamable_http(scope, _make_receive(body), send)
 
@@ -12067,6 +11872,31 @@ class TestProxyFunctions:
         assert len(result) == 1
         assert result[0].text == "File content here"
         mock_session.read_resource.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_proxy_read_resource_records_the_upstream_cache_directive(self):
+        """The header-based direct proxy keeps the upstream's ttlMs for the read adapter, scope private."""
+        mock_gateway = MagicMock()
+        mock_gateway.id = "gw-789"
+        mock_gateway.url = "http://remote-gateway.example.com/mcp"
+        mock_gateway.passthrough_headers = None
+        mock_result = MagicMock()
+        mock_result.contents = [MagicMock(text="File content here")]
+        mock_result.ttl_ms = 60_000
+        mock_result.cache_scope = "public"
+        mock_session = AsyncMock()
+        mock_session.read_resource = AsyncMock(return_value=mock_result)
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=None)
+        tr.request_headers_var.set({})
+        tr.upstream_read_cache_var.set(None)
+
+        with patch("mcpgateway.transports.streamablehttp_transport.mcp_proxy_client", return_value=mock_session):
+            with patch("mcpgateway.transports.streamablehttp_transport.build_gateway_auth_headers", return_value={}):
+                result = await tr._proxy_read_resource_to_gateway(mock_gateway, "file:///test.txt", {}, None)
+
+        assert len(result) == 1
+        assert tr.upstream_read_cache_var.get() == {"ttl_ms": 60_000, "cache_scope": "private"}
 
     @pytest.mark.asyncio
     async def test_proxy_read_resource_with_meta(self):
@@ -13472,17 +13302,13 @@ async def test_local_affinity_post_injects_server_id(monkeypatch):
     with patch("mcpgateway.services.session_affinity.get_session_affinity", return_value=mock_pool):
         with patch("mcpgateway.services.session_affinity.get_worker_id", return_value="worker-1"):
             with patch("mcpgateway.services.session_affinity.SessionAffinity", mock_session_class):
-                with patch("mcpgateway.transports.streamablehttp_transport.httpx.AsyncClient") as mock_client_cls:
-                    mock_client = AsyncMock()
-                    mock_client.post = AsyncMock(return_value=mock_response)
-                    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-                    mock_client.__aexit__ = AsyncMock(return_value=None)
-                    mock_client_cls.return_value = mock_client
+                with patch("mcpgateway.transports.streamablehttp_transport.post_rpc_in_process") as mock_post_rpc:
+                    mock_post_rpc.return_value = mock_response
 
                     await wrapper.handle_streamable_http(scope, receive, send)
 
-                    mock_client.post.assert_called_once()
-                    posted_content = mock_client.post.call_args.kwargs["content"]
+                    mock_post_rpc.assert_called_once()
+                    posted_content = mock_post_rpc.call_args.kwargs["content"]
                     posted_json = orjson.loads(posted_content)
 
                     assert "server_id" in posted_json["params"]
@@ -14583,17 +14409,13 @@ async def test_local_affinity_post_injects_server_id_when_params_missing(monkeyp
     with patch("mcpgateway.services.session_affinity.get_session_affinity", return_value=mock_pool):
         with patch("mcpgateway.services.session_affinity.get_worker_id", return_value="worker-1"):
             with patch("mcpgateway.services.session_affinity.SessionAffinity", mock_session_class):
-                with patch("mcpgateway.transports.streamablehttp_transport.httpx.AsyncClient") as mock_client_cls:
-                    mock_client = AsyncMock()
-                    mock_client.post = AsyncMock(return_value=mock_response)
-                    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-                    mock_client.__aexit__ = AsyncMock(return_value=None)
-                    mock_client_cls.return_value = mock_client
+                with patch("mcpgateway.transports.streamablehttp_transport.post_rpc_in_process") as mock_post_rpc:
+                    mock_post_rpc.return_value = mock_response
 
                     await wrapper.handle_streamable_http(scope, receive, send)
 
-                    mock_client.post.assert_called_once()
-                    posted_content = mock_client.post.call_args.kwargs["content"]
+                    mock_post_rpc.assert_called_once()
+                    posted_content = mock_post_rpc.call_args.kwargs["content"]
                     posted_json = orjson.loads(posted_content)
 
                     # params was created and server_id injected
@@ -14646,17 +14468,13 @@ async def test_local_affinity_post_no_injection_without_server_url(monkeypatch):
     with patch("mcpgateway.services.session_affinity.get_session_affinity", return_value=mock_pool):
         with patch("mcpgateway.services.session_affinity.get_worker_id", return_value="worker-1"):
             with patch("mcpgateway.services.session_affinity.SessionAffinity", mock_session_class):
-                with patch("mcpgateway.transports.streamablehttp_transport.httpx.AsyncClient") as mock_client_cls:
-                    mock_client = AsyncMock()
-                    mock_client.post = AsyncMock(return_value=mock_response)
-                    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-                    mock_client.__aexit__ = AsyncMock(return_value=None)
-                    mock_client_cls.return_value = mock_client
+                with patch("mcpgateway.transports.streamablehttp_transport.post_rpc_in_process") as mock_post_rpc:
+                    mock_post_rpc.return_value = mock_response
 
                     await wrapper.handle_streamable_http(scope, receive, send)
 
-                    mock_client.post.assert_called_once()
-                    posted_content = mock_client.post.call_args.kwargs["content"]
+                    mock_post_rpc.assert_called_once()
+                    posted_content = mock_post_rpc.call_args.kwargs["content"]
                     posted_json = orjson.loads(posted_content)
 
                     # No server_id injected
@@ -15679,6 +15497,7 @@ async def test_set_logging_level_oauth_enforcement_with_authenticated_context(mo
 @pytest.mark.asyncio
 async def test_complete_oauth_enforcement_with_authenticated_context(monkeypatch):
     """complete calls _check_server_oauth_enforcement in permissive mode."""
+    monkeypatch.setattr(tr, "_check_streamable_permission", AsyncMock(return_value=True))
     # First-Party
     from mcpgateway.transports.streamablehttp_transport import complete
 
@@ -15932,7 +15751,7 @@ async def test_session_owner_mismatch_logs_warning(monkeypatch, caplog):
                 }
             )
             try:
-                with caplog.at_level(logging.WARNING, logger="mcpgateway.transports.streamablehttp_transport"):
+                with caplog.at_level("WARNING", logger="mcpgateway.transports.streamablehttp_transport"):
                     await wrapper.handle_streamable_http(scope, _make_receive(b""), send)
             finally:
                 tr.user_context_var.reset(token)
@@ -17016,6 +16835,29 @@ async def test_complete_denied_by_token_scope(monkeypatch):
 
     with pytest.raises(PermissionError, match="Access denied"):
         await complete(ref, argument)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("server_id", [None, "server-1"])
+@pytest.mark.parametrize("teams,check_any_team", [(["team-a"], True), ([], False)])
+async def test_complete_denied_by_rbac(monkeypatch, server_id, teams, check_any_team):
+    """Reject completion when token scope permits tools.read but RBAC denies it."""
+    user_context = {**_scoped_user_context(["tools.read"]), "teams": teams, "token_use": "api"}
+    monkeypatch.setattr(tr, "_get_request_context_or_default", AsyncMock(return_value=(server_id, None, user_context)))
+    permission = AsyncMock(return_value=False)
+    monkeypatch.setattr(tr, "_check_streamable_permission", permission)
+    completion = AsyncMock()
+    monkeypatch.setattr(tr.completion_service, "handle_completion", completion)
+
+    with pytest.raises(PermissionError, match="Access denied"):
+        await tr.complete({"type": "ref/prompt", "name": "test"}, {"name": "arg", "value": "val"})
+
+    permission.assert_awaited_once_with(
+        user_context=user_context,
+        permission="tools.read",
+        check_any_team=check_any_team,
+    )
+    completion.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -19102,12 +18944,16 @@ class TestV2HandlerAdapters:
     async def test_adapt_complete_delegates(self, monkeypatch):
         expected = types.CompleteResult(completion=types.Completion(values=["a"], total=1, hasMore=False))
 
-        async def fake_complete(ref, argument, context):
+        async def fake_complete(ref, argument, context, meta):
             assert context is None
+            assert meta == {"trace": "completion-1"}
             return expected
 
         monkeypatch.setattr(tr, "complete", fake_complete)
-        result = await tr._adapt_complete(object(), SimpleNamespace(ref={"type": "ref/prompt", "name": "p"}, argument={"name": "a", "value": ""}))
+        result = await tr._adapt_complete(
+            object(),
+            SimpleNamespace(ref={"type": "ref/prompt", "name": "p"}, argument={"name": "a", "value": ""}, meta={"trace": "completion-1"}),
+        )
 
         assert result is expected
 
@@ -19255,6 +19101,24 @@ class TestUnknownEntityErrors:
         assert result.content[0].text == "Unknown tool: missing_tool"
 
     @pytest.mark.asyncio
+    async def test_error_code_in_meta_reaches_the_client(self, monkeypatch):
+        """The upstream error code the service preserved in the result's _meta is carried through the egress."""
+        # First-Party
+        from mcpgateway.common.models import TextContent, ToolResult
+        from mcpgateway.services.tool_service import TOOL_ERROR_CODE
+
+        self._fake_db(monkeypatch)
+        relayed = ToolResult(content=[TextContent(type="text", text="Unknown tool: routed")], is_error=True, meta={TOOL_ERROR_CODE: {"code": -32602}})
+        monkeypatch.setattr(tool_service, "invoke_tool", AsyncMock(return_value=relayed))
+
+        result = await call_tool("routed", {})
+
+        assert isinstance(result, types.CallToolResult)
+        assert result.is_error is True
+        assert result.content[0].text == "Unknown tool: routed"
+        assert result.meta == {TOOL_ERROR_CODE: {"code": -32602}}
+
+    @pytest.mark.asyncio
     async def test_invocation_failure_returns_iserror_result(self, monkeypatch):
         """ToolInvocationError (eg: timeouts) becomes an isError result carrying the reason."""
         self._fake_db(monkeypatch)
@@ -19288,6 +19152,40 @@ class TestUnknownEntityErrors:
             await get_prompt("missing_prompt")
         assert exc_info.value.error.code == types.INVALID_PARAMS
         assert exc_info.value.error.message == "Unknown prompt: missing_prompt"
+
+    @pytest.mark.asyncio
+    async def test_prompt_validation_error_raises_invalid_params(self, monkeypatch):
+        """A missing required argument becomes MCPError(-32602) carrying the service's message, which names the argument."""
+        self._fake_db(monkeypatch)
+        monkeypatch.setattr(prompt_service, "get_prompt", AsyncMock(side_effect=PromptValidationError("Missing required arguments: name")))
+
+        with pytest.raises(MCPError) as exc_info:
+            await get_prompt("greeting", {})
+        assert exc_info.value.error.code == types.INVALID_PARAMS
+        assert exc_info.value.error.message == "Missing required arguments: name"
+
+    @pytest.mark.asyncio
+    async def test_upstream_prompt_error_is_relayed_as_the_upstream_json_rpc_error(self, monkeypatch):
+        """PromptUpstreamError becomes an MCPError carrying the upstream's code, message and data."""
+        self._fake_db(monkeypatch)
+        monkeypatch.setattr(prompt_service, "get_prompt", AsyncMock(side_effect=PromptUpstreamError(-32602, "Invalid params from the strict upstream", {"argument": "name"})))
+
+        with pytest.raises(MCPError) as exc_info:
+            await get_prompt("remote_prompt", {"name": "x"})
+        assert exc_info.value.error.code == -32602
+        assert exc_info.value.error.message == "Invalid params from the strict upstream"
+        assert exc_info.value.error.data == {"argument": "name"}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("sent, forwarded", [pytest.param(None, {}, id="omitted"), pytest.param({"name": "x"}, {"name": "x"}, id="given")])
+    async def test_get_prompt_adapter_always_asks_for_a_rendered_prompt(self, monkeypatch, sent, forwarded):
+        """Over MCP an omitted arguments field becomes an empty dict (a render request); given arguments are forwarded unchanged."""
+        handler = AsyncMock(return_value=types.GetPromptResult(messages=[]))
+        monkeypatch.setattr(tr, "get_prompt", handler)
+
+        await tr._adapt_get_prompt(object(), SimpleNamespace(name="greeting", arguments=sent))
+
+        handler.assert_awaited_once_with("greeting", forwarded)
 
     @pytest.mark.asyncio
     async def test_unknown_resource_raises_invalid_params(self, monkeypatch):
@@ -19879,13 +19777,9 @@ async def test_affinity_span_attributes_owner_is_different_worker(monkeypatch):
         patch("mcpgateway.services.session_affinity.get_session_affinity", return_value=mock_pool),
         patch("mcpgateway.services.session_affinity.get_worker_id", return_value="this-worker"),
         patch("mcpgateway.services.session_affinity.SessionAffinity", mock_session_class),
-        patch("mcpgateway.transports.streamablehttp_transport.httpx.AsyncClient") as mock_client_cls,
+        patch("mcpgateway.transports.streamablehttp_transport.post_rpc_in_process") as mock_post_rpc,
     ):
-        mock_client = AsyncMock()
-        mock_client.post = AsyncMock(return_value=mock_response)
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=None)
-        mock_client_cls.return_value = mock_client
+        mock_post_rpc.return_value = mock_response
         await wrapper.handle_streamable_http(scope, _make_receive(body), send)
 
     await wrapper.shutdown()
@@ -19951,3 +19845,277 @@ async def test_affinity_span_attributes_no_owner(monkeypatch):
 
     assert captured.get("mcp.affinity.owner") == "none"
     assert captured.get("mcp.affinity.decision") == "local"
+
+
+class TestListCacheDirectives:
+    """The modern-path list adapters carry ttlMs (from the catalog TTL) and cacheScope=private."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "adapter, handler, payload, result_type",
+        [
+            ("_adapt_list_tools", "list_tools", [types.Tool(name="t", inputSchema={"type": "object"})], types.ListToolsResult),
+            ("_adapt_list_prompts", "list_prompts", [types.Prompt(name="p")], types.ListPromptsResult),
+            ("_adapt_list_resources", "list_resources", [types.Resource(name="r", uri="test://r")], types.ListResourcesResult),
+            ("_adapt_list_resource_templates", "list_resource_templates", [], types.ListResourceTemplatesResult),
+        ],
+    )
+    async def test_list_adapter_sets_ttl_and_private_scope(self, monkeypatch, adapter, handler, payload, result_type):
+        """Each list result carries the catalog TTL for the request's server scope and cacheScope=private."""
+
+        async def fake_handler():
+            return payload
+
+        ttl = AsyncMock(return_value=123_000)
+        monkeypatch.setattr(tr, handler, fake_handler)
+        monkeypatch.setattr(tr, "_catalog_ttl_ms", ttl)
+        token = tr._request_server_id_var.set("srv-1")
+        try:
+            result = await getattr(tr, adapter)(object())
+        finally:
+            tr._request_server_id_var.reset(token)
+
+        assert isinstance(result, result_type)
+        assert result.ttl_ms == 123_000
+        assert result.cache_scope == "private"
+        ttl.assert_awaited_once_with("srv-1")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "resolved_server_id, expected_scope",
+        [
+            pytest.param("srv-1", "srv-1", id="scoped-to-a-virtual-server"),
+            pytest.param("default_server_id", None, id="unscoped"),
+        ],
+    )
+    async def test_discover_resolves_the_request_scope_before_sizing_ttl(self, monkeypatch, resolved_server_id, expected_scope):
+        """server/discover resolves the request like the list handlers, so the TTL is sized for the request's server."""
+        monkeypatch.setattr(tr, "_resolve_request_context", AsyncMock(return_value=(resolved_server_id, {}, {})))
+        ttl = AsyncMock(return_value=300_000)
+        monkeypatch.setattr(tr, "_catalog_ttl_ms", ttl)
+        ctx = SimpleNamespace(protocol_version="2026-07-28")
+
+        result = await tr._adapt_discover_with_ttl_cache_scope(ctx, None)
+
+        assert isinstance(result, types.DiscoverResult)
+        assert "2026-07-28" in result.supported_versions
+        assert result.capabilities is not None
+        assert result.ttl_ms == 300_000
+        assert result.cache_scope == "private"
+        ttl.assert_awaited_once_with(expected_scope)
+        assert tr._v2_request_ctx.get() is None
+
+    @pytest.mark.asyncio
+    async def test_list_adapter_sizes_ttl_from_the_resolved_scope_through_the_real_helper(self, monkeypatch):
+        """No prepopulated scope and no mocked TTL: the handler resolves the request, the real helper queries the upstreams' intervals."""
+
+        async def fake_list_tools():
+            await tr._get_request_context_or_default()  # what the real handler does first
+            return []
+
+        mock_db = MagicMock()
+        mock_db.execute.return_value.scalars.return_value.all.return_value = [900]
+
+        @asynccontextmanager
+        async def fake_get_db():
+            yield mock_db
+
+        monkeypatch.setattr(tr, "list_tools", fake_list_tools)
+        monkeypatch.setattr(tr, "_resolve_request_context", AsyncMock(return_value=("srv-1", {}, {})))
+        monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport.get_db", fake_get_db)
+        with patch("mcpgateway.transports.streamablehttp_transport.settings", SimpleNamespace(health_check_interval=60, gateway_auto_refresh_interval=300)):
+            result = await tr._adapt_list_tools(object())
+
+        assert result.ttl_ms == 900_000
+        assert result.cache_scope == "private"
+        assert mock_db.execute.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_denied_list_never_computes_a_ttl(self, monkeypatch):
+        """Authentication and authorization run inside the handler; when they refuse, no TTL is derived and the refusal propagates."""
+        # Third-Party
+        from fastapi import HTTPException
+
+        async def refusing_list_tools():
+            raise HTTPException(status_code=401, detail="Not authenticated")
+
+        ttl = AsyncMock(return_value=300_000)
+        monkeypatch.setattr(tr, "list_tools", refusing_list_tools)
+        monkeypatch.setattr(tr, "_catalog_ttl_ms", ttl)
+
+        with pytest.raises(HTTPException):
+            await tr._adapt_list_tools(object())
+
+        ttl.assert_not_awaited()
+        assert tr._v2_request_ctx.get() is None
+
+    @pytest.mark.asyncio
+    async def test_context_resolver_records_the_server_scope(self, monkeypatch):
+        """_get_request_context_or_default stores the resolved server id where the adapters read it."""
+        monkeypatch.setattr(tr, "_resolve_request_context", AsyncMock(return_value=("srv-9", {}, {})))
+
+        assert await tr._get_request_context_or_default() == ("srv-9", {}, {})
+        assert tr._request_server_id_var.get() == "srv-9"
+
+        monkeypatch.setattr(tr, "_resolve_request_context", AsyncMock(return_value=("default_server_id", {}, {})))
+
+        assert await tr._get_request_context_or_default() == ("default_server_id", {}, {})
+        assert tr._request_server_id_var.get() is None
+
+
+class TestReadCacheDirectives:
+    """resources/read relays the upstream's ttlMs, always with cacheScope private; DB-served content gets ttlMs 0."""
+
+    @pytest.mark.asyncio
+    async def test_read_adapter_relays_the_upstream_directive(self, monkeypatch):
+        """When the service recorded an upstream directive, the result carries it."""
+        contents = [types.TextResourceContents(uri="test://r", text="hello")]
+        monkeypatch.setattr(tr, "read_resource", AsyncMock(return_value=contents))
+        token = tr.upstream_read_cache_var.set({"ttl_ms": 60_000, "cache_scope": "private"})
+        try:
+            result = await tr._adapt_read_resource(object(), SimpleNamespace(uri="test://r"))
+        finally:
+            tr.upstream_read_cache_var.reset(token)
+
+        assert result.contents == contents
+        assert result.ttl_ms == 60_000
+        assert result.cache_scope == "private"
+
+    @pytest.mark.asyncio
+    async def test_read_adapter_defaults_when_no_upstream_was_read(self, monkeypatch):
+        """Content served from the gateway's own store: ttlMs 0, cacheScope private, set explicitly."""
+        monkeypatch.setattr(tr, "read_resource", AsyncMock(return_value="hello"))
+        token = tr.upstream_read_cache_var.set(None)
+        try:
+            result = await tr._adapt_read_resource(object(), SimpleNamespace(uri="test://r"))
+        finally:
+            tr.upstream_read_cache_var.reset(token)
+
+        assert result.contents[0].text == "hello"
+        assert result.ttl_ms == 0
+        assert result.cache_scope == "private"
+
+    @pytest.mark.asyncio
+    async def test_read_adapter_relays_the_directive_for_binary_content(self, monkeypatch):
+        """A binary resource read from an upstream carries the directive like a text one."""
+        monkeypatch.setattr(tr, "read_resource", AsyncMock(return_value=b"\x00\x01binary"))
+        token = tr.upstream_read_cache_var.set({"ttl_ms": 60_000, "cache_scope": "private"})
+        try:
+            result = await tr._adapt_read_resource(object(), SimpleNamespace(uri="test://blob"))
+        finally:
+            tr.upstream_read_cache_var.reset(token)
+
+        assert isinstance(result.contents[0], types.BlobResourceContents)
+        assert result.ttl_ms == 60_000
+        assert result.cache_scope == "private"
+
+    @pytest.mark.asyncio
+    async def test_read_handler_leaves_no_directive_when_the_read_raises(self, monkeypatch):
+        """A failing read must not leave an earlier directive behind for a later result."""
+        mock_db = MagicMock()
+
+        @asynccontextmanager
+        async def fake_get_db():
+            yield mock_db
+
+        monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport.get_db", fake_get_db)
+        monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport._get_request_context_or_default", AsyncMock(return_value=(None, {}, {})))
+        monkeypatch.setattr(tr.resource_service, "read_resource", AsyncMock(side_effect=RuntimeError("upstream down")))
+        token = tr.upstream_read_cache_var.set({"ttl_ms": 999, "cache_scope": "private"})
+        try:
+            with pytest.raises(Exception):
+                await tr.read_resource("test://r")
+            assert tr.upstream_read_cache_var.get() is None
+        finally:
+            tr.upstream_read_cache_var.reset(token)
+
+    @pytest.mark.asyncio
+    async def test_read_handler_clears_a_stale_directive_before_reading(self, monkeypatch):
+        """A directive left over from an earlier read in the same context must not leak into this one."""
+        mock_db = MagicMock()
+
+        @asynccontextmanager
+        async def fake_get_db():
+            yield mock_db
+
+        monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport.get_db", fake_get_db)
+        monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport._get_request_context_or_default", AsyncMock(return_value=(None, {}, {})))
+        monkeypatch.setattr(tr.resource_service, "read_resource", AsyncMock(return_value=SimpleNamespace(text="hello", blob=None, mime_type="text/plain", meta=None)))
+        token = tr.upstream_read_cache_var.set({"ttl_ms": 999, "cache_scope": "public"})
+        try:
+            await tr.read_resource("test://r")
+            assert tr.upstream_read_cache_var.get() is None
+        finally:
+            tr.upstream_read_cache_var.reset(token)
+
+
+class TestCatalogTtl:
+    """``ttlMs`` for the gateway's lists: the shortest effective refresh interval among the upstreams that feed them."""
+
+    _settings = SimpleNamespace(health_check_interval=60, gateway_auto_refresh_interval=300)
+
+    @staticmethod
+    def _fake_db(monkeypatch, intervals):
+        """A db whose single query returns ``intervals`` (the distinct refresh intervals of the server's upstreams)."""
+        mock_db = MagicMock()
+        mock_db.execute.return_value.scalars.return_value.all.return_value = intervals
+
+        @asynccontextmanager
+        async def fake_get_db():
+            yield mock_db
+
+        monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport.get_db", fake_get_db)
+        return mock_db
+
+    @pytest.mark.asyncio
+    async def test_unscoped_request_uses_the_global_default(self, monkeypatch):
+        """No server scope: the global auto-refresh interval, in milliseconds, and no query."""
+        mock_db = self._fake_db(monkeypatch, intervals=[])
+        with patch("mcpgateway.transports.streamablehttp_transport.settings", self._settings):
+            assert await tr._catalog_ttl_ms(None) == 300_000
+        mock_db.execute.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_scoped_request_takes_the_shortest_effective_interval(self, monkeypatch):
+        """Two upstreams, one overriding to 900s and one on the default: the default wins as the shorter."""
+        self._fake_db(monkeypatch, intervals=[900, None])
+        with patch("mcpgateway.transports.streamablehttp_transport.settings", self._settings):
+            assert await tr._catalog_ttl_ms("srv-1") == 300_000
+
+    @pytest.mark.asyncio
+    async def test_override_shorter_than_the_health_check_interval_is_floored_to_it(self, monkeypatch):
+        """A 30s override cannot refresh faster than the 60s loop that drives refreshes, so the TTL says 60s."""
+        self._fake_db(monkeypatch, intervals=[30])
+        with patch("mcpgateway.transports.streamablehttp_transport.settings", self._settings):
+            assert await tr._catalog_ttl_ms("srv-1") == 60_000
+
+    def test_zero_override_means_refresh_every_loop_and_is_floored_to_the_health_check_interval(self):
+        """An override of 0 (not reachable via the API, whose minimum is 60) refreshes on every loop pass, so the TTL is the loop interval."""
+        with patch("mcpgateway.transports.streamablehttp_transport.settings", self._settings):
+            assert tr._upstream_refresh_seconds(0) == 60
+            assert tr._upstream_refresh_seconds(None) == 300
+
+    @pytest.mark.asyncio
+    async def test_scoped_request_issues_exactly_one_query(self, monkeypatch):
+        """The intervals come from a single statement over the association tables; no item objects are loaded."""
+        mock_db = self._fake_db(monkeypatch, intervals=[900])
+        with patch("mcpgateway.transports.streamablehttp_transport.settings", self._settings):
+            assert await tr._catalog_ttl_ms("srv-1") == 900_000
+        assert mock_db.execute.call_count == 1
+        mock_db.get.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_unknown_server_or_server_without_upstreams_falls_back_to_the_default(self, monkeypatch):
+        """An unknown server id, or a server with only local items, yields no intervals: the default applies."""
+        self._fake_db(monkeypatch, intervals=[])
+        with patch("mcpgateway.transports.streamablehttp_transport.settings", self._settings):
+            assert await tr._catalog_ttl_ms("srv-unknown") == 300_000
+
+    @pytest.mark.asyncio
+    async def test_lookup_failure_means_no_caching_and_is_logged(self, monkeypatch, caplog):
+        """A failing lookup never breaks a list, but the client is told not to cache and a warning is logged."""
+        mock_db = self._fake_db(monkeypatch, intervals=[900])
+        mock_db.execute.side_effect = RuntimeError("db down")
+        with patch("mcpgateway.transports.streamablehttp_transport.settings", self._settings), caplog.at_level("WARNING", logger="mcpgateway.transports.streamablehttp_transport"):
+            assert await tr._catalog_ttl_ms("srv-1") == 0
+        assert any("Could not derive the catalog TTL" in r.getMessage() for r in caplog.records)

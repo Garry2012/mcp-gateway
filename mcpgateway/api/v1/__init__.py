@@ -300,14 +300,6 @@ def _assemble_routers(  # noqa: C901 — deliberate single-function assembly, co
             validate_section_permissions(admin_router)
             logger.info("Admin router included - Admin API enabled")
 
-            # First-Party
-            from mcpgateway.routers.runtime_admin_router import runtime_admin_router  # pylint: disable=import-outside-toplevel
-
-            # enforce_admin_csrf is required, not optional: /admin is in
-            # settings.csrf_exempt_paths, so CSRFMiddleware never runs on the legacy
-            # mount and this dependency is the only CSRF control these PATCH routes get.
-            target_router.include_router(runtime_admin_router, prefix="/admin/runtime", tags=["Runtime Admin"], dependencies=[Depends(enforce_admin_csrf)])
-
             # Only the /admin/well-known status endpoint belongs in the versioned
             # router.  The full well_known router (which owns /.well-known/* paths)
             # is mounted on app directly in main.py so those paths stay at server
@@ -326,6 +318,7 @@ def _assemble_routers(  # noqa: C901 — deliberate single-function assembly, co
 def build_v1_router(
     settings: Any,
     *,
+    sso_user_provisioning_enabled: bool | None = None,
     protocol_router: APIRouter,
     tool_router: APIRouter,
     resource_router: APIRouter,
@@ -346,6 +339,7 @@ def build_v1_router(
 
     Args:
         settings: Application settings instance.
+        sso_user_provisioning_enabled: Startup registration decision shared with the pre-auth gate. Defaults to the three provisioning flags.
         protocol_router: Inline protocol router from main.py.
         tool_router: Inline tools router from main.py.
         resource_router: Inline resources router from main.py.
@@ -394,6 +388,17 @@ def build_v1_router(
 
     v1_router.include_router(plugins_router)
     logger.info("Plugin discovery router included - v1 only")
+
+    if sso_user_provisioning_enabled is None:
+        sso_user_provisioning_enabled = bool(settings.mcpgateway_admin_api_enabled and settings.sso_enabled and getattr(settings, "sso_user_provisioning_api_enabled", False))
+    if sso_user_provisioning_enabled:
+        # Keep provisioning v1-only and independent of the browser SSO/JIT routers.
+        # First-Party
+        from mcpgateway.admin import enforce_admin_csrf  # pylint: disable=import-outside-toplevel
+        from mcpgateway.routers.sso_user_provisioning import router as sso_user_provisioning_router  # pylint: disable=import-outside-toplevel
+
+        v1_router.include_router(sso_user_provisioning_router, dependencies=[Depends(enforce_admin_csrf)])
+        logger.info("SSO user provisioning router included - v1 only")
     return v1_router
 
 

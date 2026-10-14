@@ -6,14 +6,18 @@ This repository (`Garry2012/mcp-gateway`) is a fork of
 The fork tracks upstream as closely as possible. It carries only the divergences below.
 Keep UI changes limited to the functional fixes listed below. Submit fixes upstream and avoid branding or cosmetic changes.
 
-Last updated: **2026-10-06**.
+Last updated: **2026-10-14**.
 
 ## Syncing with upstream
 
-The 2026-10-06 integration targets upstream `faa31eaf5`. It retains the divergences below.
+The 2026-10-14 integration targets upstream `51a4ee414`. It retains the divergences below.
 The healthcare profile pins both MCP protocol modes to `legacy` to preserve deployed handshake behavior.
 Automatic negotiation fails discovery against an older sample server that omits modern cache metadata.
 Test modern negotiation separately before changing this profile.
+
+Upstream now resolves exact tool names first and permits an original-name fallback only when one accessible tool matches.
+A virtual-server request cannot also select an upstream through `X-Context-Forge-Gateway-Id`.
+Catalog cache metadata adds a database lookup for virtual-server discovery; measure its cost during validation.
 
 The `upstream` remote has pushing disabled, so `git push upstream` fails loudly.
 
@@ -24,6 +28,11 @@ git merge upstream/main
 ```
 
 Use merge, not rebase. Merge resolves each conflict once and records the resolution in history.
+Preserve upstream secret-scan audit decisions when the filename and finding hash match. Re-run the scan after resolving `.secrets.baseline`.
+
+The live E2E module keeps the synchronous Playwright resource-renaming test after the asynchronous MCP tests.
+It uses the SDK v2 `is_error` property and accepts both existing detached-tool denial messages.
+Preserve these test compatibility fixes until upstream includes them.
 
 ### Upstream reset: 2026-10-02
 
@@ -60,7 +69,9 @@ gain no team permissions. Visibility and token permission caps stay independent.
 **Merge guidance:** do not restore a server-ID prerequisite. Keep
 `test_check_any_team_for_streamable_rbac` and `test_global_tool_call_uses_token_scoped_roles`
 in `tests/unit/mcpgateway/transports/test_streamablehttp_transport.py`, including the
-public-only deny cases. Submit this fix upstream, then drop this divergence when it merges.
+public-only deny cases. New handlers, including `completion/complete`, must use this helper.
+Upstream helper references can merge without conflicts after a fork rename.
+Submit this fix upstream, then drop this divergence when it merges.
 
 ### 3. LLM Chat on MCP SDK 2.x (`langchain.mcp`)
 

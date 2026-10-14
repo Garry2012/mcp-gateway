@@ -469,7 +469,7 @@ class TestOAuthRouter:
 
     @pytest.mark.asyncio
     async def test_initiate_oauth_flow_dcr_disabled_missing_client_id(self, mock_db, mock_request, mock_current_user):
-        """Test OAuth flow when issuer exists but DCR auto-registration is disabled."""
+        """Disabling DCR blocks auto-registration even when its trigger remains enabled."""
         mock_gateway = Mock(spec=Gateway)
         mock_gateway.id = "gateway123"
         mock_gateway.name = "Test Gateway"
@@ -483,9 +483,9 @@ class TestOAuthRouter:
         }
         mock_db.execute.return_value.scalar_one_or_none.return_value = mock_gateway
 
-        with patch("mcpgateway.routers.oauth_router.settings") as mock_settings:
+        with patch("mcpgateway.routers.oauth_router.DcrService") as mock_dcr_service, patch("mcpgateway.routers.oauth_router.settings") as mock_settings:
             mock_settings.dcr_enabled = False
-            mock_settings.dcr_auto_register_on_missing_credentials = False
+            mock_settings.dcr_auto_register_on_missing_credentials = True
 
             from mcpgateway.routers.oauth_router import initiate_oauth_flow
 
@@ -494,6 +494,7 @@ class TestOAuthRouter:
 
             assert exc_info.value.status_code == 400
             assert "incomplete" in str(exc_info.value.detail).lower()
+            mock_dcr_service.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_initiate_oauth_flow_uses_persisted_resource_as_is(self, mock_db, mock_request, mock_current_user):
@@ -2632,10 +2633,8 @@ class TestOAuthAccessHelpers:
         assert ownership_check.call_args.args[1] == []
 
     @pytest.mark.asyncio
-    async def test_enforce_gateway_access_team_visibility_cache_hit_member_allowed(self, mock_db):
-        """Team-visible gateway allows access when the requester is a team member
-        and the cached JWT payload provides a valid team-scoped ``token_teams``.
-        """
+    async def test_enforce_gateway_access_team_visibility_scoped_token_member_allowed(self, mock_db):
+        """Allow a team-scoped token when the membership lookup confirms access."""
         from mcpgateway.routers.oauth_router import _enforce_gateway_access
 
         request = Mock(spec=Request)
@@ -2646,23 +2645,15 @@ class TestOAuthAccessHelpers:
 
         gateway = SimpleNamespace(visibility="team", owner_email=None, team_id="team-1")
 
-        class _User:
-            def is_team_member(self, _team_id):
-                return True
-
-        class _AuthService:
-            async def get_user_by_email(self, _email):
-                return _User()
-
         with patch(
             "mcpgateway.routers.oauth_router.token_scoping_middleware._check_resource_team_ownership",
             return_value=ResourceOwnershipResult.ALLOWED,
-        ):
+        ) as ownership_check:
             with patch(
-                "mcpgateway.services.email_auth_service.EmailAuthService",
-                return_value=_AuthService(),
-            ):
-                # Should not raise — member has access.
+                "mcpgateway.services.team_management_service.TeamManagementService.get_user_role_in_team",
+                new_callable=AsyncMock,
+                return_value="member",
+            ) as mock_role:
                 await _enforce_gateway_access(
                     "gateway123",
                     gateway,
@@ -2670,6 +2661,9 @@ class TestOAuthAccessHelpers:
                     mock_db,
                     request=request,
                 )
+
+        ownership_check.assert_called_once_with("/gateways/gateway123", ["team-1"], db=mock_db, _user_email="user@example.com", preloaded_gateway=gateway)
+        mock_role.assert_awaited_once_with("user@example.com", "team-1")
 
 
 class TestRecoverTokenTeamsFromJwt:
