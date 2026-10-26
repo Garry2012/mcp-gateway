@@ -42,11 +42,13 @@ from starlette.websockets import WebSocketDisconnect
 
 # First-Party
 from mcpgateway.common.models import InitializeResult, ResourceContent, ServerCapabilities
+from mcpgateway.services.prompt_service import PromptUpstreamError, PromptValidationError
 from mcpgateway.config import settings
 import mcpgateway.db as db_mod
 from mcpgateway.plugins.violation_codes import PLUGIN_VIOLATION_CODE_MAPPING
 from mcpgateway.schemas import (
     A2AAgentAggregateMetrics,
+    GatewayCreate,
     GatewayImpactPreview,
     GatewayRead,
     PromptMetrics,
@@ -611,8 +613,7 @@ class TestHealthAndInfrastructure:
 
         session = DummySession()
         with patch("mcpgateway.main.SessionLocal", return_value=session):
-            response_obj = FastAPIResponse()
-            result = mcpgateway_main.healthcheck(response_obj)
+            result = mcpgateway_main.healthcheck()
         assert result["status"] == "unhealthy"
         assert "error" in result
         assert session.invalidate_called is True
@@ -824,13 +825,23 @@ class TestProtocolEndpoints:
         assert response.status_code == 200
         mock_notify.assert_called_once()
 
+    @patch("mcpgateway.middleware.rbac.check_permission_inline", new_callable=AsyncMock, return_value=False)
+    @patch("mcpgateway.main.completion_service.handle_completion")
+    def test_handle_completion_endpoint_denied_by_rbac(self, mock_completion, mock_permission, test_client, auth_headers):
+        """Reject completion before service access when RBAC denies tools.read."""
+        response = test_client.post("/protocol/completion/complete", json={"ref": {"type": "ref/prompt", "name": "test"}}, headers=auth_headers)
+        assert response.status_code == 403
+        mock_permission.assert_awaited_once()
+        assert mock_permission.await_args.args[1] == "tools.read"
+        mock_completion.assert_not_called()
+
     @patch("mcpgateway.main.get_scoped_resource_access_context")
     @patch("mcpgateway.main.completion_service.handle_completion")
     def test_handle_completion_endpoint(self, mock_completion, mock_filter_context, test_client, auth_headers):
         """Test completion handling endpoint."""
         mock_filter_context.return_value = ("scoped@example.com", ["team-1"])
         mock_completion.return_value = {"result": "completion_result"}
-        req = {"ref": {"type": "ref/prompt", "name": "test"}}
+        req = {"ref": {"type": "ref/prompt", "name": "test"}, "_meta": {"trace": "completion-1"}}
         response = test_client.post("/protocol/completion/complete", json=req, headers=auth_headers)
         assert response.status_code == 200
         mock_completion.assert_called_once_with(ANY, req, user_email="scoped@example.com", token_teams=["team-1"])
@@ -864,7 +875,13 @@ class TestProtocolEndpoints:
     @patch("mcpgateway.main.get_scoped_resource_access_context")
     @patch("mcpgateway.main.completion_service.handle_completion")
     def test_handle_completion_endpoint_maps_completion_error(self, mock_completion, mock_filter_context, test_client, auth_headers):
-        """Protocol completion endpoint should map completion validation errors to 400."""
+        """Protocol completion endpoint maps an unclassified CompletionError to 500.
+
+        completion_error_code() defaults an unclassified CompletionError to
+        -32603 (Internal error); the REST mapping mirrors that by returning
+        500 for anything that isn't CompletionInvalidParamsError/
+        CompletionNotSupportedError (#6629).
+        """
         # First-Party
         from mcpgateway.services.completion_service import CompletionError
 
@@ -874,8 +891,53 @@ class TestProtocolEndpoints:
         req = {"ref": {"type": "ref/prompt", "name": "test"}}
         response = test_client.post("/protocol/completion/complete", json=req, headers=auth_headers)
 
-        assert response.status_code == 400
+        assert response.status_code == 500
         assert "invalid completion request" in response.json()["detail"]
+
+    @patch("mcpgateway.main.get_scoped_resource_access_context")
+    @patch("mcpgateway.main.completion_service.handle_completion")
+    def test_handle_completion_endpoint_maps_not_supported_to_400(self, mock_completion, mock_filter_context, test_client, auth_headers):
+        """Protocol completion endpoint maps CompletionNotSupportedError to 400 (#6629)."""
+        # First-Party
+        from mcpgateway.services.completion_service import CompletionNotSupportedError
+
+        mock_filter_context.return_value = ("viewer@example.com", ["team-1"])
+        mock_completion.side_effect = CompletionNotSupportedError("nope")
+
+        req = {"ref": {"type": "ref/prompt", "name": "test"}}
+        response = test_client.post("/protocol/completion/complete", json=req, headers=auth_headers)
+
+        assert response.status_code == 400
+
+    @patch("mcpgateway.main.get_scoped_resource_access_context")
+    @patch("mcpgateway.main.completion_service.handle_completion")
+    def test_handle_completion_endpoint_maps_invalid_params_to_400(self, mock_completion, mock_filter_context, test_client, auth_headers):
+        """Protocol completion endpoint maps CompletionInvalidParamsError to 400 (#6629)."""
+        # First-Party
+        from mcpgateway.services.completion_service import CompletionInvalidParamsError
+
+        mock_filter_context.return_value = ("viewer@example.com", ["team-1"])
+        mock_completion.side_effect = CompletionInvalidParamsError("bad params")
+
+        req = {"ref": {"type": "ref/prompt", "name": "test"}}
+        response = test_client.post("/protocol/completion/complete", json=req, headers=auth_headers)
+
+        assert response.status_code == 400
+
+    @patch("mcpgateway.main.get_scoped_resource_access_context")
+    @patch("mcpgateway.main.completion_service.handle_completion")
+    def test_handle_completion_endpoint_maps_internal_error_to_500(self, mock_completion, mock_filter_context, test_client, auth_headers):
+        """Protocol completion endpoint maps CompletionInternalError to 500 (#6629)."""
+        # First-Party
+        from mcpgateway.services.completion_service import CompletionInternalError
+
+        mock_filter_context.return_value = ("viewer@example.com", ["team-1"])
+        mock_completion.side_effect = CompletionInternalError("boom")
+
+        req = {"ref": {"type": "ref/prompt", "name": "test"}}
+        response = test_client.post("/protocol/completion/complete", json=req, headers=auth_headers)
+
+        assert response.status_code == 500
 
     @patch("mcpgateway.main.sampling_handler.create_message")
     def test_handle_sampling_endpoint(self, mock_sampling, test_client, auth_headers):
@@ -995,7 +1057,6 @@ class TestServerEndpoints:
 
     def test_create_server_rejects_non_uuid_associated_tools(self, test_client, auth_headers, monkeypatch):
         """Test that POST /servers rejects non-UUID values in associated_tools with 422."""
-        monkeypatch.setattr("mcpgateway.main.should_expose_error_details", lambda: True)
         req = {
             "server": {
                 "name": "test_server",
@@ -2031,7 +2092,7 @@ class TestPromptEndpoints:
         mock_get.assert_called_once_with(
             ANY,
             "test",
-            {},
+            None,
             user="test_user@example.com",  # Preserved for owner matching (PR #4877)
             server_id=None,
             token_teams=None,  # None = admin bypass
@@ -2067,7 +2128,7 @@ class TestPromptEndpoints:
 
         assert result == {"name": "test", "template": "Hello"}
         # Admin bypass: user_email preserved for owner matching (PR #4877), token_teams=None
-        mock_get.assert_called_once_with(mock_db, "test", {}, user="admin@example.com", server_id=None, token_teams=None, plugin_context_table=None, plugin_global_context=None)
+        mock_get.assert_called_once_with(mock_db, "test", None, user="admin@example.com", server_id=None, token_teams=None, plugin_context_table=None, plugin_global_context=None)
 
     @pytest.mark.asyncio
     @patch("mcpgateway.main.prompt_service.get_prompt")
@@ -2098,6 +2159,26 @@ class TestPromptEndpoints:
         assert result == {"name": "test", "template": "Hello {{name}}"}
         # Admin bypass: user_email preserved for owner matching (PR #4877), token_teams=None
         mock_get.assert_called_once_with(mock_db, "test", {"name": "World"}, user="admin@example.com", server_id=None, token_teams=None, plugin_context_table=None, plugin_global_context=None)
+
+    @pytest.mark.asyncio
+    @patch("mcpgateway.main.prompt_service.get_prompt")
+    async def test_post_prompt_with_an_empty_body_asks_for_the_template(self, mock_get):
+        """POST /prompts/{id} with no arguments keeps returning the template: the service gets None, not an empty dict."""
+        # First-Party
+        from mcpgateway.main import get_prompt
+
+        mock_request = MagicMock()
+        mock_request.state.token_teams = None
+        mock_request.state.plugin_context_table = None
+        mock_request.state.plugin_global_context = None
+        mock_request.headers.get.return_value = None
+        mock_db = MagicMock()
+        mock_get.return_value = {"name": "test", "template": "Hello {{name}}"}
+
+        result = await get_prompt(request=mock_request, prompt_id="test", args={}, db=mock_db, user={"email": "admin@example.com", "is_admin": True})
+
+        assert result == {"name": "test", "template": "Hello {{name}}"}
+        assert mock_get.call_args.args[2] is None
 
     @pytest.mark.asyncio
     @patch("mcpgateway.main.resource_service.read_resource")
@@ -2338,6 +2419,26 @@ class TestPromptEndpoints:
         mock_get.assert_called_once()
 
     @patch("mcpgateway.main.prompt_service.get_prompt")
+    def test_post_prompt_upstream_error_answers_422_with_the_upstream_message(self, mock_get, test_client, auth_headers):
+        """POST /prompts/{id}: an upstream JSON-RPC error stays inside the REST contract (422 + message), whatever its code."""
+        mock_get.side_effect = PromptUpstreamError(-32001, "Custom upstream failure", {"hint": "retry later"})
+
+        response = test_client.post("/prompts/test_prompt", json={"name": "x"}, headers=auth_headers)
+
+        assert response.status_code == 422
+        assert response.json()["message"] == "Custom upstream failure"
+
+    @patch("mcpgateway.main.prompt_service.get_prompt")
+    def test_get_prompt_upstream_error_answers_422_with_the_upstream_message(self, mock_get, test_client, auth_headers):
+        """GET /prompts/{id}: an upstream JSON-RPC error stays inside the REST contract (422 + message), whatever its code."""
+        mock_get.side_effect = PromptUpstreamError(-32001, "Custom upstream failure", {"hint": "retry later"})
+
+        response = test_client.get("/prompts/test_prompt", headers=auth_headers)
+
+        assert response.status_code == 422
+        assert response.json()["detail"] == "Custom upstream failure"
+
+    @patch("mcpgateway.main.prompt_service.get_prompt")
     def test_get_prompt_no_args_ambiguous_returns_422(self, mock_get, test_client, auth_headers):
         """GET /prompts/{id} returns 422 when prompt name is ambiguous across scopes."""
         # First-Party
@@ -2421,6 +2522,172 @@ class TestGatewayEndpoints:
         response = test_client.post("/gateways/", json=req, headers=auth_headers)
         assert response.status_code == 200
         mock_create.assert_called_once()
+
+    @patch("mcpgateway.main.gateway_service.register_gateway")
+    def test_create_gateway_accepts_private_key_jwt_config(self, mock_create, test_client, auth_headers):
+        """Schema layer accepts a private_key_jwt config and forwards it to the service.
+
+        The private key here is opaque placeholder text, not real PEM. This asserts
+        only that the schema's string/presence/type checks pass and that the parsed
+        fields reach the service; ``register_gateway`` is mocked, so no key parsing
+        happens. Deep PEM validation is covered in
+        ``test_gateway_private_key_jwt_validation.py``, and
+        ``test_create_gateway_rejects_malformed_private_key`` asserts the unmocked
+        rejection path.
+        """
+        mock_create.return_value = MOCK_GATEWAY_READ
+        req = {
+            "name": "test_gateway",
+            "url": "http://example.com",
+            "oauth_config": {
+                "client_id": "client-1",
+                "token_url": "https://issuer.example.com/token",
+                "token_endpoint_auth_method": "private_key_jwt",
+                "private_key": "dummy-private-key-material",  # pragma: allowlist secret
+                "token_endpoint_auth_signing_alg": "ES256",
+                "private_key_jwt_kid": "kid-1",
+            },
+        }
+        response = test_client.post("/gateways/", json=req, headers=auth_headers)
+        assert response.status_code == 200
+        parsed: GatewayCreate = mock_create.call_args.args[1]
+        assert parsed.oauth_config["token_endpoint_auth_method"] == "private_key_jwt"
+        assert parsed.oauth_config["token_endpoint_auth_signing_alg"] == "ES256"
+        assert parsed.oauth_config["private_key_jwt_kid"] == "kid-1"
+
+    def test_create_gateway_rejects_malformed_private_key(self, test_client, auth_headers):
+        """POST /gateways returns 400 for a private_key that is not parseable PEM.
+
+        Deliberately does not mock ``register_gateway``: the service-layer validator
+        is the only layer that can tell raw PEM from a masked placeholder or stored
+        ciphertext, so the rejection must be exercised through it. Pinning 400 here
+        keeps a later refactor from quietly turning this into a 500.
+        """
+        req = {
+            "name": "malformed_pk_gateway",
+            "url": "http://example.com",
+            "oauth_config": {
+                "client_id": "client-1",
+                "token_url": "https://issuer.example.com/token",
+                "token_endpoint_auth_method": "private_key_jwt",
+                "private_key": "dummy-private-key-material",  # pragma: allowlist secret
+            },
+        }
+        response = test_client.post("/gateways/", json=req, headers=auth_headers)
+        assert response.status_code == 400
+        # The handler returns a generic message; the key must never be echoed back.
+        assert "dummy-private-key-material" not in response.text
+
+    def test_create_gateway_rejects_undersized_rsa_key(self, test_client, auth_headers):
+        """POST /gateways returns 400 for an RSA key below the JWS minimum.
+
+        RFC 7518 Sections 3.3 and 3.5 require at least 2048 bits. PyJWT only
+        warns on a smaller key and signs a verifiable assertion anyway, so the
+        rejection has to happen here rather than at the provider.
+        """
+        # Third-Party
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+
+        undersized = rsa.generate_private_key(public_exponent=65537, key_size=1024)
+        pem = undersized.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()).decode()
+        req = {
+            "name": "undersized_pk_gateway",
+            "url": "http://example.com",
+            "oauth_config": {
+                "client_id": "client-1",
+                "token_url": "https://issuer.example.com/token",
+                "token_endpoint_auth_method": "private_key_jwt",
+                "private_key": pem,
+            },
+        }
+        response = test_client.post("/gateways/", json=req, headers=auth_headers)
+        assert response.status_code == 400
+        assert "BEGIN" not in response.text
+
+    def test_create_gateway_rejects_masked_private_key(self, test_client, auth_headers):
+        """POST /gateways returns 400 for the masked placeholder.
+
+        On create there is no stored key to preserve, and the storage helper turns
+        the placeholder into ``None``, so the gateway would persist unable to
+        sign. Authorization-code gateways defer their first token fetch, so
+        registration would otherwise look successful.
+        """
+        # First-Party
+        from mcpgateway.config import settings
+
+        req = {
+            "name": "masked_pk_gateway",
+            "url": "http://example.com",
+            "oauth_config": {
+                "client_id": "client-1",
+                "token_url": "https://issuer.example.com/token",
+                "token_endpoint_auth_method": "private_key_jwt",
+                "private_key": settings.masked_auth_value,
+            },
+        }
+        response = test_client.post("/gateways/", json=req, headers=auth_headers)
+        assert response.status_code == 400
+
+    @pytest.mark.parametrize("method", ["", "   "])
+    @patch("mcpgateway.main.gateway_service.register_gateway")
+    def test_create_gateway_accepts_legacy_empty_auth_method(self, mock_create, method, test_client, auth_headers):
+        """An empty or whitespace-only method is the legacy POST default, not an error.
+
+        The schema previously compared the raw string and returned 422, while the
+        runtime defaulted the same value to ``client_secret_post``. A working
+        configuration broke the moment a client resubmitted it.
+        """
+        mock_create.return_value = MOCK_GATEWAY_READ
+        req = {
+            "name": "legacy_method_gateway",
+            "url": "http://example.com",
+            "oauth_config": {
+                "grant_type": "client_credentials",
+                "client_id": "client-1",
+                "client_secret": "secret-1",  # pragma: allowlist secret
+                "token_url": "https://issuer.example.com/token",
+                "token_endpoint_auth_method": method,
+            },
+        }
+        response = test_client.post("/gateways/", json=req, headers=auth_headers)
+        assert response.status_code == 200, response.text
+
+    @pytest.mark.parametrize("method", [["private_key_jwt"], {"m": "x"}, 123])
+    def test_create_gateway_rejects_non_string_auth_method_with_422(self, method, test_client, auth_headers):
+        """A list, dict, or int method must not reach set membership (CWE-20).
+
+        An unhashable value raised TypeError there, which surfaced as a 500
+        instead of a validation error.
+        """
+        req = {
+            "name": "bad_method_gateway",
+            "url": "http://example.com",
+            "oauth_config": {
+                "client_id": "client-1",
+                "token_url": "https://issuer.example.com/token",
+                "token_endpoint_auth_method": method,
+            },
+        }
+        response = test_client.post("/gateways/", json=req, headers=auth_headers)
+        assert response.status_code == 422, response.text
+
+    @pytest.mark.parametrize(
+        "oauth_config",
+        [
+            {"client_id": "c", "token_url": "https://issuer.example.com/token", "token_endpoint_auth_method": "client_secret_digest"},
+            {"client_id": "c", "token_url": "https://issuer.example.com/token", "token_endpoint_auth_method": "private_key_jwt", "token_endpoint_auth_signing_alg": "HS256", "private_key": "k"},
+            {"client_id": "c", "token_url": "https://issuer.example.com/token", "token_endpoint_auth_method": "private_key_jwt"},
+            {"client_id": "c", "token_url": "https://issuer.example.com/token", "token_endpoint_auth_method": "private_key_jwt", "private_key": "k", "private_key_jwt_kid": "  "},
+        ],
+    )
+    @patch("mcpgateway.main.gateway_service.register_gateway")
+    def test_create_gateway_rejects_invalid_private_key_jwt_config(self, mock_create, test_client, auth_headers, oauth_config):
+        """Invalid token endpoint auth config is rejected with 422 before any service call."""
+        req = {"name": "test_gateway", "url": "http://example.com", "oauth_config": oauth_config}
+        response = test_client.post("/gateways/", json=req, headers=auth_headers)
+        assert response.status_code == 422
+        mock_create.assert_not_called()
 
     @patch("mcpgateway.main.gateway_service.get_gateway")
     def test_get_gateway_endpoint_secondary(self, mock_get, test_client, auth_headers):
@@ -3026,18 +3293,31 @@ class TestRPCEndpoints:
         )
 
     def test_rpc_tool_invocation_requires_tools_execute(self, test_client, auth_headers):
-        req = {"jsonrpc": "2.0", "id": "test-id-deny", "method": "tools/call", "params": {"name": "test_tool", "arguments": {"param": "value"}}}
+        req = {
+            "jsonrpc": "2.0",
+            "id": "test-id-deny",
+            "method": "tools/call",
+            "params": {"name": "test_tool", "server_id": "server-1", "arguments": {"param": "value"}},
+        }
 
         async def _has_permission(_self, permission, **kwargs):
             return permission != "tools.execute"
 
-        with patch("mcpgateway.main.PermissionChecker.has_permission", new=_has_permission):
+        with (
+            patch("mcpgateway.main.PermissionChecker.has_permission", new=_has_permission),
+            patch("mcpgateway.main.server_service.ensure_server_access", new_callable=AsyncMock) as ensure_server_access,
+            patch("mcpgateway.main._maybe_forward_affinitized_rpc_request", new_callable=AsyncMock) as forward_request,
+            patch("mcpgateway.main._execute_rpc_tools_call", new_callable=AsyncMock) as execute_call,
+        ):
             response = test_client.post("/rpc/", json=req, headers=auth_headers)
 
         assert response.status_code == 200
         body = response.json()
         assert body["error"]["code"] == -32003
         assert "Access denied" in body["error"]["message"]
+        ensure_server_access.assert_not_awaited()
+        forward_request.assert_not_awaited()
+        execute_call.assert_not_awaited()
 
     def test_rpc_legacy_tool_invocation_requires_tools_execute(self, test_client, auth_headers):
         req = {"jsonrpc": "2.0", "id": "test-id-legacy-deny", "method": "legacy_tool", "params": {"param": "value"}}
@@ -3402,6 +3682,41 @@ class TestRPCEndpoints:
         assert "Prompt retrieval failed" in body["error"]["message"]
 
     @patch("mcpgateway.main.prompt_service.get_prompt", new_callable=AsyncMock)
+    def test_rpc_prompts_get_relays_an_upstream_error_with_its_own_code(self, mock_get, test_client, auth_headers):
+        """/rpc prompts/get: an upstream JSON-RPC error is relayed with the upstream's code, message and data."""
+        mock_get.side_effect = PromptUpstreamError(-32001, "Custom upstream failure", {"hint": "retry later"})
+
+        response = test_client.post("/rpc/", json={"jsonrpc": "2.0", "id": "test-id", "method": "prompts/get", "params": {"name": "remote"}}, headers=auth_headers)
+
+        assert response.status_code == 200
+        error = response.json()["error"]
+        assert error["code"] == -32001
+        assert error["message"] == "Custom upstream failure"
+        assert error["data"] == {"hint": "retry later"}
+
+    @patch("mcpgateway.main.prompt_service.get_prompt", new_callable=AsyncMock)
+    def test_rpc_prompts_get_missing_argument_answers_invalid_params(self, mock_get, test_client, auth_headers):
+        """/rpc prompts/get: a missing required argument is -32602 with the message naming it."""
+        mock_get.side_effect = PromptValidationError("Missing required arguments: name")
+
+        response = test_client.post("/rpc/", json={"jsonrpc": "2.0", "id": "test-id", "method": "prompts/get", "params": {"name": "greeting"}}, headers=auth_headers)
+
+        assert response.status_code == 200
+        error = response.json()["error"]
+        assert error["code"] == -32602
+        assert error["message"] == "Missing required arguments: name"
+
+    @patch("mcpgateway.main.prompt_service.get_prompt", new_callable=AsyncMock)
+    def test_rpc_prompts_get_without_arguments_asks_for_a_rendered_prompt(self, mock_get, test_client, auth_headers):
+        """/rpc prompts/get without an arguments field is a render request: the service gets an empty dict, so required arguments are checked."""
+        mock_get.return_value = {"messages": [], "description": None}
+
+        response = test_client.post("/rpc/", json={"jsonrpc": "2.0", "id": "test-id", "method": "prompts/get", "params": {"name": "greeting"}}, headers=auth_headers)
+
+        assert response.status_code == 200
+        assert mock_get.call_args.args[2] == {}
+
+    @patch("mcpgateway.main.prompt_service.get_prompt", new_callable=AsyncMock)
     def test_rpc_prompts_get_generic_exception(self, mock_get, test_client, auth_headers):
         """Test prompts/get returns -32603 when generic Exception is raised."""
         mock_get.side_effect = RuntimeError("Unexpected database error")
@@ -3602,7 +3917,7 @@ class TestRPCEndpoints:
         """Test completion/complete JSON-RPC method."""
         mock_filter_context.return_value = ("rpc-user@example.com", ["team-2"])
         mock_completion.return_value = {"result": "done"}
-        req = {"jsonrpc": "2.0", "id": "test-id", "method": "completion/complete", "params": {"ref": {"type": "ref/prompt", "name": "p1"}}}
+        req = {"jsonrpc": "2.0", "id": "test-id", "method": "completion/complete", "params": {"ref": {"type": "ref/prompt", "name": "p1"}, "_meta": {"trace": "completion-1"}}}
         response = test_client.post("/rpc/", json=req, headers=auth_headers)
 
         assert response.status_code == 200
@@ -3644,7 +3959,11 @@ class TestRPCEndpoints:
     @patch("mcpgateway.main.get_scoped_resource_access_context")
     @patch("mcpgateway.main.completion_service.handle_completion", new_callable=AsyncMock)
     def test_rpc_completion_complete_maps_completion_error(self, mock_completion, mock_filter_context, test_client, auth_headers):
-        """RPC completion/complete should map CompletionError to JSON-RPC -32602."""
+        """RPC completion/complete maps an unclassified CompletionError to -32603 (#6629).
+
+        completion_error_code() defaults an unclassified CompletionError to
+        -32603 (Internal error) rather than the pre-#6629 hardcoded -32602.
+        """
         # First-Party
         from mcpgateway.services.completion_service import CompletionError
 
@@ -3656,8 +3975,42 @@ class TestRPCEndpoints:
 
         assert response.status_code == 200
         body = response.json()
-        assert body["error"]["code"] == -32602
+        assert body["error"]["code"] == -32603
         assert "invalid ref" in body["error"]["message"]
+
+    @patch("mcpgateway.main.get_scoped_resource_access_context")
+    @patch("mcpgateway.main.completion_service.handle_completion", new_callable=AsyncMock)
+    def test_rpc_completion_complete_maps_not_supported_to_dash32601(self, mock_completion, mock_filter_context, test_client, auth_headers):
+        """RPC completion/complete maps CompletionNotSupportedError to its upstream JSON-RPC code -32601 (#6629)."""
+        # First-Party
+        from mcpgateway.services.completion_service import CompletionNotSupportedError
+
+        mock_filter_context.return_value = ("user@example.com", ["t1"])
+        mock_completion.side_effect = CompletionNotSupportedError("nope")
+        req = {"jsonrpc": "2.0", "id": "test-id", "method": "completion/complete", "params": {"ref": {"type": "ref/prompt", "name": "p1"}}}
+
+        response = test_client.post("/rpc/", json=req, headers=auth_headers)
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["error"]["code"] == -32601
+
+    @patch("mcpgateway.main.get_scoped_resource_access_context")
+    @patch("mcpgateway.main.completion_service.handle_completion", new_callable=AsyncMock)
+    def test_rpc_completion_complete_maps_invalid_params_to_dash32602(self, mock_completion, mock_filter_context, test_client, auth_headers):
+        """RPC completion/complete maps CompletionInvalidParamsError to -32602 (#6629)."""
+        # First-Party
+        from mcpgateway.services.completion_service import CompletionInvalidParamsError
+
+        mock_filter_context.return_value = ("user@example.com", ["t1"])
+        mock_completion.side_effect = CompletionInvalidParamsError("bad params")
+        req = {"jsonrpc": "2.0", "id": "test-id", "method": "completion/complete", "params": {"ref": {"type": "ref/prompt", "name": "p1"}}}
+
+        response = test_client.post("/rpc/", json=req, headers=auth_headers)
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["error"]["code"] == -32602
 
     def test_rpc_completion_other_method(self, test_client, auth_headers):
         """Test completion/* catch-all JSON-RPC method."""

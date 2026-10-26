@@ -1,3 +1,5 @@
+import { replaceTableRows } from './observability-table.js';
+
 /**
  * Provide the Observability metrics component.
  * Register methods through Alpine.data because the CSP parser rejects inline functions.
@@ -429,54 +431,36 @@ export function observabilityMetrics() {
       const tbody = document.querySelector('#topSlowTable tbody');
       if (!tbody) return;
 
-      tbody.innerHTML = data.endpoints
-        .map(
-          (ep, idx) => `
-            <tr class="hover:bg-gray-50 dark:hover:bg-gray-700/50">
-              <td class="px-4 py-2 text-sm text-gray-700 dark:text-gray-400">${idx + 1}</td>
-              <td class="px-4 py-2 text-sm font-mono text-gray-900 dark:text-gray-200">${ep.endpoint}</td>
-              <td class="px-4 py-2 text-sm text-gray-600 dark:text-gray-400">${ep.count}</td>
-              <td class="px-4 py-2 text-sm text-orange-600 dark:text-orange-400 font-medium">${ep.avg_duration_ms} ms</td>
-              <td class="px-4 py-2 text-sm text-red-600 dark:text-red-400">${ep.max_duration_ms} ms</td>
-            </tr>
-          `
-        )
-        .join('');
+      replaceTableRows(tbody, data.endpoints, [
+        ['px-4 py-2 text-sm text-gray-700 dark:text-gray-400', (ep, idx) => idx + 1],
+        ['px-4 py-2 text-sm font-mono text-gray-900 dark:text-gray-200', (ep) => ep.endpoint],
+        ['px-4 py-2 text-sm text-gray-600 dark:text-gray-400', (ep) => ep.count],
+        ['px-4 py-2 text-sm text-orange-600 dark:text-orange-400 font-medium', (ep) => `${ep.avg_duration_ms} ms`],
+        ['px-4 py-2 text-sm text-red-600 dark:text-red-400', (ep) => `${ep.max_duration_ms} ms`],
+      ]);
     },
     renderTopVolumeTable(data) {
       const tbody = document.querySelector('#topVolumeTable tbody');
       if (!tbody) return;
 
-      tbody.innerHTML = data.endpoints
-        .map(
-          (ep, idx) => `
-            <tr class="hover:bg-gray-50 dark:hover:bg-gray-700/50">
-              <td class="px-4 py-2 text-sm text-gray-700 dark:text-gray-400">${idx + 1}</td>
-              <td class="px-4 py-2 text-sm font-mono text-gray-900 dark:text-gray-200">${ep.endpoint}</td>
-              <td class="px-4 py-2 text-sm font-medium text-blue-600 dark:text-blue-400">${ep.count}</td>
-              <td class="px-4 py-2 text-sm text-gray-600 dark:text-gray-400">${ep.avg_duration_ms} ms</td>
-            </tr>
-          `
-        )
-        .join('');
+      replaceTableRows(tbody, data.endpoints, [
+        ['px-4 py-2 text-sm text-gray-700 dark:text-gray-400', (ep, idx) => idx + 1],
+        ['px-4 py-2 text-sm font-mono text-gray-900 dark:text-gray-200', (ep) => ep.endpoint],
+        ['px-4 py-2 text-sm font-medium text-blue-600 dark:text-blue-400', (ep) => ep.count],
+        ['px-4 py-2 text-sm text-gray-600 dark:text-gray-400', (ep) => `${ep.avg_duration_ms} ms`],
+      ]);
     },
     renderTopErrorsTable(data) {
       const tbody = document.querySelector('#topErrorsTable tbody');
       if (!tbody) return;
 
-      tbody.innerHTML = data.endpoints
-        .map(
-          (ep, idx) => `
-            <tr class="hover:bg-gray-50 dark:hover:bg-gray-700/50">
-              <td class="px-4 py-2 text-sm text-gray-700 dark:text-gray-400">${idx + 1}</td>
-              <td class="px-4 py-2 text-sm font-mono text-gray-900 dark:text-gray-200">${ep.endpoint}</td>
-              <td class="px-4 py-2 text-sm text-gray-600 dark:text-gray-400">${ep.total_count}</td>
-              <td class="px-4 py-2 text-sm text-red-600 dark:text-red-400 font-medium">${ep.error_count}</td>
-              <td class="px-4 py-2 text-sm text-red-700 dark:text-red-300 font-bold">${ep.error_rate}%</td>
-            </tr>
-          `
-        )
-        .join('');
+      replaceTableRows(tbody, data.endpoints, [
+        ['px-4 py-2 text-sm text-gray-700 dark:text-gray-400', (ep, idx) => idx + 1],
+        ['px-4 py-2 text-sm font-mono text-gray-900 dark:text-gray-200', (ep) => ep.endpoint],
+        ['px-4 py-2 text-sm text-gray-600 dark:text-gray-400', (ep) => ep.total_count],
+        ['px-4 py-2 text-sm text-red-600 dark:text-red-400 font-medium', (ep) => ep.error_count],
+        ['px-4 py-2 text-sm text-red-700 dark:text-red-300 font-bold', (ep) => `${ep.error_rate}%`],
+      ]);
     },
     /**
      * Render heatmap chart with proper cleanup and error handling

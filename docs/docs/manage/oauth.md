@@ -116,6 +116,51 @@ Example OAuth-enabled gateway record:
 
 For Client Credentials, omit `authorization_url` and `redirect_uri` and set `grant_type` to `client_credentials`.
 
+### Token Endpoint Authentication
+
+`token_endpoint_auth_method` selects how the gateway authenticates to the token endpoint:
+
+| Value | Behavior |
+|-------|----------|
+| `client_secret_post` | Default. Sends `client_id` and `client_secret` in the request body. |
+| `client_secret_basic` | Sends `client_id` and `client_secret` in the HTTP `Authorization` header. |
+| `none` | Public client. Sends only `client_id` in the body. |
+| `private_key_jwt` | Authenticates with a signed JWT (RFC 7523). |
+
+#### Private-Key JWT (RFC 7523)
+
+For providers that require a confidential client without a shared secret (Microsoft Entra ID, Keycloak), use `private_key_jwt` and supply the private key PEM inline under `oauth_config["private_key"]`:
+
+```json
+{
+  "name": "Entra MCP",
+  "url": "https://entra-mcp.example.com/sse",
+  "auth_type": "oauth",
+  "oauth_config": {
+    "grant_type": "client_credentials",
+    "client_id": "your_app_client_id",
+    "token_url": "https://login.microsoftonline.com/tenant-id/oauth2/v2.0/token",
+    "token_endpoint_auth_method": "private_key_jwt",
+    "private_key": "<your-rsa-private-key-pem>",
+    "token_endpoint_auth_signing_alg": "RS256",
+    "private_key_jwt_kid": "kid-example-1"
+  }
+}
+```
+
+The gateway signs a client assertion JWT (`iss`, `sub`, `aud`, `iat`/`exp`, `jti`) and posts it with `client_assertion_type` set to `urn:ietf:params:oauth:client-assertion-type:jwt-bearer`. `aud` is always the configured `token_url`. Set `token_endpoint_auth_signing_alg` to one of `RS256`, `RS384`, `RS512`, `ES256`, `ES384`, `ES512`, or `PS256` (default `RS256`), and `private_key_jwt_kid` when the provider's JWKS matches on `kid`. The assertion validity window is capped at 300 seconds.
+
+!!! important
+    The private key must match the public key uploaded to the Authorization Server. A missing key or an unsupported algorithm is rejected with a 422 at validation time and with an `OAuthError` at runtime. `private_key_jwt` never falls back to another auth method; `client_secret_basic` falls back to POST-body mode only when the secret is missing on a public PKCE client.
+
+!!! note "These values are case-sensitive"
+    `token_endpoint_auth_method` and `token_endpoint_auth_signing_alg` are matched exactly, so `rs256` is rejected while `RS256` is accepted. Use the spellings listed above.
+
+    An absent, null, empty, or whitespace-only `token_endpoint_auth_method` falls back to `client_secret_post`, preserving the default for configurations written before the field existed. Every layer reads the field through one shared policy — the request schema, the runtime dispatch, and the retry-time assertion refresh — so a value accepted at configuration time behaves identically at the token endpoint.
+
+!!! important "RSA keys must be at least 2048 bits"
+    `RS256`, `RS384`, `RS512`, and `PS256` require an RSA key of at least 2048 bits (RFC 7518 Sections 3.3 and 3.5). A smaller key is rejected at configuration time and again before signing. EC keys are pinned to exactly one curve per algorithm: `ES256` to P-256, `ES384` to P-384, and `ES512` to P-521.
+
 ### Resource Parameter and `omit_resource`
 
 By default ContextForge derives an RFC 8707 `resource` parameter from the gateway URL and includes it in token requests and refresh calls. Some IdPs (e.g. certain Atlassian configurations) reject requests that include the `resource` parameter. Set `omit_resource: true` to suppress it:

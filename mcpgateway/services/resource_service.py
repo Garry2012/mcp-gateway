@@ -20,6 +20,7 @@ Examples:
 """
 
 # Standard
+import contextvars
 import asyncio
 import base64
 import binascii
@@ -90,6 +91,7 @@ from mcpgateway.utils.trace_context import format_trace_team_scope
 from mcpgateway.utils.trace_redaction import is_input_capture_enabled, is_output_capture_enabled, serialize_trace_payload
 from mcpgateway.utils.url_auth import apply_query_param_auth, sanitize_exception_message
 from mcpgateway.utils.validate_signature import validate_signature
+from mcpgateway.utils.error_formatter import PublicValidationError, unexpected_error_detail
 
 # Plugin support imports (conditional)
 try:
@@ -135,6 +137,27 @@ def _build_read_resource_request(uri: Any, meta_data: Dict[str, Any]) -> "ReadRe
     _rp_dict = ReadResourceRequestParams(uri=uri).model_dump(by_alias=True)
     _rp_dict["_meta"] = meta_data
     return ReadResourceRequest(params=ReadResourceRequestParams.model_validate(_rp_dict))
+
+
+# Cache directive of the upstream read that produced the content being served, for the
+# modern-path read adapter to put on the ReadResourceResult (2026-07-28 ttlMs/cacheScope).
+# Set only when an upstream was actually contacted; None for content served from the DB.
+upstream_read_cache_var: contextvars.ContextVar[Optional[Dict[str, Any]]] = contextvars.ContextVar("upstream_read_cache", default=None)
+
+
+def set_upstream_cache_directive(result: Any) -> None:
+    """Keep the upstream read result's ttlMs for the read adapter.
+
+    ``ttlMs`` is relayed as the upstream sent it (0 when absent, e.g. a legacy upstream).
+    ``cacheScope`` is always ``"private"``: the response was authorized, and possibly
+    rewritten by post-fetch plugins, for one principal, so a shared cache must never
+    serve it to another, whatever the upstream or the resource's visibility says.
+
+    Args:
+        result: The SDK ``ReadResourceResult`` returned by the upstream.
+    """
+    ttl_ms = getattr(result, "ttl_ms", 0)
+    upstream_read_cache_var.set({"ttl_ms": ttl_ms if isinstance(ttl_ms, int) and ttl_ms > 0 else 0, "cache_scope": "private"})
 
 
 async def _read_resource_with_meta(session: "ClientSession", uri: Any, meta_data: Optional[Dict[str, Any]]) -> Any:
@@ -220,11 +243,11 @@ def _validate_resource_team_assignment(db: Session, user_email: Optional[str], t
         ValueError: If team does not exist or caller lacks ownership.
     """
     if not target_team_id:
-        raise ValueError("Cannot set visibility to 'team' without a team_id")
+        raise PublicValidationError("Cannot set visibility to 'team' without a team_id")
 
     team = db.query(EmailTeam).filter(EmailTeam.id == target_team_id).first()
     if not team:
-        raise ValueError(f"Team {target_team_id} not found")
+        raise PublicValidationError(f"Team {target_team_id} not found")
 
     if not user_email:
         return
@@ -235,7 +258,7 @@ def _validate_resource_team_assignment(db: Session, user_email: Optional[str], t
         .first()
     )
     if not membership:
-        raise ValueError("User membership in team not sufficient for this update.")
+        raise PublicValidationError("User membership in team not sufficient for this update.")
 
 
 class ResourceService(BaseService):
@@ -806,7 +829,7 @@ class ResourceService(BaseService):
                     "resource_uri": resource.uri,
                 },
             )
-            raise ResourceError(f"Failed to register resource: {str(e)}")
+            raise ResourceError(f"Failed to register resource: {unexpected_error_detail(e)}")
 
     async def register_resources_bulk(
         self,
@@ -2075,6 +2098,7 @@ class ResourceService(BaseService):
                             for attempt in range(1, max_read_attempts + 1):
                                 try:
                                     resource_response = await _read_resource_with_meta(session, uri, meta_data)
+                                    set_upstream_cache_directive(resource_response)
                                     return getattr(getattr(resource_response, "contents")[0], "text")
                                 except Exception as exc:
                                     if attempt == max_read_attempts:
@@ -2250,6 +2274,7 @@ class ResourceService(BaseService):
                                         httpx_client_factory=_get_httpx_client_factory,
                                     ) as client:
                                         resource_response = await _read_resource_with_meta(client.session, uri, meta_data)
+                                        set_upstream_cache_directive(resource_response)
                                         return getattr(getattr(resource_response, "contents")[0], "text")
                             except Exception as e:
                                 # Sanitize error message to prevent URL secrets from leaking in logs
@@ -2524,7 +2549,7 @@ class ResourceService(BaseService):
                     try:
                         SecurityValidator.validate_path(uri, getattr(settings, "allowed_roots", None))
                     except ValueError as e:
-                        raise ResourceError(f"Path validation failed: {e}")
+                        raise ResourceError(f"Path validation failed: {unexpected_error_detail(e)}")
 
                 # Original resource fetching logic
                 logger.info("Fetching resource: %s (URI: %s)", resource_id, uri)
@@ -2585,6 +2610,7 @@ class ResourceService(BaseService):
                                 transport="sse" if (gateway.transport or "").upper() == "SSE" else "streamablehttp",
                             ) as client:
                                 result = await _read_resource_with_meta(client.session, uri, meta_data)
+                                set_upstream_cache_directive(result)
 
                                 # Build the FINAL content shape (ResourceContent) directly: the
                                 # proxied read already returned the resolved content, so the
@@ -3047,7 +3073,7 @@ class ResourceService(BaseService):
                 resource_id=str(resource_id),
                 error=e,
             )
-            raise ResourceError(f"Failed to set resource state: {str(e)}")
+            raise ResourceError(f"Failed to set resource state: {unexpected_error_detail(e)}")
 
     async def subscribe_resource(
         self,
@@ -3105,7 +3131,7 @@ class ResourceService(BaseService):
             raise
         except Exception as e:
             db.rollback()
-            raise ResourceError(f"Failed to subscribe: {str(e)}")
+            raise ResourceError(f"Failed to subscribe: {unexpected_error_detail(e)}")
 
     async def unsubscribe_resource(self, db: Session, subscription: ResourceSubscription) -> None:
         """
@@ -3578,7 +3604,7 @@ class ResourceService(BaseService):
                 resource_id=str(resource_id),
                 error=e,
             )
-            raise ResourceError(f"Failed to update resource: {str(e)}")
+            raise ResourceError(f"Failed to update resource: {unexpected_error_detail(e)}")
 
     async def delete_resource(self, db: Session, resource_id: Union[int, str], user_email: Optional[str] = None, purge_metrics: bool = False) -> None:
         """
@@ -3740,7 +3766,7 @@ class ResourceService(BaseService):
                 resource_id=str(resource_id),
                 error=e,
             )
-            raise ResourceError(f"Failed to delete resource: {str(e)}")
+            raise ResourceError(f"Failed to delete resource: {unexpected_error_detail(e)}")
 
     async def get_resource_by_id(
         self,
@@ -4108,12 +4134,12 @@ class ResourceService(BaseService):
                 content = template.uri_template.format(**params)
                 return ResourceContent(type="resource", id=str(template.id) or None, uri=template.uri_template or None, mime_type=template.mime_type or None, text=content)
             # # Handle binary template
-            raise NotImplementedError("Binary resource templates not yet supported")
+            raise ResourceError("Binary resource templates not yet supported")
 
         except ResourceNotFoundError:
             raise
         except Exception as e:
-            raise ResourceError(f"Failed to process template: {str(e)}") from e
+            raise ResourceError(f"Failed to process template: {unexpected_error_detail(e)}") from e
 
     @staticmethod
     @lru_cache(maxsize=256)

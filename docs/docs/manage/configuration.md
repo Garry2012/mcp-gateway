@@ -128,16 +128,28 @@ UI_BASE_URL=https://ui.example.com/contextforge
 
 ContextForge uses this trusted base to generate these browser-facing email links:
 
-- `https://ui.example.com/contextforge/accept-invitation/{token}`
-- `https://ui.example.com/contextforge/reset-password/{token}`
-- `https://ui.example.com/contextforge/forgot-password`
+- `https://ui.example.com/contextforge/app/accept-invitation/{token}`
+- `https://ui.example.com/contextforge/app/reset-password/{token}`
+- `https://ui.example.com/contextforge/app/forgot-password`
 
-When `UI_BASE_URL` is unset, links use `APP_DOMAIN + APP_ROOT_PATH` as their base. Password-reset and account-lockout
-emails preserve compatibility with the bundled Admin UI by using `/admin/reset-password/{token}` and
-`/admin/forgot-password`; these routes require `MCPGATEWAY_ADMIN_API_ENABLED=true`. Invitation emails continue to use
-`/accept-invitation/{token}`, so the fallback host must serve that frontend route. ContextForge does not provide the
-React invitation page. If the React client is deployed separately, configure `UI_BASE_URL`. ContextForge never
-derives these links from the inbound `Host` header. Tokens are URL-encoded as individual path segments.
+Values whose final path segment is `/app` are treated as full frontend roots, including a trailing slash.
+Only that final mount segment is removed during normalization; earlier path segments are preserved.
+Other values are treated as deployment bases and receive the `/app` mount when links are generated.
+For a deployment prefix of `/contextforge/app`, configure the full frontend root:
+
+```bash
+UI_BASE_URL=https://ui.example.com/contextforge/app/app
+```
+
+This produces links such as `https://ui.example.com/contextforge/app/app/reset-password/{token}`.
+
+When `UI_BASE_URL` is unset, links use `APP_DOMAIN + APP_ROOT_PATH` as their base.
+With `MCPGATEWAY_ADMIN_API_ENABLED=true`, password-recovery emails use the bundled Admin UI routes:
+`/admin/reset-password/{token}` and `/admin/forgot-password`.
+With the Admin API disabled, these emails use `/app/reset-password/{token}` and `/app/forgot-password`.
+Invitation emails always use `/app/accept-invitation/{token}`. The fallback host must serve the corresponding frontend routes.
+For a separately deployed React client, configure `UI_BASE_URL` using the deployment-base or full-root rules above.
+ContextForge never derives these links from the inbound `Host` header. Tokens are URL-encoded as individual path segments.
 
 `UI_BASE_URL` controls links only; it does not configure browser access to gateway APIs. For a React client on a
 different origin, add that exact origin to `ALLOWED_ORIGINS`. Deployments using cross-origin cookies must also set
@@ -502,6 +514,23 @@ These settings control how the gateway authenticates inbound MCP client connecti
 | -------- | -------- |
 | `auto` (default) | Accepts all supported protocol versions including `2026-07-28`. Dual-era clients may negotiate the modern protocol. |
 | `legacy` | Accepts only handshake-era versions (`2024-11-05` through `2025-11-25`). Clients sending `2026-07-28` receive a 400 response with the list of supported versions, steering dual-era clients to retry with the legacy `initialize` handshake. |
+
+An unserved version is rejected with HTTP `400` and a JSON-RPC error body. The error code is `-32022` (`UnsupportedProtocolVersionError`); `data.supported` lists the versions this gateway accepts in its current mode and `data.requested` echoes the rejected version. The example below shows the default `auto` mode; in `legacy` mode `supported` omits `2026-07-28`:
+
+```json
+{"jsonrpc": "2.0", "id": null, "error": {"code": -32022, "message": "Unsupported protocol version",
+  "data": {"supported": ["2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25", "2026-07-28"], "requested": "2099-01-01"}}}
+```
+
+#### Cache Hints for Modern Clients
+
+When a client negotiates the `2026-07-28` protocol, the gateway marks its cacheable results so the client knows how long it may reuse them:
+
+- `server/discover`, `tools/list`, `resources/list`, `resources/templates/list` and `prompts/list` carry `ttlMs` and `cacheScope: "private"`.
+- `ttlMs` on a catalog result is the shortest refresh interval among the upstream gateways behind the virtual server being queried, floored at `HEALTH_CHECK_INTERVAL` because the gateway only refreshes upstreams inside its health-check loop. A request that is not scoped to a virtual server uses `GATEWAY_AUTO_REFRESH_INTERVAL`. If the interval cannot be derived, the gateway answers `ttlMs: 0` so the client does not cache.
+- `resources/read` relays the `ttlMs` the upstream server provided, or `0` when it provided none, and is always `private` because reads go through the caller's own authorization.
+
+A client that honours these hints will not see a catalog change (a new, removed or renamed tool) until its cached copy expires, so the refresh interval you configure is also the longest delay before such clients notice the change.
 
 #### Outbound MCP Connect Mode (Gateway → MCP Servers)
 
@@ -1162,6 +1191,7 @@ Federated (upstream) MCP connections also honor `MCP_CLIENT_CONNECT_MODE`, which
 | `GATEWAY_VALIDATION_TIMEOUT` | Gateway URL validation timeout (secs) | `5`     | int > 0 |
 | `MAX_CONCURRENT_HEALTH_CHECKS` | Max concurrent health checks        | `20`    | int > 0 |
 | `AUTO_REFRESH_SERVERS` | Auto refresh tools/prompts/resources        | `false` | bool    |
+| `GATEWAY_AUTO_REFRESH_INTERVAL` | Default upstream refresh interval (secs); also the catalog `ttlMs` sent to modern clients | `300` | int >= 60 |
 | `FILELOCK_NAME`         | File lock for leader election             | `gateway_service_leader.lock` | string |
 | `PRIMARY_WORKER_LOCK_PATH` | Override path for the primary-worker election lock file (per-host; default is a port-scoped temp file) | (none) | string |
 | `PRIMARY_WORKER_ELECTION_BACKEND` | Primary-worker election: `filelock` (per host) or `redis` (per cluster) | `filelock` | enum |
@@ -1429,29 +1459,22 @@ The plugin framework has its own configuration via `pydantic-settings` with the 
 
 ### CPU Spin Loop Mitigation
 
-These settings mitigate CPU spin loops that can occur when SSE/MCP connections are cancelled.
+These settings detect and close dead SSE connections before they can trigger CPU
+spin loops during connection cleanup. The underlying anyio `_deliver_cancellation`
+spin (anyio#695) was fixed upstream in anyio 4.15.0, which this project requires;
+the former cleanup-timeout knobs (`MCP_SESSION_POOL_CLEANUP_TIMEOUT`,
+`SSE_TASK_GROUP_CLEANUP_TIMEOUT`) and the experimental anyio monkey-patch
+(`ANYIO_CANCEL_DELIVERY_*`) were removed. Cleanup waits remain bounded internally
+(fixed 5-second windows). See the
+[CPU Spin Loop Mitigation guide](../operations/cpu-spin-loop-mitigation.md) for details.
 
-**Layer 1: SSE Connection Protection**
+**SSE Connection Protection**
 
 | Setting                    | Description                                              | Default | Options     |
 | -------------------------- | -------------------------------------------------------- | ------- | ----------- |
 | `SSE_SEND_TIMEOUT`         | ASGI send() timeout - protects against hung connections | `30.0`  | float       |
 | `SSE_RAPID_YIELD_WINDOW_MS`| Time window for rapid yield detection (milliseconds)    | `1000`  | int > 0     |
 | `SSE_RAPID_YIELD_MAX`      | Max yields per window before assuming client dead       | `50`    | int         |
-
-**Layer 2: Cleanup Timeouts**
-
-| Setting                          | Description                                        | Default | Options |
-| -------------------------------- | -------------------------------------------------- | ------- | ------- |
-| `MCP_SESSION_POOL_CLEANUP_TIMEOUT` | Session `__aexit__` timeout (seconds)            | `5.0`   | float > 0 |
-| `SSE_TASK_GROUP_CLEANUP_TIMEOUT`   | SSE task group cleanup timeout (seconds)         | `5.0`   | float > 0 |
-
-**Layer 3: EXPERIMENTAL - anyio Monkey-Patch**
-
-| Setting                                  | Description                                                   | Default | Options |
-| ---------------------------------------- | ------------------------------------------------------------- | ------- | ------- |
-| `ANYIO_CANCEL_DELIVERY_PATCH_ENABLED`    | Enable anyio `_deliver_cancellation` iteration limit          | `false` | bool    |
-| `ANYIO_CANCEL_DELIVERY_MAX_ITERATIONS`   | Max iterations before forcing termination                     | `100`   | int > 0 |
 
 ---
 

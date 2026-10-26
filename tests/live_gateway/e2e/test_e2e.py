@@ -60,9 +60,11 @@ import uuid
 import httpx
 import httpx2
 from mcp import ClientSession, MCPError as McpError
+from mcp.client import Client
 from mcp.client.streamable_http import create_mcp_http_client, streamable_http_client
 from mcp.server.mcpserver import MCPServer
 from mcp.types import PaginatedRequestParams
+from mcp_types import LoggingMessageNotificationParams
 import pytest
 import uvicorn
 
@@ -130,6 +132,11 @@ _MCP_APPS_E2E_ENABLED = os.getenv("MCPGATEWAY_MCP_APPS_ENABLED", "false").strip(
 skip_no_mcp_apps = pytest.mark.skipif(
     not _MCP_APPS_E2E_ENABLED,
     reason="MCP Apps E2E requires a gateway started with MCPGATEWAY_MCP_APPS_ENABLED=true",
+)
+_MODERN_INBOUND_E2E_ENABLED = os.getenv("MCP_INBOUND_PROTOCOL_MODE", "legacy").strip().lower() == "auto"
+skip_no_modern_inbound = pytest.mark.skipif(
+    not _MODERN_INBOUND_E2E_ENABLED,
+    reason="Modern MCP E2E requires a gateway started with MCP_INBOUND_PROTOCOL_MODE=auto and RUST_MCP_MODE=off",
 )
 
 
@@ -349,6 +356,85 @@ async def test_resource_namespacing_federation_and_scoped_reads(jwt_token, resou
                 await http.delete(f"/gateways/{gateway_id}")
 
 
+@pytest.fixture
+def tool_error_upstream() -> Generator[str, None, None]:
+    """Start an in-process upstream whose tools fail the two ways a gateway must relay (issue #6576).
+
+    ``strict`` answers a formal JSON-RPC error, as a spec-strict server does for bad input;
+    ``boom`` fails during execution. The gateway must reach this process: set
+    MCP_TOOL_ERROR_UPSTREAM_HOST=127.0.0.1 for a gateway running on the host.
+    """
+    host = os.getenv("MCP_TOOL_ERROR_UPSTREAM_HOST", "host.docker.internal")
+    app = MCPServer("tool-error")
+
+    @app.tool()
+    def strict() -> str:
+        """Answer a JSON-RPC -32602 error."""
+        raise McpError(code=-32602, message="Invalid params from the strict upstream")
+
+    @app.tool()
+    def boom() -> str:
+        """Fail while running."""
+        raise RuntimeError("upstream exploded")
+
+    listener = socket.socket()
+    listener.bind(("0.0.0.0", 0))
+    port = listener.getsockname()[1]
+    server = uvicorn.Server(uvicorn.Config(app.streamable_http_app(host="0.0.0.0", stateless_http=True, json_response=True), log_level="error"))
+    thread = threading.Thread(target=server.run, kwargs={"sockets": [listener]}, daemon=True)
+    thread.start()
+    try:
+        deadline = time.monotonic() + 10
+        while not server.started and thread.is_alive() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert server.started, "Tool error upstream failed to start"
+        yield f"http://{host}:{port}/mcp"
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)
+        listener.close()
+
+
+
+@pytest.fixture
+def prompt_error_upstream() -> Generator[str, None, None]:
+    """Start an in-process upstream whose prompts answer JSON-RPC errors (issue #6618).
+
+    The gateway must reach this process: set MCP_PROMPT_ERROR_UPSTREAM_HOST=127.0.0.1
+    for a gateway running on the host.
+    """
+    host = os.getenv("MCP_PROMPT_ERROR_UPSTREAM_HOST", "host.docker.internal")
+    app = MCPServer("prompt-error")
+
+    @app.prompt()
+    def strict() -> str:
+        """Answer a JSON-RPC -32602 error."""
+        raise McpError(code=-32602, message="Invalid params from the strict upstream")
+
+    @app.prompt()
+    def custom() -> str:
+        """Answer a JSON-RPC error with a server-defined code and data."""
+        raise McpError(code=-32001, message="Custom upstream failure", data={"hint": "retry later"})
+
+    listener = socket.socket()
+    listener.bind(("0.0.0.0", 0))
+    port = listener.getsockname()[1]
+    server = uvicorn.Server(uvicorn.Config(app.streamable_http_app(host="0.0.0.0", stateless_http=True, json_response=True), log_level="error"))
+    thread = threading.Thread(target=server.run, kwargs={"sockets": [listener]}, daemon=True)
+    thread.start()
+    try:
+        deadline = time.monotonic() + 10
+        while not server.started and thread.is_alive() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert server.started, "Prompt error upstream failed to start"
+        yield f"http://{host}:{port}/mcp"
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)
+        listener.close()
+
+
+
 class TestConnectivity:
 
     async def test_ping(self, client: ClientSession) -> None:
@@ -372,6 +458,110 @@ class TestConnectivity:
         assert caps.prompts is not None, f"prompts capability missing: {caps}"
         advertised = [k for k in ("tools", "resources", "prompts", "logging", "completions") if getattr(caps, k, None) is not None]
         print(f"    -> Capabilities: {advertised}")
+
+    @skip_no_modern_inbound
+    @pytest.mark.flaky(reruns=1, reruns_delay=2)
+    async def test_modern_logging_is_not_advertised_or_emitted(self, jwt_token: str, mcp_url: str) -> None:
+        """Modern discovery omits logging, and debug opt-in requests receive no log message."""
+        received: list[LoggingMessageNotificationParams] = []
+
+        async def _collect(params: LoggingMessageNotificationParams) -> None:
+            received.append(params)
+
+        http_client = create_mcp_http_client(headers={"Authorization": f"Bearer {jwt_token}"}, timeout=httpx2.Timeout(_CLIENT_TIMEOUT))
+        transport = streamable_http_client(mcp_url, http_client=http_client)
+        async with Client(transport, mode="2026-07-28", cache=None, log_level="debug", logging_callback=_collect) as modern_client:
+            raw_result = await modern_client.session.send_discover("2026-07-28")
+            assert "tools" in raw_result["capabilities"], f"unexpected discover result: {raw_result}"
+            assert "logging" not in raw_result["capabilities"], f"logging advertised to modern client: {raw_result['capabilities']}"
+
+            tools = (await modern_client.list_tools()).tools
+            assert any(tool.name == "a2a-a2a-echo-agent" for tool in tools), "echo agent tool unavailable for the modern call check"
+            tool_result = await modern_client.call_tool("a2a-a2a-echo-agent", {"query": "modern logging check"})
+            assert tool_result.is_error is False, f"modern tools/call failed (upstream may be down): {tool_result.content}"
+
+            for resource in (await modern_client.list_resources()).resources[:3]:
+                with suppress(McpError):
+                    await modern_client.read_resource(resource.uri)
+
+            for prompt in (await modern_client.list_prompts()).prompts:
+                if all(not argument.required for argument in prompt.arguments or []):
+                    with suppress(McpError):
+                        await modern_client.get_prompt(prompt.name)
+                    break
+
+        assert received == [], f"modern client received log notifications: {received}"
+        print(f"    -> Modern capabilities: {sorted(raw_result['capabilities'])}")
+
+    @skip_no_modern_inbound
+    async def test_modern_cacheable_results_carry_ttl_and_private_scope(self, jwt_token: str) -> None:
+        """2026-era discover, lists and reads carry ttlMs and cacheScope=private; the legacy wire carries neither (issue #6627)."""
+        rest_headers = {"authorization": f"Bearer {jwt_token}", "content-type": "application/json"}
+        uid = uuid.uuid4().hex[:8]
+        resource_uri = f"test://cache-e2e-{uid}"
+        resource_id = None
+        server_id = None
+        with httpx.Client(timeout=_CLIENT_TIMEOUT) as http:
+            try:
+                # A resource served from the gateway's own store and a virtual server bound to it make the read deterministic.
+                resource_resp = http.post(
+                    f"{BASE_URL}/resources",
+                    headers=rest_headers,
+                    json={"resource": {"name": f"cache-e2e-{uid}", "uri": resource_uri, "mimeType": "text/plain", "content": "cached hello"}, "visibility": "public"},
+                )
+                assert resource_resp.status_code in (200, 201), f"Failed to create resource: {resource_resp.text}"
+                resource_id = resource_resp.json()["id"]
+                server_resp = http.post(
+                    f"{BASE_URL}/servers",
+                    headers=rest_headers,
+                    json={"server": {"name": f"cache-e2e-{uid}", "description": "cache directive E2E server", "associated_resources": [resource_id]}, "visibility": "public"},
+                )
+                assert server_resp.status_code in (200, 201), f"Failed to create server: {server_resp.text}"
+                server_id = server_resp.json()["id"]
+                scoped_url = f"{BASE_URL}/servers/{server_id}/mcp/"
+
+                http_client = create_mcp_http_client(headers={"Authorization": f"Bearer {jwt_token}"}, timeout=httpx2.Timeout(_CLIENT_TIMEOUT))
+                async with Client(streamable_http_client(scoped_url, http_client=http_client), mode="2026-07-28", cache=None) as modern_client:
+                    discover = await modern_client.session.send_discover("2026-07-28")
+                    assert discover.get("cacheScope") == "private", f"discover cacheScope: {discover}"
+                    # Catalog results are good for the refresh interval, which is at least the 60s minimum.
+                    assert isinstance(discover.get("ttlMs"), int) and discover["ttlMs"] >= 60_000, f"discover ttlMs: {discover}"
+
+                    for name, listing in (
+                        ("tools", await modern_client.list_tools()),
+                        ("prompts", await modern_client.list_prompts()),
+                        ("resources", await modern_client.list_resources()),
+                        ("resources/templates", await modern_client.list_resource_templates()),
+                    ):
+                        assert listing.cache_scope == "private", f"{name}/list cacheScope: {listing.cache_scope}"
+                        assert listing.ttl_ms >= 60_000, f"{name}/list ttlMs: {listing.ttl_ms}"
+
+                    read = await modern_client.read_resource(resource_uri)
+                    assert [getattr(content, "text", None) for content in read.contents] == ["cached hello"], f"resources/read contents: {read.contents}"
+                    assert read.cache_scope == "private", f"resources/read cacheScope: {read.cache_scope}"
+                    assert read.ttl_ms == 0, f"resources/read ttlMs for gateway-stored content: {read.ttl_ms}"
+
+                # The same catalog on a legacy wire carries no cache fields: the SDK strips 2026-era keys for handshake-era clients.
+                legacy_headers = {**rest_headers, "accept": "application/json, text/event-stream", "mcp-protocol-version": "2025-03-26"}
+                init_resp = http.post(scoped_url, headers=legacy_headers, json=build_initialize(1))
+                assert init_resp.status_code == 200, f"legacy initialize failed: {init_resp.text}"
+                if session_id := init_resp.headers.get("mcp-session-id"):
+                    legacy_headers["mcp-session-id"] = session_id
+                list_resp = http.post(scoped_url, headers=legacy_headers, json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
+                assert list_resp.status_code == 200, f"legacy tools/list failed: {list_resp.text}"
+                if list_resp.headers.get("content-type", "").startswith("text/event-stream"):
+                    legacy_payload = json.loads([line for line in list_resp.text.splitlines() if line.startswith("data:")][-1][5:])
+                else:
+                    legacy_payload = list_resp.json()
+                legacy_result = legacy_payload.get("result", {})
+                assert "tools" in legacy_result, f"legacy tools/list returned no result: {legacy_payload}"
+                assert "ttlMs" not in legacy_result and "cacheScope" not in legacy_result, f"legacy tools/list leaked cache fields: {legacy_result}"
+            finally:
+                if server_id:
+                    http.delete(f"{BASE_URL}/servers/{server_id}", headers=rest_headers)
+                if resource_id:
+                    http.delete(f"{BASE_URL}/resources/{resource_id}", headers=rest_headers)
+        print(f"    -> discover ttlMs={discover['ttlMs']} cacheScope={discover['cacheScope']}; read ttlMs={read.ttl_ms}; legacy keys={sorted(legacy_result)}")
 
     async def test_multiple_calls_in_one_session(self, client: ClientSession) -> None:
         """A single session supports interleaved tools/resources/prompts calls."""
@@ -578,6 +768,190 @@ class TestToolCalls:
         print(f"    -> isError=True (expected): {result.content[0].text[:100] if result.content else ''}")
 
 
+class TestToolErrorTranslation:
+    """Every tool failure through the gateway is an isError result; its JSON-RPC error code rides in _meta (issue #6576)."""
+
+    @staticmethod
+    async def _assert_tool_errors(call: Callable[[str], Any], tools: dict[str, str]) -> None:
+        """Check the three failure shapes through ``call(tool_name)``."""
+        strict = await call(tools["strict"])
+        assert strict.is_error is True, f"strict upstream error was not an isError result: {strict}"
+        assert "Invalid params from the strict upstream" in strict.content[0].text, strict.content
+        assert (strict.meta or {}).get("io.contextforge/errorCode") == {"code": -32602}, f"error code not reported: {strict.meta}"
+
+        boom = await call(tools["boom"])
+        assert boom.is_error is True, f"execution failure was not an isError result: {boom}"
+        # The SDK upstream hides the exception text; its own message passes through the gateway unchanged.
+        assert boom.content[0].text == "Error executing tool boom", boom.content
+        assert not (boom.meta or {}).get("io.contextforge/errorCode"), f"execution failure must carry no error code: {boom.meta}"
+
+        unknown = await call(f"{tools['strict']}-missing")
+        assert unknown.is_error is True, f"unknown tool was not an isError result: {unknown}"
+        assert unknown.content[0].text.startswith("Unknown tool:"), unknown.content
+
+    @pytest.mark.parametrize("era", [pytest.param("legacy"), pytest.param("modern", marks=skip_no_modern_inbound)])
+    async def test_tool_failures_answer_is_error_with_the_error_code(self, jwt_token: str, tool_error_upstream: str, era: str) -> None:
+        """Legacy and modern callers see the same isError shape for an upstream JSON-RPC error, an execution failure and an unknown tool."""
+        headers = {"Authorization": f"Bearer {jwt_token}"}
+        name = f"toolerror{uuid.uuid4().hex[:8]}"
+        gateway_id = None
+        server_id = None
+        async with httpx.AsyncClient(base_url=BASE_URL, headers=headers, timeout=60) as http:
+            try:
+                response = await http.post("/gateways", json={"name": name, "url": tool_error_upstream, "transport": "STREAMABLEHTTP", "visibility": "public"})
+                assert response.status_code in (200, 201, 202), response.text
+                gateway_id = response.json()["id"]
+                deadline = time.monotonic() + 60
+                rows: list[dict[str, Any]] = []
+                while time.monotonic() < deadline:
+                    response = await http.get("/tools", params={"gateway_id": gateway_id, "limit": 0})
+                    assert response.status_code == 200, response.text
+                    rows = response.json()
+                    if len(rows) == 2:
+                        break
+                    await asyncio.sleep(0.5)
+                assert len(rows) == 2, f"Gateway did not discover both upstream tools: {rows}; check MCP_TOOL_ERROR_UPSTREAM_HOST"
+                tools = {row["name"].rsplit(name, 1)[-1].lstrip("-_."): row["name"] for row in rows}
+                assert set(tools) == {"strict", "boom"}, tools
+                response = await http.post("/servers", json={"server": {"name": name, "associated_tools": [row["id"] for row in rows]}, "visibility": "public"})
+                assert response.status_code in (200, 201), response.text
+                server_id = response.json()["id"]
+                scoped_url = f"{BASE_URL}/servers/{server_id}/mcp/"
+
+                http_client = create_mcp_http_client(headers=headers, timeout=httpx2.Timeout(_CLIENT_TIMEOUT))
+                if era == "legacy":
+                    async with streamable_http_client(scoped_url, http_client=http_client) as (read, write):
+                        async with ClientSession(read, write) as session:
+                            await session.initialize()
+                            await self._assert_tool_errors(lambda tool: session.call_tool(tool, {}), tools)
+                else:
+                    async with Client(streamable_http_client(scoped_url, http_client=http_client), mode="2026-07-28", cache=None) as modern_client:
+                        await self._assert_tool_errors(lambda tool: modern_client.call_tool(tool, {}), tools)
+                print(f"    -> {era}: strict/boom/unknown all isError; JSON-RPC error code reported")
+            finally:
+                if server_id:
+                    await http.delete(f"/servers/{server_id}")
+                if gateway_id:
+                    await http.delete(f"/gateways/{gateway_id}")
+
+
+
+class TestPromptErrorTranslation:
+    """Every prompts/get failure through the gateway is a JSON-RPC error: -32602 when the gateway refuses the request, the upstream's own code when the upstream answered one (issue #6618)."""
+
+    @staticmethod
+    @asynccontextmanager
+    async def _prompt_getter(era: str, url: str, token: str) -> AsyncIterator[Callable[..., Any]]:
+        """Open a legacy or modern client on ``url`` and yield its ``get_prompt(name, arguments=None)``."""
+        http_client = create_mcp_http_client(headers={"Authorization": f"Bearer {token}"}, timeout=httpx2.Timeout(_CLIENT_TIMEOUT))
+        if era == "legacy":
+            async with streamable_http_client(url, http_client=http_client) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    yield session.get_prompt
+        else:
+            async with Client(streamable_http_client(url, http_client=http_client), mode="2026-07-28", cache=None) as modern_client:
+                yield modern_client.get_prompt
+
+    @staticmethod
+    async def _json_rpc_error(call: Callable[[], Any]) -> Any:
+        """Run ``call`` and return the JSON-RPC error it raised."""
+        with pytest.raises(BaseException) as exc_info:  # noqa: B017 - the leaf is asserted below
+            await call()
+        leaves = [exc for exc in _unwrap_exception_group(exc_info.value) if isinstance(exc, McpError)]
+        assert leaves, f"expected a JSON-RPC error, got {exc_info.value!r}"
+        return leaves[0].error
+
+    async def _expect_invalid_params(self, call: Callable[[], Any], message_part: str) -> None:
+        """Require a -32602 whose message contains ``message_part``."""
+        error = await self._json_rpc_error(call)
+        assert error.code == -32602, error
+        assert message_part in error.message, error
+
+    async def _assert_prompt_errors(self, get_prompt: Callable[..., Any], prompts: dict[str, str]) -> None:
+        """Check the failure shapes an authorized caller sees through ``get_prompt(name, arguments)``."""
+        await self._expect_invalid_params(lambda: get_prompt(prompts["strict"], {}), "Invalid params from the strict upstream")
+        custom = await self._json_rpc_error(lambda: get_prompt(prompts["custom"], {}))
+        assert (custom.code, custom.message, custom.data) == (-32001, "Custom upstream failure", {"hint": "retry later"}), custom
+        await self._expect_invalid_params(lambda: get_prompt(prompts["local"]), "Missing required arguments: name")
+        await self._expect_invalid_params(lambda: get_prompt(prompts["local"], {}), "Missing required arguments: name")
+        await self._expect_invalid_params(lambda: get_prompt(prompts["local"], {"other": "x"}), "Missing required arguments: name")
+        await self._expect_invalid_params(lambda: get_prompt(f"{prompts['local']}-missing", {}), "Unknown prompt:")
+
+    @pytest.mark.parametrize("era", [pytest.param("legacy"), pytest.param("modern", marks=skip_no_modern_inbound)])
+    async def test_prompt_failures_answer_invalid_params(self, prompt_error_upstream: str, era: str) -> None:
+        """Legacy and modern callers see -32602 for an upstream JSON-RPC error, a missing required argument and an unknown or invisible prompt; a scope-capped token keeps its permission error."""
+        # An un-narrowed admin token: the module fixture's token is public-only and may not create a private prompt.
+        admin_token = make_test_jwt(ADMIN_EMAIL, is_admin=True, teams=None, secret=JWT_SECRET)
+        headers = {"Authorization": f"Bearer {admin_token}"}
+        name = f"prompterror{uuid.uuid4().hex[:8]}"
+        outsider_email = f"{name}@example.com"
+        gateway_id = None
+        prompt_id = None
+        server_id = None
+        outsider_created = False
+        async with httpx.AsyncClient(base_url=BASE_URL, headers=headers, timeout=60) as http:
+            try:
+                response = await http.post("/gateways", json={"name": name, "url": prompt_error_upstream, "transport": "STREAMABLEHTTP", "visibility": "public"})
+                assert response.status_code in (200, 201, 202), response.text
+                gateway_id = response.json()["id"]
+                deadline = time.monotonic() + 60
+                rows: list[dict[str, Any]] = []
+                while time.monotonic() < deadline:
+                    response = await http.get("/prompts", params={"gateway_id": gateway_id, "limit": 0})
+                    assert response.status_code == 200, response.text
+                    rows = response.json()
+                    if len(rows) == 2:
+                        break
+                    await asyncio.sleep(0.5)
+                assert len(rows) == 2, f"Gateway did not discover both upstream prompts: {rows}; check MCP_PROMPT_ERROR_UPSTREAM_HOST"
+                upstream_prompts = {row["name"].rsplit(name, 1)[-1].lstrip("-_."): row for row in rows}
+                assert set(upstream_prompts) == {"strict", "custom"}, upstream_prompts
+                # The gateway-stored prompt is private to the admin, so another user must not be able to tell it exists.
+                response = await http.post(
+                    "/prompts",
+                    json={"prompt": {"name": f"{name}-local", "template": "Hello, {{ name }}!", "arguments": [{"name": "name", "description": "who to greet", "required": True}]}, "visibility": "private"},
+                )
+                assert response.status_code in (200, 201), response.text
+                prompt_id = response.json()["id"]
+                prompts = {"strict": upstream_prompts["strict"]["name"], "custom": upstream_prompts["custom"]["name"], "local": response.json()["name"]}
+                response = await http.post("/servers", json={"server": {"name": name, "associated_prompts": [row["id"] for row in rows] + [prompt_id]}, "visibility": "public"})
+                assert response.status_code in (200, 201), response.text
+                server_id = response.json()["id"]
+                scoped_url = f"{BASE_URL}/servers/{server_id}/mcp/"
+                response = await http.post(
+                    "/auth/email/admin/users",
+                    json={"email": outsider_email, "password": TEST_PASSWORD, "full_name": "Prompt Outsider", "is_active": True, "is_admin": False, "password_change_required": False},
+                )
+                assert response.status_code in (200, 201), response.text
+                outsider_created = True
+
+                async with self._prompt_getter(era, scoped_url, admin_token) as get_prompt:
+                    await self._assert_prompt_errors(get_prompt, prompts)
+
+                # A user who cannot see the private prompt gets the same answer as for a prompt that does not exist.
+                outsider_token = make_test_jwt(outsider_email, teams=[], secret=JWT_SECRET)
+                async with self._prompt_getter(era, scoped_url, outsider_token) as get_prompt:
+                    await self._expect_invalid_params(lambda: get_prompt(prompts["local"], {"name": "x"}), f"Unknown prompt: {prompts['local']}")
+
+                # A token whose scope excludes prompts.read is refused by the permission check, not by the prompt lookup.
+                scoped_token = make_test_jwt(ADMIN_EMAIL, is_admin=True, teams=None, scopes={"permissions": ["tools.read"]}, secret=JWT_SECRET)
+                async with self._prompt_getter(era, scoped_url, scoped_token) as get_prompt:
+                    error = await self._json_rpc_error(lambda: get_prompt(prompts["local"], {"name": "x"}))
+                    assert error.code != -32602, error
+                    assert "Unknown prompt" not in error.message and "Missing required" not in error.message, error
+                print(f"    -> {era}: gateway refusals answer -32602, upstream errors keep their codes; scope-capped token answers {error.code}")
+            finally:
+                if outsider_created:
+                    await http.delete(f"/auth/email/admin/users/{outsider_email}")
+                if server_id:
+                    await http.delete(f"/servers/{server_id}")
+                if prompt_id:
+                    await http.delete(f"/prompts/{prompt_id}")
+                if gateway_id:
+                    await http.delete(f"/gateways/{gateway_id}")
+
+
 # ---------------------------------------------------------------------------
 # Raw HTTP / transport parity — exercises paths the high-level client hides
 # ---------------------------------------------------------------------------
@@ -595,6 +969,29 @@ class TestRawJsonRpc:
             resp = http.post(f"{BASE_URL}/mcp/", headers=headers, json=build_initialize(1))
         assert resp.status_code in (401, 403), f"expected 401/403 without auth, got {resp.status_code}: {resp.text}"
         print(f"    -> unauthenticated /mcp/ -> status={resp.status_code}")
+
+    def test_unsupported_protocol_version_returns_32022(self, jwt_token: str) -> None:
+        """A modern-era POST at an unserved version gets JSON-RPC -32022 with HTTP 400."""
+        headers = {
+            "authorization": f"Bearer {jwt_token}",
+            "accept": "application/json, text/event-stream",
+            "content-type": "application/json",
+            "mcp-protocol-version": "2099-01-01",
+        }
+        body = {
+            "jsonrpc": "2.0",
+            "id": "ping-2099",
+            "method": "ping",
+            "params": {"_meta": {"io.modelcontextprotocol/protocolVersion": "2099-01-01"}},
+        }
+        with httpx.Client(timeout=10.0) as http:
+            resp = http.post(f"{BASE_URL}/mcp/", headers=headers, json=body)
+        assert resp.status_code == 400, f"expected 400, got {resp.status_code}: {resp.text}"
+        error = resp.json()["error"]
+        assert error["code"] == -32022, error
+        assert error["data"]["requested"] == "2099-01-01", error
+        assert error["data"]["supported"], error
+        print(f"    -> unsupported version -> status={resp.status_code} supported={error['data']['supported']}")
 
     def test_invalid_method_returns_error(self, jwt_token: str) -> None:
         """Unknown MCP method surfaces a JSON-RPC error envelope."""
@@ -1358,10 +1755,10 @@ async def _mcp_session(server_url: str, access_token: str | None = None) -> Asyn
                 await session.initialize()
                 yield session
     except BaseException as exc:  # noqa: BLE001 — re-raised below unless translated
-        status_error = error_hook.to_http_status_error(exc)
-        if status_error is None:
+        transport_error = error_hook.to_transport_error(exc)
+        if transport_error is None:
             raise
-        raise status_error from exc
+        raise transport_error from exc
 
 
 async def _async_mcp_tools_list(access_token: str, server_url: str = BASE_URL) -> list:
@@ -1772,67 +2169,20 @@ def _mcp_initialize_only(access_token: str, server_url: str = BASE_URL) -> bool:
     return _run_async(_async_mcp_initialize(access_token, server_url))
 
 
-# Keep synchronous Playwright cases after the async MCP protocol cases: its
-# session-scoped driver owns the thread's event loop until fixture teardown.
-def test_resource_namespacing_admin_rename(playwright: Playwright, jwt_token: str, resource_namespacing_upstreams: list[dict[str, str]], create_user: Any) -> None:
-    """The shipped Admin form edits a base and never prefixes it twice."""
-    separator = os.getenv("GATEWAY_TOOL_NAME_SEPARATOR", "-")
-    gateway_name = f"adminrename{uuid.uuid4().hex[:12]}"
-    peer = resource_namespacing_upstreams[0]
-    admin_email, _, created = create_user(is_admin=True, password="V7!mQ2@zR8#pL5$xT9%wN4&k")  # pragma: allowlist secret
-    assert created.status == 201, created.text()
-    headers = {"Authorization": f"Bearer {jwt_token}"}
-    with httpx.Client(base_url=BASE_URL, headers=headers, timeout=60) as http:
-        response = http.post("/gateways", json={"name": gateway_name, "url": peer["url"], "transport": "STREAMABLEHTTP", "visibility": "public"})
-        assert response.status_code in (200, 201, 202), response.text
-        gateway_id = response.json()["id"]
-        try:
-            deadline = time.monotonic() + 60
-            resource = None
-            while time.monotonic() < deadline:
-                response = http.get("/resources", params={"gateway_id": gateway_id, "limit": 100})
-                assert response.status_code == 200, response.text
-                resource = next((row for row in response.json() if row["uri"] == peer["uri"]), None)
-                if resource:
-                    break
-                time.sleep(0.5)
-            assert resource, "Gateway did not discover the Admin rename fixture"
-            expected = f"{gateway_name}{separator}shared{separator}report"
-            assert resource["name"] == expected
-            browser = playwright.chromium.launch()
-            try:
-                context = browser.new_context()
-                admin_token = make_test_jwt(admin_email, is_admin=True, teams=None, secret=JWT_SECRET)
-                context.add_cookies([{"name": "jwt_token", "value": admin_token, "url": f"{BASE_URL}/", "httpOnly": True, "sameSite": "Lax"}])
-                page = context.new_page()
-                for attempt in range(2):
-                    page.goto(f"{BASE_URL}/admin/?resources_q={gateway_name}#resources")
-                    assert page.url.split("?")[0].rstrip("/") == f"{BASE_URL}/admin", f"Admin authentication failed: {page.url}"
-                    row = page.locator("#resources-table-body tr").filter(has_text=expected)
-                    row.get_by_role("button", name="Actions", exact=True).click()
-                    with page.expect_response(lambda result: result.request.method == "GET" and result.url.endswith(f"/admin/resources/{resource['id']}")) as detail:
-                        page.get_by_role("menuitem", name="Edit", exact=True).click()
-                    field = page.locator("#edit-resource-custom-name")
-                    field.wait_for(state="visible")
-                    base = f"shared{separator}report" if attempt == 0 else f"weekly{separator}report"
-                    assert detail.value.json()["resource"]["customNameSlug"] == base
-                    expect(field).to_have_value(base)
-                    field.fill("Weekly Report" if attempt == 0 else f"weekly{separator}report")
-                    page.locator("#edit-resource-description").fill(f"Admin rename regression {attempt}")
-                    with page.expect_navigation(wait_until="domcontentloaded"):
-                        with page.expect_response(lambda result: result.request.method == "POST" and result.url.endswith(f"/admin/resources/{resource['id']}/edit")) as saved:
-                            page.locator("#edit-resource-form").get_by_role("button", name="Save Changes").click()
-                    assert saved.value.status == 200
-                    response = http.get("/resources", params={"gateway_id": gateway_id, "limit": 100})
-                    updated = next(row for row in response.json() if row["id"] == resource["id"])
-                    expected = f"{gateway_name}{separator}weekly{separator}report"
-                    assert updated["name"] == expected
-                    assert updated["customNameSlug"] == f"weekly{separator}report"
-                    assert updated["originalName"] == "Shared Report"
-            finally:
-                browser.close()
-        finally:
-            http.delete(f"/gateways/{gateway_id}")
+def _public_rpc_tool_call(server_id: str, tool_name: str, arguments: dict[str, Any], access_token: str | None = None) -> httpx.Response:
+    """Call a tool through the public JSON-RPC endpoint."""
+    headers = {"Authorization": f"Bearer {access_token}"} if access_token else {}
+    return httpx.post(
+        f"{BASE_URL}/rpc",
+        headers=headers,
+        json={
+            "jsonrpc": "2.0",
+            "id": f"scoped-rpc-{uuid.uuid4().hex}",
+            "method": "tools/call",
+            "params": {"name": tool_name, "server_id": server_id, "arguments": arguments},
+        },
+        timeout=_CLIENT_TIMEOUT,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2167,6 +2517,67 @@ class TestMcpPerServerEndpoint:
         with pytest.raises(Exception) as excinfo:
             _mcp_initialize_only(outsider_user["access_token"], server_url=server_url)
         print(f"    -> Outsider denied private server: {excinfo.value}")
+
+
+class TestPublicRpcScopedAuthorization:
+    """Public ``/rpc`` enforces authentication, token permissions, and server visibility."""
+
+    tool_name = f"{STREAMABLE_HTTP_GATEWAY_NAME}-get-system-time"
+
+    def test_unauthenticated_call_is_rejected(self, visibility_servers: dict) -> None:
+        """A scoped public tool call requires a bearer token."""
+        response = _public_rpc_tool_call(visibility_servers["public"]["id"], self.tool_name, {"timezone": "UTC"})
+        assert response.status_code == 401, f"Unauthenticated POST /rpc returned {response.status_code}: {response.text[:500]}"
+
+    def test_read_only_token_cannot_execute(self, scoped_token_read_only: dict, visibility_servers: dict) -> None:
+        """MCP transport access does not imply ``tools.execute``."""
+        response = _public_rpc_tool_call(
+            visibility_servers["public"]["id"],
+            self.tool_name,
+            {"timezone": "UTC"},
+            scoped_token_read_only["access_token"],
+        )
+        assert response.status_code == 200, f"POST /rpc returned {response.status_code}: {response.text[:500]}"
+        body = response.json()
+        assert body.get("error", {}).get("code") == -32003, f"Read-only token returned the wrong error: {body}"
+
+    def test_cross_team_developer_cannot_probe_team_server(
+        self,
+        admin_api: APIRequestContext,
+        playwright: Playwright,
+        create_team: Any,
+        visibility_servers: dict,
+    ) -> None:
+        """A caller with execute permission in another team sees generic not-found."""
+        _, other_team = _created_team(create_team, name=f"{RBAC_PREFIX}-rpc-other-{uuid.uuid4().hex[:8]}")
+        caller = _create_user_with_token(
+            admin_api,
+            playwright,
+            f"{RBAC_PREFIX}-rpc-other-{uuid.uuid4().hex[:8]}@test.com",
+            team_id=other_team["id"],
+            rbac_role="developer",
+        )
+        server_id = visibility_servers["team"]["id"]
+        try:
+            response = _public_rpc_tool_call(server_id, self.tool_name, {"timezone": "UTC"}, caller["access_token"])
+            assert response.status_code == 200, f"POST /rpc returned {response.status_code}: {response.text[:500]}"
+            body = response.json()
+            assert body.get("error") == {"code": -32002, "message": f"Server not found: {server_id}", "data": {"server_id": server_id}}, f"Hidden server returned the wrong error: {body}"
+        finally:
+            _cleanup_user(admin_api, caller)
+
+    def test_team_developer_can_invoke(self, test_users: dict, visibility_servers: dict) -> None:
+        """A team member with ``tools.execute`` can invoke an attached tool."""
+        response = _public_rpc_tool_call(
+            visibility_servers["team"]["id"],
+            self.tool_name,
+            {"timezone": "UTC"},
+            test_users["developer"]["access_token"],
+        )
+        assert response.status_code == 200, f"POST /rpc returned {response.status_code}: {response.text[:500]}"
+        body = response.json()
+        assert "error" not in body, f"Authorized scoped invocation failed: {body}"
+        assert body.get("result", {}).get("content"), f"Authorized scoped invocation returned no content: {body}"
 
 
 # ---------------------------------------------------------------------------
@@ -3075,7 +3486,70 @@ class TestVirtualServerLifecycle:
             return
 
         assert detached.is_error, f"Detached tool remained invocable: {detached}"
-        assert "not found" in detached.content[0].text.lower(), f"Detached tool returned the wrong error: {detached}"
+        message = detached.content[0].text.lower()
+        assert "not found" in message or message == f"unknown tool: {echo_tool['name']}".lower(), f"Detached tool returned the wrong error: {detached}"
+
+    def test_public_rpc_tools_call_honors_server_attachment(
+        self,
+        create_server: Any,
+        lifecycle_tools: list[dict[str, Any]],
+        admin_token: str,
+    ) -> None:
+        """Public /rpc should invoke an attached tool and reject an unassociated one.
+
+        Args:
+            create_server: Factory that returns the raw creation response.
+            lifecycle_tools: The gateway's enabled tools.
+            admin_token: Un-narrowed platform-admin JWT.
+        """
+        echo_tool = next((tool for tool in lifecycle_tools if tool["name"].endswith("-echo")), None)
+        unassociated_tool = next((tool for tool in lifecycle_tools if tool["id"] != (echo_tool or {}).get("id")), None)
+        assert echo_tool, "The live gateway fixture must expose an echo tool"
+        assert unassociated_tool, "The live gateway fixture must expose an unassociated tool"
+
+        resp = create_server(tool_ids=[echo_tool["id"]])
+        assert resp.status == 201, f"POST /servers returned {resp.status}: {resp.text()[:500]}"
+        server_id = _json_or_fail(resp, "POST /servers")["id"]
+        headers = {"Authorization": f"Bearer {admin_token}"}
+
+        invoked = httpx.post(
+            f"{BASE_URL}/rpc",
+            headers=headers,
+            json={
+                "jsonrpc": "2.0",
+                "id": "scoped-live-call",
+                "method": "tools/call",
+                "params": {
+                    "name": echo_tool["name"],
+                    "server_id": server_id,
+                    "arguments": {"message": "scoped-rpc-live"},
+                },
+            },
+            timeout=_CLIENT_TIMEOUT,
+        )
+        assert invoked.status_code == 200, f"POST /rpc returned {invoked.status_code}: {invoked.text[:500]}"
+        invoked_body = invoked.json()
+        assert "error" not in invoked_body, f"Attached tool invocation failed: {invoked_body}"
+        assert "scoped-rpc-live" in json.dumps(invoked_body["result"]), f"Attached tool returned the wrong result: {invoked_body}"
+
+        rejected = httpx.post(
+            f"{BASE_URL}/rpc",
+            headers=headers,
+            json={
+                "jsonrpc": "2.0",
+                "id": "scoped-live-rejection",
+                "method": "tools/call",
+                "params": {
+                    "name": unassociated_tool["name"],
+                    "server_id": server_id,
+                    "arguments": {},
+                },
+            },
+            timeout=_CLIENT_TIMEOUT,
+        )
+        assert rejected.status_code == 200, f"POST /rpc returned {rejected.status_code}: {rejected.text[:500]}"
+        rejected_body = rejected.json()
+        assert rejected_body.get("error", {}).get("code") == -32601, f"Unassociated tool returned the wrong error: {rejected_body}"
 
     @pytest.mark.parametrize(
         ("first_tenant", "second_tenant"),
@@ -4418,3 +4892,66 @@ class TestSchemaRegexReDoS:
                 failures.append(failure)
             if failures:
                 pytest.fail("Cleanup did not remove every owned object:\n  " + "\n  ".join(failures))
+
+
+# Keep synchronous Playwright cases after the async MCP protocol cases: its
+# session-scoped driver owns the thread's event loop until fixture teardown.
+def test_resource_namespacing_admin_rename(playwright: Playwright, jwt_token: str, resource_namespacing_upstreams: list[dict[str, str]], create_user: Any) -> None:
+    """The shipped Admin form edits a base and never prefixes it twice."""
+    separator = os.getenv("GATEWAY_TOOL_NAME_SEPARATOR", "-")
+    gateway_name = f"adminrename{uuid.uuid4().hex[:12]}"
+    peer = resource_namespacing_upstreams[0]
+    admin_email, _, created = create_user(is_admin=True, password="V7!mQ2@zR8#pL5$xT9%wN4&k")  # pragma: allowlist secret
+    assert created.status == 201, created.text()
+    headers = {"Authorization": f"Bearer {jwt_token}"}
+    with httpx.Client(base_url=BASE_URL, headers=headers, timeout=60) as http:
+        response = http.post("/gateways", json={"name": gateway_name, "url": peer["url"], "transport": "STREAMABLEHTTP", "visibility": "public"})
+        assert response.status_code in (200, 201, 202), response.text
+        gateway_id = response.json()["id"]
+        try:
+            deadline = time.monotonic() + 60
+            resource = None
+            while time.monotonic() < deadline:
+                response = http.get("/resources", params={"gateway_id": gateway_id, "limit": 100})
+                assert response.status_code == 200, response.text
+                resource = next((row for row in response.json() if row["uri"] == peer["uri"]), None)
+                if resource:
+                    break
+                time.sleep(0.5)
+            assert resource, "Gateway did not discover the Admin rename fixture"
+            expected = f"{gateway_name}{separator}shared{separator}report"
+            assert resource["name"] == expected
+            browser = playwright.chromium.launch()
+            try:
+                context = browser.new_context()
+                admin_token = make_test_jwt(admin_email, is_admin=True, teams=None, secret=JWT_SECRET)
+                context.add_cookies([{"name": "jwt_token", "value": admin_token, "url": f"{BASE_URL}/", "httpOnly": True, "sameSite": "Lax"}])
+                page = context.new_page()
+                for attempt in range(2):
+                    page.goto(f"{BASE_URL}/admin/?resources_q={gateway_name}#resources")
+                    assert page.url.split("?")[0].rstrip("/") == f"{BASE_URL}/admin", f"Admin authentication failed: {page.url}"
+                    row = page.locator("#resources-table-body tr").filter(has_text=expected)
+                    row.get_by_role("button", name="Actions", exact=True).click()
+                    with page.expect_response(lambda result: result.request.method == "GET" and result.url.endswith(f"/admin/resources/{resource['id']}")) as detail:
+                        page.get_by_role("menuitem", name="Edit", exact=True).click()
+                    field = page.locator("#edit-resource-custom-name")
+                    field.wait_for(state="visible")
+                    base = f"shared{separator}report" if attempt == 0 else f"weekly{separator}report"
+                    assert detail.value.json()["resource"]["customNameSlug"] == base
+                    expect(field).to_have_value(base)
+                    field.fill("Weekly Report" if attempt == 0 else f"weekly{separator}report")
+                    page.locator("#edit-resource-description").fill(f"Admin rename regression {attempt}")
+                    with page.expect_navigation(wait_until="domcontentloaded"):
+                        with page.expect_response(lambda result: result.request.method == "POST" and result.url.endswith(f"/admin/resources/{resource['id']}/edit")) as saved:
+                            page.locator("#edit-resource-form").get_by_role("button", name="Save Changes").click()
+                    assert saved.value.status == 200
+                    response = http.get("/resources", params={"gateway_id": gateway_id, "limit": 100})
+                    updated = next(row for row in response.json() if row["id"] == resource["id"])
+                    expected = f"{gateway_name}{separator}weekly{separator}report"
+                    assert updated["name"] == expected
+                    assert updated["customNameSlug"] == f"weekly{separator}report"
+                    assert updated["originalName"] == "Shared Report"
+            finally:
+                browser.close()
+        finally:
+            http.delete(f"/gateways/{gateway_id}")
