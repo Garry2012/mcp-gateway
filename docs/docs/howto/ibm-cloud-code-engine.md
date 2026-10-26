@@ -41,7 +41,7 @@ This file holds the runtime configuration for the gateway. Locally it is passed 
 # ─────────────────────────────────────────────────────────────────────────────
 AUTH_REQUIRED=true
 # Generate once:  openssl rand -hex 32
-JWT_SECRET_KEY=eef5e9f70ca7fe6f9677ad2acaf4d32c55e9d98e9cb74299b33f5c5d1a3c8ef0
+JWT_SECRET_KEY=***REMOVED***
 
 HOST=0.0.0.0
 PORT=4444

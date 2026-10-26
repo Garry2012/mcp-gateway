@@ -135,10 +135,10 @@ User: John Doe (user@example.com)
 Admin: False
 Expires: 30 days
 
-Token: k7j3h4g5f6d7s8a9w0e1r2t3y4u5i6o7
+Token: ***REMOVED***
 
 Use this token in API requests:
-  curl -H 'X-Auth-Token: k7j3h4g5f6d7s8a9w0e1r2t3y4u5i6o7' http://localhost:4444/protocol/initialize
+  curl -H 'X-Auth-Token: ***REMOVED***' http://localhost:4444/protocol/initialize
 ```
 ### Restart MCPContextForge
 
@@ -245,7 +245,7 @@ Expires: Never
 #### Revoke a Specific Token
 
 ```bash
-python -m plugins.simple_token_auth.token_cli revoke k7j3h4g5f6d7s8a9w0e1r2t3y4u5i6o7
+python -m plugins.simple_token_auth.token_cli revoke ***REMOVED***
 ```
 
 #### Revoke All Tokens for a User
