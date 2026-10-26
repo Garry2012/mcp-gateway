@@ -161,9 +161,11 @@ def test_call_sessions() -> None:
                 response = client.post(endpoint, json={"jsonrpc": "2.0", "method": "notifications/initialized"})
                 response.raise_for_status()
                 expected = {}
-                for index, call_id in enumerate(["call-a", "call-b", None], 2):
-                    trace_id = secrets.token_hex(16)
-                    headers = {"traceparent": f"00-{trace_id}-{secrets.token_hex(8)}-01"}
+                cases = [(call_id, incoming_parent) for incoming_parent in (True, False) for call_id in ("call-a", "call-b", None)]
+                for index, (call_id, incoming_parent) in enumerate(cases, 2):
+                    trace_id = secrets.token_hex(16) if incoming_parent else None
+                    headers = {"traceparent": f"00-{trace_id}-{secrets.token_hex(8)}-01"} if incoming_parent else {}
+                    previous_tools = {tid for name, tid, _attrs in spans if name == "tool.invoke"}
                     if call_id:
                         headers["X-Call-Id"] = call_id
                     response = client.post(
@@ -173,6 +175,18 @@ def test_call_sessions() -> None:
                     body = response.text
                     result = json.loads(next(line[6:] for line in body.splitlines() if line.startswith("data: "))) if body.startswith("event:") else response.json()
                     assert "error" not in result and not result["result"].get("isError"), result
+                    deadline = time.monotonic() + 15
+                    while time.monotonic() < deadline:
+                        new_tools = {tid for name, tid, _attrs in spans if name == "tool.invoke"} - previous_tools
+                        if new_tools:
+                            break
+                        time.sleep(0.1)
+                    assert len(new_tools) == 1, new_tools
+                    if incoming_parent:
+                        assert new_tools == {trace_id}, new_tools
+                    else:
+                        trace_id = new_tools.pop()
+                    assert trace_id not in expected
                     expected[trace_id] = call_id
                 deadline = time.monotonic() + 15
                 while time.monotonic() < deadline:
@@ -196,7 +210,7 @@ def test_call_sessions() -> None:
                         assert any(name.startswith("Session Clinic /") and attrs.get("langfuse.session.id") == call_id for name, attrs in related), related
                     else:
                         assert all(attrs.get("langfuse.session.id") not in {"call-a", "call-b", "initialization-call"} for _name, attrs in related), related
-                print("PASS: one persistent MCP session keeps call-a, call-b, and headerless tool requests separate; roots and HTTP child spans retain call IDs.")
+                print("PASS: persistent MCP sessions separate calls with supplied and generated trace roots; roots and HTTP children retain call IDs.")
         finally:
             for process in reversed(processes):
                 process.terminate()

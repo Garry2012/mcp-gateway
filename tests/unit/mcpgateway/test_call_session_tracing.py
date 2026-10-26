@@ -23,6 +23,7 @@ def call_tracer(monkeypatch):
     exporter = memory.InMemorySpanExporter()
     provider = sdk.TracerProvider()
     monkeypatch.setenv("OTEL_ENABLE_OBSERVABILITY", "true")
+    monkeypatch.setenv("OTEL_SYSTEM_TRACES_ENABLED", "false")
     monkeypatch.setenv("OTEL_TRACES_EXPORTER", "console")
     monkeypatch.setenv("OTEL_EMIT_LANGFUSE_ATTRIBUTES", "true")
     monkeypatch.setenv("OTEL_HTTPX_INSTRUMENTATION_ENABLED", "false")
@@ -124,14 +125,15 @@ async def test_parallel_requests_keep_distinct_call_sessions(call_tracer):
     children = {s.name: s.attributes.get("langfuse.session.id") for s in exporter.get_finished_spans() if s.name.startswith("call-")}
     assert children == {"call-a": "call-a", "call-b": "call-b"}
     with tracer.start_as_current_span("outside-request") as span:
-        assert "langfuse.session.id" not in span.attributes
+        assert not span.is_recording()
+    assert all(span.name != "outside-request" for span in exporter.get_finished_spans())
 
 
 @pytest.mark.parametrize("current_id", ["current-call", None])
 def test_current_scope_overrides_inherited_mcp_headers(call_tracer, current_id):
     """A reused MCP task uses the current scope, even when the new call omits its header."""
     _exporter, tracer = call_tracer
-    with observability.call_trace_session({"X-Call-Id": "previous-call"}):
+    with observability.call_trace_session({"X-Call-Id": "previous-call"}), tracer.start_as_current_span("request", kind=observability.SpanKind.SERVER):
         request_trace = observability.ToolTraceContext(None, call_id=current_id)
         with observability.call_trace_session({"X-Call-Id": "stale-header-call"}, request_trace):
             with observability.create_span("tool.invoke") as span:
@@ -149,7 +151,7 @@ def test_error_and_cancellation_restore_call_context(call_tracer, error):
     with pytest.raises(error):
         with observability.call_trace_session({"x-call-id": "failed-call"}):
             raise error()
-    with tracer.start_as_current_span("next-request") as span:
+    with tracer.start_as_current_span("next-request", kind=observability.SpanKind.SERVER) as span:
         assert "langfuse.session.id" not in span.attributes
 
 
@@ -181,3 +183,14 @@ async def test_call_label_does_not_change_auth_or_error_responses(call_tracer, s
     (span,) = exporter.get_finished_spans()
     assert span.attributes["http.response.status_code"] == status
     assert span.attributes["langfuse.session.id"] == "denied-call"
+
+
+def test_call_identifier_does_not_enable_background_tracing(call_tracer):
+    """A call identifier cannot cause a background trace tree to be exported."""
+    exporter, tracer = call_tracer
+    with observability.call_trace_session({"X-Call-Id": "background-call"}):
+        with tracer.start_as_current_span("background") as root:
+            assert not root.is_recording()
+            with observability.create_span("tool.invoke") as child:
+                assert not child.is_recording()
+    assert not exporter.get_finished_spans()
