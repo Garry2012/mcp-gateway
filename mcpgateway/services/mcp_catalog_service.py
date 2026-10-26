@@ -27,9 +27,6 @@ from sqlalchemy.orm import Session
 from mcpgateway.config import settings
 from mcpgateway.db import Gateway, Prompt, Resource, server_prompt_association, server_resource_association, server_tool_association, Tool
 from mcpgateway.observability import create_span, set_span_attribute
-from mcpgateway.services.prompt_service import PromptService
-from mcpgateway.services.resource_service import ResourceService
-from mcpgateway.services.tool_service import ToolService
 from mcpgateway.utils.gateway_access import check_gateway_access, extract_gateway_id_from_headers
 from mcpgateway.utils.correlation_id import get_correlation_id
 from mcpgateway.utils.mcp_catalog_snapshot import publish_snapshot, read_snapshot, reserve_collection
@@ -40,11 +37,11 @@ from mcpgateway.validation.jsonrpc import JSONRPCError
 logger = logging.getLogger(__name__)
 # These headers carry tracing context, never catalog selection or authorization.
 _TRACING_HEADERS = frozenset({"traceparent", "tracestate", "x-trace-id", "x-request-id", "x-correlation-id", "b3", "x-b3-traceid", "x-b3-spanid", "x-b3-parentspanid", "x-b3-sampled", "x-b3-flags"})
-_CATALOGS: dict[str, tuple[type[Tool] | type[Resource] | type[Prompt], type[ToolService] | type[ResourceService] | type[PromptService], Any, str, str]] = {
-    "tools/list": (Tool, ToolService, server_tool_association, "tool_id", "tools"),
-    "resources/list": (Resource, ResourceService, server_resource_association, "resource_id", "resources"),
-    "prompts/list": (Prompt, PromptService, server_prompt_association, "prompt_id", "prompts"),
-    "resources/templates/list": (Resource, ResourceService, server_resource_association, "resource_id", "resourceTemplates"),
+_CATALOGS: dict[str, tuple[type[Tool] | type[Resource] | type[Prompt], str, Any, str, str]] = {
+    "tools/list": (Tool, "tool_service", server_tool_association, "tool_id", "tools"),
+    "resources/list": (Resource, "resource_service", server_resource_association, "resource_id", "resources"),
+    "prompts/list": (Prompt, "prompt_service", server_prompt_association, "prompt_id", "prompts"),
+    "resources/templates/list": (Resource, "resource_service", server_resource_association, "resource_id", "resourceTemplates"),
 }
 
 
@@ -265,7 +262,7 @@ async def list_catalog_page(
     with create_span(operation, {"mcp.method": method, "mcp.catalog.page_size": settings.mcp_list_page_size, "mcp.catalog.continuation": cursor is not None}) as span:
         headers = {name.lower(): value for name, value in (request_headers or {}).items()}
         scope = scope_fingerprint(method, server_id, user_email, token_teams, catalog_session_id(headers))
-        model, service_type, association, association_key, result_key = _CATALOGS[method]
+        model, service_name, association, association_key, result_key = _CATALOGS[method]
         if server_id and method in ("tools/list", "resources/list"):
             gateway_id = extract_gateway_id_from_headers(headers)
             gateway = db.get(Gateway, gateway_id) if gateway_id else None
@@ -287,7 +284,10 @@ async def list_catalog_page(
             if not isinstance(after, str) or not after or len(after) > 36:
                 raise JSONRPCError(-32602, "Invalid MCP database cursor")
             expires = position["expires"]
-        service = service_type()
+        # First-Party
+        from mcpgateway.transports import streamablehttp_transport  # pylint: disable=import-outside-toplevel
+
+        service = getattr(streamablehttp_transport, service_name)
         query = select(model).where(model.enabled.is_(True))
         if server_id:
             query = query.join(association, model.id == association.c[association_key]).where(association.c.server_id == server_id)

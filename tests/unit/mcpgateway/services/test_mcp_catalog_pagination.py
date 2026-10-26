@@ -82,6 +82,26 @@ async def _traverse(db, method, key, **kwargs):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("method,key,model", METHODS)
+async def test_catalog_pages_reuse_services(catalog_db, monkeypatch, method, key, model):
+    """Traverse scoped pages without allocating new service clients."""
+    service_name = {"tools/list": "tool_service", "prompts/list": "prompt_service"}.get(method, "resource_service")
+    service = getattr(transport, service_name)
+
+    def reject_constructor(_self):
+        raise AssertionError("Catalog requests must reuse the existing service client")
+
+    monkeypatch.setattr(type(service), "__init__", reject_constructor)
+    catalog_db.add_all([_row(method, index) for index in range(4)])
+    catalog_db.add(_row(method, 5, owner_email="other@example.com", visibility="private"))
+    catalog_db.commit()
+
+    items = await _traverse(catalog_db, method, key, user_email="reader@example.com", token_teams=[])
+    assert len(items) == 4
+    assert {item["name"] for item in items} == {f"item-{index:03d}" for index in range(4)}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method,key,model", METHODS)
 @pytest.mark.parametrize("count", [0, 1, 2, 3, 4, 6, 7, 10])
 @pytest.mark.parametrize("server_scoped", [False, True])
 async def test_complete_catalog_pages(catalog_db, method, key, model, count, server_scoped):
