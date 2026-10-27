@@ -39,9 +39,11 @@ from mcp.server.mcpserver import MCPServer
 from starlette.middleware.base import BaseHTTPMiddleware
 import uvicorn
 mcp = MCPServer("trace-policy")
-@mcp.tool()
+@mcp.tool(structured_output=False)
 def echo(value: str) -> str:
     """Return the supplied value."""
+    if value == "synthetic-mcp-error":
+        raise ValueError("synthetic upstream failure")
     return value
 class Capture(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
@@ -53,6 +55,39 @@ app = mcp.streamable_http_app(stateless_http=True, json_response=True)
 app.add_middleware(Capture)
 uvicorn.run(app, host="127.0.0.1", port=int(sys.argv[1]), log_level="error")
 '''
+
+
+_FAULTY_GATEWAY = r"""
+import sys
+import uvicorn
+from mcpgateway import observability
+from mcpgateway.utils import trace_redaction
+mode = sys.argv[2]
+original_redact = trace_redaction.redact_sensitive_fields
+original_attribute = observability.sanitize_trace_attribute_value
+if mode == "start":
+    from opentelemetry.sdk.trace import Tracer
+    original_start = Tracer.start_as_current_span
+    def start(self, name, *args, **kwargs):
+        if name.startswith("POST /servers/") and name.endswith("/mcp"):
+            print("Injected request span start failure", flush=True)
+            raise RuntimeError("private-probe")
+        return original_start(self, name, *args, **kwargs)
+    Tracer.start_as_current_span = start
+def redact(value):
+    if mode == "input" and isinstance(value, dict) and "value" in value:
+        raise RuntimeError("private-probe")
+    if mode == "output" and hasattr(value, "content"):
+        raise RuntimeError("private-probe")
+    return original_redact(value)
+def attribute(name, value):
+    if mode == "attribute" and name == "langfuse.observation.output":
+        raise RuntimeError("private-probe")
+    return original_attribute(name, value)
+trace_redaction.redact_sensitive_fields = redact
+observability.sanitize_trace_attribute_value = attribute
+uvicorn.run("mcpgateway.main:app", host="127.0.0.1", port=int(sys.argv[1]), log_level="error")
+"""
 
 
 def _port() -> int:
@@ -97,6 +132,9 @@ def traced_gateway(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[A
     pytest.importorskip("opentelemetry.exporter.otlp.proto.http.trace_exporter")
     from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
 
+    overrides = request.param if isinstance(request.param, dict) else {}
+    failure_mode = request.param if isinstance(request.param, str) else None
+    system_traces_enabled = False if failure_mode or overrides else request.param
     batches: list[list[dict[str, Any]]] = []
     lock = threading.Lock()
     payload_path = tmp_path / "collector.jsonl"
@@ -117,6 +155,7 @@ def traced_gateway(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[A
                     "span_id": span.span_id.hex(),
                     "parent_span_id": span.parent_span_id.hex(),
                     "kind": span.kind,
+                    "status": span.status.code,
                     "attributes": {item.key: item.value.bool_value if item.value.HasField("bool_value") else item.value.string_value for item in span.attributes},
                 }
                 for resource in message.resource_spans
@@ -178,7 +217,7 @@ def traced_gateway(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[A
             "OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf",
             "OTEL_EXPORTER_OTLP_ENDPOINT": f"http://127.0.0.1:{collector.server_port}",
             "OTEL_BSP_SCHEDULE_DELAY": "100",
-            "OTEL_SYSTEM_TRACES_ENABLED": str(request.param).lower(),
+            "OTEL_SYSTEM_TRACES_ENABLED": str(system_traces_enabled).lower(),
             "OTEL_HTTPX_INSTRUMENTATION_ENABLED": "true",
             "OTEL_SQLALCHEMY_INSTRUMENTATION_ENABLED": "false",
             "OTEL_REDIS_INSTRUMENTATION_ENABLED": "false",
@@ -189,10 +228,13 @@ def traced_gateway(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[A
             "LOG_LEVEL": "ERROR",
             "PYTHONUNBUFFERED": "1",
         }
+        env.update(overrides)
+        command = [sys.executable, "-m", "uvicorn", "mcpgateway.main:app", "--host", "127.0.0.1", "--port", str(gateway_port)]
+        if failure_mode:
+            env.update({"OTEL_CAPTURE_INPUT_SPANS": "tool.invoke", "OTEL_CAPTURE_OUTPUT_SPANS": "tool.invoke"})
+            command = [sys.executable, "-c", _FAULTY_GATEWAY, str(gateway_port), failure_mode]
         gateway_log = stack.enter_context((tmp_path / "gateway.log").open("w", encoding="utf-8"))
-        gateway = subprocess.Popen(
-            [sys.executable, "-m", "uvicorn", "mcpgateway.main:app", "--host", "127.0.0.1", "--port", str(gateway_port)], env=env, cwd=tmp_path, stdout=gateway_log, stderr=subprocess.STDOUT
-        )
+        gateway = subprocess.Popen(command, env=env, cwd=tmp_path, stdout=gateway_log, stderr=subprocess.STDOUT)
         stack.callback(_stop, gateway)
         _wait(lambda: _ready(f"http://127.0.0.1:{gateway_port}/health", gateway), "gateway readiness", timeout=60)
         token = make_test_jwt("admin@example.com", is_admin=True, teams=None, secret=signing_key)
@@ -205,7 +247,7 @@ def traced_gateway(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[A
         tool = next(tool for tool in tools if tool.get("originalName", tool.get("original_name")) == "echo" or tool["name"].endswith("echo"))
         response = client.post("/servers", json={"server": {"name": "trace-server", "associated_tools": [tool["id"]]}, "visibility": "public"})
         assert response.status_code in (200, 201), response.text
-        yield client, response.json()["id"], tool["name"], snapshot, upstream_events, request.param, tmp_path
+        yield client, response.json()["id"], tool["name"], snapshot, upstream_events, system_traces_enabled, tmp_path
 
 
 def _spans(snapshot: Callable[[], list[list[dict[str, Any]]]]) -> list[dict[str, Any]]:
@@ -213,7 +255,7 @@ def _spans(snapshot: Callable[[], list[list[dict[str, Any]]]]) -> list[dict[str,
     return [span for batch in snapshot() for span in batch]
 
 
-def _invoke(client: httpx.Client, server_id: str, tool_name: str, trace_id: str | None, sampled: str, call_id: str | None = None) -> None:
+def _invoke(client: httpx.Client, server_id: str, tool_name: str, trace_id: str | None, sampled: str, call_id: str | None = None, value: str = "trace-probe", expect_error: bool = False) -> None:
     """Invoke a federated MCP tool with optional trace and call headers."""
     from mcp import ClientSession
     from mcp.client.streamable_http import streamable_http_client
@@ -231,9 +273,10 @@ def _invoke(client: httpx.Client, server_id: str, tool_name: str, trace_id: str 
             async with streamable_http_client(f"{str(client.base_url).rstrip('/')}/servers/{server_id}/mcp", http_client=http_client) as (read, write):
                 async with ClientSession(read, write) as session:
                     await session.initialize()
-                    result = await session.call_tool(tool_name, {"value": "trace-probe"})
-                    assert not result.is_error, result
-                    assert any(getattr(item, "text", "") == "trace-probe" for item in result.content)
+                    result = await session.call_tool(tool_name, {"value": value})
+                    assert result.is_error is expect_error, result
+                    if not expect_error:
+                        assert any(getattr(item, "text", "") == value for item in result.content)
 
     import asyncio
 
@@ -328,3 +371,78 @@ def test_request_without_traceparent_retains_tool_tree(traced_gateway: Any, call
     assert all(span["attributes"].get("langfuse.session.id") != preceding_call for span in tree)
     if call_id is not None:
         assert all(span["attributes"].get("langfuse.session.id") == call_id for span in tree), (tree, artifacts)
+
+
+@pytest.mark.parametrize("traced_gateway", ["input", "output", "attribute", "start"], indirect=True)
+def test_tool_result_survives_trace_capture_failure(traced_gateway: Any, request: pytest.FixtureRequest) -> None:
+    """Preserve authenticated tool results while dropping unsafe telemetry."""
+    client, server_id, tool_name, snapshot, events, _system_enabled, artifacts = traced_gateway
+    mode = request.node.callspec.params["traced_gateway"]
+    trace_id = secrets.token_hex(16)
+    value = json.dumps({"password": "private-probe", "result": "unchanged"})  # pragma: allowlist secret
+    _invoke(client, server_id, tool_name, trace_id, "01", "failure-isolation-call", value)
+
+    def matching_invocations():
+        return [span for span in _spans(snapshot) if span["name"] == "tool.invoke" and span["attributes"].get("langfuse.session.id") == "failure-isolation-call"]
+
+    _wait(matching_invocations, "safe tool trace")
+    invocation = matching_invocations()[0]
+    if mode != "start":
+        assert invocation["trace_id"] == trace_id
+    attrs = invocation["attributes"]
+    assert attrs["langfuse.session.id"] == "failure-isolation-call"
+    if mode == "start":
+        assert "Injected request span start failure" in (artifacts / "gateway.log").read_text()
+    elif mode == "attribute":
+        assert "langfuse.observation.output" not in attrs
+    else:
+        assert json.loads(attrs[f"langfuse.observation.{mode}"]) == {"_error": "trace_payload_unavailable"}
+    calls = [json.loads(event["body"]) for event in map(json.loads, events.read_text().splitlines()) if event["body"].startswith("{")]
+    tool_calls = [call for call in calls if call.get("method") == "tools/call"]
+    assert len(tool_calls) == 1
+    assert tool_calls[0]["params"]["arguments"] == {"value": value}
+    response = client.post(f"/servers/{server_id}/mcp", headers={"Authorization": ""}, json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    assert response.status_code == 401
+    assert "private-probe" not in json.dumps(snapshot())
+
+
+@pytest.mark.parametrize(
+    "traced_gateway",
+    [
+        {"DEPLOYMENT_ENV": "staging", "OTEL_TOOL_RESULT_METADATA_FIELDS": "outcome,nextStep", "OTEL_CAPTURE_OUTPUT_SPANS": "tool.invoke"},
+        {"DEPLOYMENT_ENV": "staging", "OTEL_TOOL_RESULT_METADATA_FIELDS": "outcome,nextStep", "OTEL_CAPTURE_OUTPUT_SPANS": ""},
+    ],
+    ids=["capture-enabled", "capture-disabled"],
+    indirect=True,
+)
+def test_result_status_environment_and_metadata(traced_gateway: Any, request: pytest.FixtureRequest) -> None:
+    """Export accurate errors, consistent labels and policy-gated codes through a real gateway."""
+    client, server_id, tool_name, snapshot, _events, _system_enabled, artifacts = traced_gateway
+    capture_enabled = bool(request.node.callspec.params["traced_gateway"]["OTEL_CAPTURE_OUTPUT_SPANS"])
+    scenarios = [
+        ("synthetic-mcp-error", True, None),
+        (json.dumps({"outcome": "COULD_NOT_CHECK", "nextStep": "ASK_TO_NARROW"}), False, "COULD_NOT_CHECK"),
+        (json.dumps({"outcome": "AVAILABLE", "nextStep": "OFFER_SLOTS"}), False, "AVAILABLE"),
+    ]
+    for value, is_error, outcome in scenarios:
+        trace_id = secrets.token_hex(16)
+        _invoke(client, server_id, tool_name, trace_id, "01", "quality-test-call", value, expect_error=is_error)
+        _wait(lambda: any(s["trace_id"] == trace_id and s["name"] == "tool.invoke" for s in _spans(snapshot)), "tool result export")
+        spans = [s for s in _spans(snapshot) if s["trace_id"] == trace_id]
+        invocation = next(s for s in spans if s["name"] == "tool.invoke")
+        assert invocation["status"] == (2 if is_error else 1), (spans, artifacts)
+        attrs = invocation["attributes"]
+        assert attrs["langfuse.observation.level"] == ("ERROR" if is_error else "DEFAULT")
+        assert all(s["attributes"].get("langfuse.environment") == "staging" for s in spans)
+        assert attrs["langfuse.session.id"] == "quality-test-call"
+        upstream = next(s for s in spans if s["name"] == "mcp.client.request")
+        assert upstream["status"] == (2 if is_error else 1)
+        assert upstream["attributes"]["langfuse.session.id"] == "quality-test-call"
+        if capture_enabled and not is_error:
+            assert attrs["tool.result.outcome"] == outcome
+            assert attrs["langfuse.observation.metadata.outcome"] == outcome
+            assert attrs["langfuse.observation.metadata.nextStep"] == json.loads(value)["nextStep"]
+        else:
+            assert not any(key.startswith(("tool.result.", "langfuse.observation.metadata.")) for key in attrs)
+        if not capture_enabled:
+            assert "langfuse.observation.output" not in attrs

@@ -245,8 +245,14 @@ jobs:
 
       - name: 🧪  Run observability-dependent tests
         run: |
+          uv run --extra plugins --extra observability python - <<'PY'
+          from opentelemetry import trace
+          from opentelemetry.sdk.trace import TracerProvider
+          from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+          PY
           uv run --extra plugins --extra observability pytest \
             tests/unit/mcpgateway/test_observability.py \
+            tests/unit/mcpgateway/test_call_session_tracing.py \
             tests/unit/mcpgateway/test_observability_trace_policy.py \
             tests/unit/mcpgateway/test_observability_imports.py \
             tests/live_gateway/mcp/test_request_trace_policy.py \

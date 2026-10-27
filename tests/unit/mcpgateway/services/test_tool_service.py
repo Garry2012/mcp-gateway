@@ -3750,6 +3750,8 @@ class TestToolService:
         assert result.is_error is is_error
         assert span_names == ["tool.invoke", "mcp.client.call", "mcp.client.request"]
         assert span_attributes["mcp.client.request"]["upstream.response.success"] is not is_error
+        assert span_attributes["tool.invoke"].get("error", False) is is_error
+        assert span_attributes["mcp.client.request"].get("error", False) is is_error
         session_mock.call_tool.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -10080,6 +10082,7 @@ class TestInvokeToolDirect:
 
         assert span_names == ["mcp.client.call", "mcp.client.request"]
         assert recorded["mcp.client.request"]["upstream.response.success"] is not is_error
+        assert recorded["mcp.client.request"].get("error", False) is is_error
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(

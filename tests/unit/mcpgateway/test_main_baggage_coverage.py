@@ -73,8 +73,10 @@ class TestObservabilityBaggageInjection:
                         mock_span_context = MagicMock()
                         mock_tracer.start_as_current_span.return_value = mock_span_context
 
-                        # Call create_span which should inject baggage
-                        span = create_span("test_span", attributes={"attr1": "val1"})
+                        with create_span("test_span", attributes={"attr1": "val1"}) as span:
+                            mock_tracer.start_as_current_span.assert_called_once_with("test_span", record_exception=False, set_status_on_exception=False)
+                            assert span is mock_span_context.__enter__.return_value
+                            span.set_attribute.assert_any_call("attr1", "val1")
 
-                        # Should have called start_as_current_span
-                        assert mock_tracer.start_as_current_span.called
+                        mock_span_context.__exit__.assert_called_once()
+                        assert mock_span_context.__exit__.call_args.args[-3:] == (None, None, None)

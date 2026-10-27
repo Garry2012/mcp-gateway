@@ -3187,6 +3187,7 @@ class Settings(BaseSettings):
     otel_max_trace_payload_size: int = Field(default=32768, ge=256, description="Maximum serialized trace payload size in characters")
     otel_capture_input_spans: str = Field(default="", description="Comma-separated span names allowed to capture input payloads")
     otel_capture_output_spans: str = Field(default="", description="Comma-separated span names allowed to capture output payloads")
+    otel_tool_result_metadata_fields: str = Field(default="", description="Opt-in result metadata fields: outcome,nextStep; requires tool.invoke output capture")
     langfuse_otel_endpoint: Optional[str] = Field(default=None, description="Langfuse OTLP/HTTP endpoint override")
     langfuse_public_key: Optional[SecretStr] = Field(default=None, description="Langfuse project public key for derived OTLP auth")
     langfuse_secret_key: Optional[SecretStr] = Field(default=None, description="Langfuse project secret key for derived OTLP auth")

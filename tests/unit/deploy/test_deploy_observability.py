@@ -243,3 +243,13 @@ def test_invalid_export_configuration_stops_before_azure_mutations(tmp_path, end
     result, calls = run_deploy(tmp_path, OTEL_ENABLE_OBSERVABILITY="true", OTEL_EXPORTER_OTLP_ENDPOINT=endpoint, OTEL_EXPORTER_OTLP_PROTOCOL=protocol)
     assert result.returncode != 0
     assert not any(call[:2] == ["containerapp", "update"] or call[:3] == ["containerapp", "secret", "set"] for call in calls)
+
+
+def test_trace_environment_does_not_change_auth_environment(tmp_path):
+    """Custom trace labels must not change token environment validation."""
+    result, calls = run_deploy(tmp_path, DEPLOYMENT_ENV="staging", OTEL_TOOL_RESULT_METADATA_FIELDS="outcome,nextStep")
+    assert result.returncode == 0, result.stderr
+    update = next(call for call in calls if call[:2] == ["containerapp", "update"])
+    assert "DEPLOYMENT_ENV=staging" in update
+    assert "ENVIRONMENT=production" in update
+    assert "OTEL_TOOL_RESULT_METADATA_FIELDS=outcome,nextStep" in update

@@ -24,6 +24,7 @@ def call_tracer(monkeypatch):
     provider = sdk.TracerProvider()
     monkeypatch.setenv("OTEL_ENABLE_OBSERVABILITY", "true")
     monkeypatch.setenv("OTEL_SYSTEM_TRACES_ENABLED", "false")
+    monkeypatch.setenv("DEPLOYMENT_ENV", "staging")
     monkeypatch.setenv("OTEL_TRACES_EXPORTER", "console")
     monkeypatch.setenv("OTEL_EMIT_LANGFUSE_ATTRIBUTES", "true")
     monkeypatch.setenv("OTEL_HTTPX_INSTRUMENTATION_ENABLED", "false")
@@ -34,7 +35,7 @@ def call_tracer(monkeypatch):
     monkeypatch.setattr(trace_api, "get_tracer", provider.get_tracer)
     monkeypatch.setattr(observability, "_TRACER", None)
     get_settings.cache_clear()
-    observability.init_telemetry()
+    assert observability.init_telemetry() is not None
     yield exporter, provider.get_tracer("automatic-child")
     clear_trace_context()
     get_settings.cache_clear()
@@ -167,7 +168,9 @@ async def test_disabled_langfuse_attributes_omit_call_id(call_tracer, monkeypatc
             await send({"type": "http.response.start", "status": 200, "headers": []})
 
     await send_request(app, [(b"x-call-id", b"disabled-call")])
-    assert all("langfuse.session.id" not in s.attributes for s in exporter.get_finished_spans())
+    spans = exporter.get_finished_spans()
+    assert spans
+    assert all("langfuse.session.id" not in s.attributes for s in spans)
 
 
 @pytest.mark.asyncio
@@ -194,3 +197,18 @@ def test_call_identifier_does_not_enable_background_tracing(call_tracer):
             with observability.create_span("tool.invoke") as child:
                 assert not child.is_recording()
     assert not exporter.get_finished_spans()
+
+
+@pytest.mark.asyncio
+async def test_environment_labels_request_manual_and_automatic_spans(call_tracer):
+    """Every exported span receives the configured environment, including automatic children."""
+    exporter, tracer = call_tracer
+
+    async def app(_scope, _receive, send):
+        with observability.create_span("tool.invoke"), tracer.start_as_current_span("HTTP client"):
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+
+    await send_request(app, [])
+    spans = exporter.get_finished_spans()
+    assert len(spans) == 3
+    assert {span.attributes.get("langfuse.environment") for span in spans} == {"staging"}

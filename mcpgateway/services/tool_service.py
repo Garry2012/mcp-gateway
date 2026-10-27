@@ -133,7 +133,7 @@ from mcpgateway.utils.ssrf_pinning import resolve_pinned_target
 from mcpgateway.utils.subject_token import extract_inbound_bearer, looks_like_jwt
 from mcpgateway.utils.token_exchange_audit import audit_token_exchange
 from mcpgateway.utils.trace_context import format_trace_team_scope
-from mcpgateway.utils.trace_redaction import is_input_capture_enabled, is_output_capture_enabled, serialize_trace_payload
+from mcpgateway.utils.trace_redaction import extract_tool_result_metadata, is_input_capture_enabled, is_output_capture_enabled, serialize_trace_payload
 from mcpgateway.utils.url_auth import apply_query_param_auth, sanitize_exception_message, sanitize_url_for_logging
 from mcpgateway.utils.validate_signature import validate_signature
 from mcpgateway.utils.error_formatter import PublicValidationError, unexpected_error_detail
@@ -4323,6 +4323,8 @@ class ToolService(BaseService):
                             "upstream.response.success",
                             not getattr(tool_result, "is_error", False) and not getattr(tool_result, "isError", False),
                         )
+                        if getattr(tool_result, "is_error", False) or getattr(tool_result, "isError", False):
+                            set_span_error(request_span, "MCP tool returned an error")
 
                     logger.info(
                         "[INVOKE TOOL] Using direct_proxy mode for gateway %s (from X-Context-Forge-Gateway-Id header). Meta Attached: %s",
@@ -6470,6 +6472,8 @@ class ToolService(BaseService):
                                                 "upstream.response.success",
                                                 not getattr(tool_call_result, "is_error", False) and not getattr(tool_call_result, "isError", False),
                                             )
+                                            if getattr(tool_call_result, "is_error", False) or getattr(tool_call_result, "isError", False):
+                                                set_span_error(request_span, "MCP tool returned an error")
 
                             # Log successful MCP call
                             mcp_duration_ms = (time.time() - mcp_start_time) * 1000
@@ -6699,6 +6703,8 @@ class ToolService(BaseService):
                                                 "upstream.response.success",
                                                 not getattr(tool_call_result, "is_error", False) and not getattr(tool_call_result, "isError", False),
                                             )
+                                            if getattr(tool_call_result, "is_error", False) or getattr(tool_call_result, "isError", False):
+                                                set_span_error(request_span, "MCP tool returned an error")
 
                             # Log successful MCP call
                             mcp_duration_ms = (time.time() - mcp_start_time) * 1000
@@ -7288,10 +7294,16 @@ class ToolService(BaseService):
 
                 # Add final span attributes for OpenTelemetry
                 if span:
+                    if tool_result is not None and tool_result.is_error:
+                        set_span_error(span, "MCP tool returned an error")
                     set_span_attribute(span, "success", success)
                     set_span_attribute(span, "duration.ms", duration_ms)
                     if success and tool_result and is_output_capture_enabled("tool.invoke"):
-                        set_span_attribute(span, "langfuse.observation.output", serialize_trace_payload(tool_result))
+                        captured_output = serialize_trace_payload(tool_result)
+                        set_span_attribute(span, "langfuse.observation.output", captured_output)
+                        for key, value in extract_tool_result_metadata(captured_output).items():
+                            set_span_attribute(span, f"tool.result.{key}", value)
+                            set_span_attribute(span, f"langfuse.observation.metadata.{key}", value)
 
                 # ═══════════════════════════════════════════════════════════════════════════
                 # PHASE 4: Record metrics via buffered service (batches writes for performance)

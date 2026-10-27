@@ -43,6 +43,7 @@ _REDACT_FIELDS: set[str] = set()
 _MAX_PAYLOAD_SIZE = _DEFAULT_MAX_PAYLOAD_SIZE
 _INPUT_CAPTURE_SPANS: set[str] = set()
 _OUTPUT_CAPTURE_SPANS: set[str] = set()
+_TOOL_RESULT_METADATA_FIELDS: set[str] = set()
 _TEXT_REDACT_PATTERNS: list[tuple[re.Pattern[str], re.Pattern[str]]] = []
 
 
@@ -76,7 +77,7 @@ def _coerce_int(value: str, default: int) -> int:
 
 def _load_config() -> None:
     """Load redaction and output-capture configuration from the environment."""
-    global _CONFIG_LOADED, _INPUT_CAPTURE_SPANS, _MAX_PAYLOAD_SIZE, _OUTPUT_CAPTURE_SPANS, _REDACT_FIELDS, _TEXT_REDACT_PATTERNS  # pylint: disable=global-statement
+    global _CONFIG_LOADED, _INPUT_CAPTURE_SPANS, _MAX_PAYLOAD_SIZE, _OUTPUT_CAPTURE_SPANS, _REDACT_FIELDS, _TEXT_REDACT_PATTERNS, _TOOL_RESULT_METADATA_FIELDS  # pylint: disable=global-statement
 
     settings = get_settings()
     fields = settings.otel_redact_fields or _DEFAULT_REDACT_FIELDS
@@ -85,6 +86,7 @@ def _load_config() -> None:
     _MAX_PAYLOAD_SIZE = _coerce_int(str(settings.otel_max_trace_payload_size), _DEFAULT_MAX_PAYLOAD_SIZE)
     _INPUT_CAPTURE_SPANS = {span.strip() for span in settings.otel_capture_input_spans.split(",") if span.strip()}
     _OUTPUT_CAPTURE_SPANS = {span.strip() for span in settings.otel_capture_output_spans.split(",") if span.strip()}
+    _TOOL_RESULT_METADATA_FIELDS = {field.strip() for field in settings.otel_tool_result_metadata_fields.split(",")} & {"outcome", "nextStep"}
     _TEXT_REDACT_PATTERNS = [_build_text_redaction_patterns(field) for field in raw_fields]
     _CONFIG_LOADED = True
 
@@ -465,6 +467,41 @@ def serialize_trace_payload(obj: Any, max_size: int = 0) -> str:
         max_size: Optional maximum serialized size. When zero, the configured default is used.
 
     Returns:
-        JSON string representation of the sanitized payload.
+        Sanitized JSON, or a fixed marker when payload processing fails.
     """
-    return safe_serialize(redact_sensitive_fields(obj), max_size=max_size)
+    try:
+        return safe_serialize(redact_sensitive_fields(obj), max_size=max_size)
+    except Exception:
+        return '{"_error":"trace_payload_unavailable"}'
+
+
+def extract_tool_result_metadata(captured_payload: str) -> dict[str, str]:
+    """Extract opted-in codes from an already redacted, bounded tool output.
+
+    Args:
+        captured_payload: Output produced by serialize_trace_payload().
+
+    Returns:
+        Selected result codes, or an empty mapping when capture or parsing fails.
+    """
+    try:
+        if not is_output_capture_enabled("tool.invoke") or not _TOOL_RESULT_METADATA_FIELDS:
+            return {}
+        if _normalize_field_name("langfuse.observation.output") in _REDACT_FIELDS:
+            return {}
+        result = json.loads(captured_payload)
+        if not isinstance(result, dict) or result.get("_truncated"):
+            return {}
+        body = result.get("structuredContent", result.get("structured_content"))
+        if body is None:
+            content = result.get("content")
+            if not isinstance(content, list) or len(content) != 1 or not isinstance(content[0], dict) or content[0].get("type") != "text":
+                return {}
+            body = json.loads(content[0]["text"])
+        if not isinstance(body, dict):
+            return {}
+        return {
+            key: value for key in ("outcome", "nextStep") if key in _TOOL_RESULT_METADATA_FIELDS and isinstance(value := body.get(key), str) and re.fullmatch(r"[A-Za-z][A-Za-z0-9_:-]{0,63}", value)
+        }
+    except Exception:
+        return {}

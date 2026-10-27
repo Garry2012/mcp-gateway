@@ -99,6 +99,8 @@ OBSERVABILITY_ENABLED="${OBSERVABILITY_ENABLED:-true}"
 
 # Payload capture applies to exported spans, not the built-in observability database.
 # Tool output capture records successful results only.
+DEPLOYMENT_ENV="${DEPLOYMENT_ENV:-production}"
+OTEL_TOOL_RESULT_METADATA_FIELDS="${OTEL_TOOL_RESULT_METADATA_FIELDS:-}"
 OTEL_CAPTURE_INPUT_SPANS="${OTEL_CAPTURE_INPUT_SPANS:-tool.invoke}"
 OTEL_CAPTURE_OUTPUT_SPANS="${OTEL_CAPTURE_OUTPUT_SPANS:-tool.invoke}"
 OTEL_ENABLE_OBSERVABILITY="${OTEL_ENABLE_OBSERVABILITY:-false}"
