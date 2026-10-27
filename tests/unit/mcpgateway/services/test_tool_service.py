@@ -3628,8 +3628,10 @@ class TestToolService:
         assert result.content[0].text == "sse fallback ok"
 
     @pytest.mark.asyncio
-    async def test_invoke_tool_mcp_streamablehttp_creates_client_lifecycle_spans(self, tool_service, mock_tool, test_db):
-        """Non-pooled MCP calls should emit client call, initialize, and request spans in order."""
+    @pytest.mark.parametrize("transport", ["StreamableHTTP", "SSE"])
+    @pytest.mark.parametrize("is_error", [False, True])
+    async def test_invoke_tool_mcp_creates_meaningful_client_spans(self, tool_service, mock_tool, test_db, transport, is_error):
+        """Keep real request scopes and response success without empty lifecycle markers."""
         # Standard
         from contextlib import contextmanager
         from types import SimpleNamespace
@@ -3645,11 +3647,11 @@ class TestToolService:
             auth_type="bearer",
             auth_value="Bearer abc123",
             capabilities={"prompts": {"listChanged": True}, "resources": {"listChanged": True}, "tools": {"listChanged": True}},
-            transport="STREAMABLEHTTP",
+            transport=transport.upper(),
             passthrough_headers=[],
         )
         mock_tool.integration_type = "MCP"
-        mock_tool.request_type = "StreamableHTTP"
+        mock_tool.request_type = transport
         mock_tool.jsonpath_filter = ""
         mock_tool.auth_type = None
         mock_tool.auth_value = None
@@ -3672,10 +3674,17 @@ class TestToolService:
 
         test_db.execute = Mock(side_effect=execute_side_effect)
 
-        expected_result = ToolResult(content=[TextContent(type="text", text="MCP response")])
+        expected_result = ToolResult(content=[TextContent(type="text", text="MCP response")], is_error=is_error)
         session_mock = AsyncMock()
         session_mock.initialize = AsyncMock()
-        session_mock.call_tool = AsyncMock(return_value=expected_result)
+        active_spans = []
+        span_attributes = {}
+
+        async def call_upstream(*_args, **_kwargs):
+            assert active_spans[-2:] == ["mcp.client.call", "mcp.client.request"]
+            return expected_result
+
+        session_mock.call_tool = AsyncMock(side_effect=call_upstream)
         session_mock.session.call_tool = session_mock.call_tool
 
         client_session_cm = AsyncMock()
@@ -3686,6 +3695,7 @@ class TestToolService:
 
         @asynccontextmanager
         async def mock_streamable_client(*_args, **kwargs):
+            assert active_spans[-1] == "mcp.client.call"
             captured_headers.update(kwargs["headers"])
             yield session_mock
 
@@ -3694,7 +3704,14 @@ class TestToolService:
         @contextmanager
         def record_span(name, _attributes=None):
             span_names.append(name)
-            yield MagicMock()
+            active_spans.append(name)
+            span_attributes[name] = {}
+            span = MagicMock()
+            span.set_attribute.side_effect = lambda key, value: span_attributes[name].update({key: value})
+            try:
+                yield span
+            finally:
+                assert active_spans.pop() == name
 
         def inject_headers(headers):
             traced = dict(headers)
@@ -3730,9 +3747,10 @@ class TestToolService:
             "traceparent": "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01",
             "source": "api-server-runs",
         }
-        assert span_names[:3] == ["tool.invoke", "mcp.client.call", "mcp.client.initialize"]
-        assert "mcp.client.request" in span_names
-        assert "mcp.client.response" in span_names
+        assert result.is_error is is_error
+        assert span_names == ["tool.invoke", "mcp.client.call", "mcp.client.request"]
+        assert span_attributes["mcp.client.request"]["upstream.response.success"] is not is_error
+        session_mock.call_tool.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_invoke_tool_mcp_registry_path_does_not_inject_trace_headers(self, tool_service, mock_tool, test_db):
@@ -10001,13 +10019,32 @@ class TestInvokeToolDirect:
         return mock_fresh_session
 
     @pytest.mark.asyncio
-    async def test_invoke_tool_direct_success(self, tool_service, mock_direct_gateway):
-        """Happy path: gateway found, direct_proxy mode, access allowed, tool call succeeds."""
-        expected_result = MagicMock()
-        expected_result.content = [MagicMock(text="direct result")]
+    @pytest.mark.parametrize("is_error", [False, True])
+    async def test_invoke_tool_direct_success(self, tool_service, mock_direct_gateway, is_error):
+        """Direct proxy preserves tool results and request metadata without empty spans."""
+        expected_result = ToolResult(content=[TextContent(type="text", text="direct result")], is_error=is_error)
+        active_spans = []
+        recorded = {}
+        span_names = []
+
+        @contextmanager
+        def record_span(name, _attributes=None):
+            active_spans.append(name)
+            span_names.append(name)
+            span = MagicMock()
+            recorded[name] = {}
+            span.set_attribute.side_effect = lambda key, value: recorded[name].update({key: value})
+            try:
+                yield span
+            finally:
+                assert active_spans.pop() == name
+
+        async def call_upstream(*_args, **_kwargs):
+            assert active_spans == ["mcp.client.call", "mcp.client.request"]
+            return expected_result
 
         session_mock = AsyncMock()
-        session_mock.call_tool = AsyncMock(return_value=expected_result)
+        session_mock.call_tool = AsyncMock(side_effect=call_upstream)
         session_mock.session.call_tool = session_mock.call_tool
 
         client_session_cm = AsyncMock()
@@ -10016,6 +10053,7 @@ class TestInvokeToolDirect:
 
         @asynccontextmanager
         async def mock_streamable_client(*_args, **_kwargs):
+            assert active_spans == ["mcp.client.call"]
             yield session_mock
 
         with (
@@ -10024,6 +10062,7 @@ class TestInvokeToolDirect:
             patch("mcpgateway.services.tool_service.check_gateway_access", new_callable=AsyncMock, return_value=True),
             patch("mcpgateway.services.tool_service.build_gateway_auth_headers", return_value={"Authorization": "Bearer remote-token"}),
             patch("mcpgateway.services.tool_service.mcp_proxy_client", mock_streamable_client),
+            patch("mcpgateway.services.tool_service.create_span", side_effect=record_span),
         ):
             mock_settings.mcpgateway_direct_proxy_enabled = True
             mock_settings.mcpgateway_direct_proxy_timeout = 30
@@ -10038,6 +10077,9 @@ class TestInvokeToolDirect:
 
         assert result == expected_result
         session_mock.call_tool.assert_awaited_once_with(name="remote_tool", arguments={"key": "value"})
+
+        assert span_names == ["mcp.client.call", "mcp.client.request"]
+        assert recorded["mcp.client.request"]["upstream.response.success"] is not is_error
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -10698,7 +10740,9 @@ class TestInvokeToolDirectProxyViaHeader:
             mock_settings.mcp_session_pool_enabled = False
             mock_settings.default_passthrough_headers = []
 
-            result = await tool_service.invoke_tool(test_db, "my_remote_tool", {"arg": "value"}, request_headers={"x-context-forge-gateway-id": "gw-dp-1"}, user_email="user@example.com", token_teams=["team-1"])
+            result = await tool_service.invoke_tool(
+                test_db, "my_remote_tool", {"arg": "value"}, request_headers={"x-context-forge-gateway-id": "gw-dp-1"}, user_email="user@example.com", token_teams=["team-1"]
+            )
 
         assert result.is_error is True
         assert result.meta == {TOOL_ERROR_CODE: {"code": -32602}}

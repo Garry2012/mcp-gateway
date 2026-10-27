@@ -117,7 +117,7 @@ def traced_gateway(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[A
                     "span_id": span.span_id.hex(),
                     "parent_span_id": span.parent_span_id.hex(),
                     "kind": span.kind,
-                    "attributes": {item.key: item.value.string_value for item in span.attributes},
+                    "attributes": {item.key: item.value.bool_value if item.value.HasField("bool_value") else item.value.string_value for item in span.attributes},
                 }
                 for resource in message.resource_spans
                 for scope in resource.scope_spans
@@ -263,6 +263,13 @@ def test_request_trace_policy(traced_gateway: Any) -> None:
         matching = [span for span in request_spans if span["kind"] == kind]
         assert matching, (kind, artifacts)
         assert any(span["attributes"].get("baggage.tenant.id") == "tenant-a" for span in matching), matching
+    names = [span["name"] for span in request_spans]
+    assert "mcp.client.initialize" not in names and "mcp.client.response" not in names
+    assert names.count("tool.invoke") == names.count("mcp.client.call") == names.count("mcp.client.request") == 1
+    call_span = next(span for span in request_spans if span["name"] == "mcp.client.call")
+    request_span = next(span for span in request_spans if span["name"] == "mcp.client.request")
+    assert request_span["parent_span_id"] == call_span["span_id"]
+    assert request_span["attributes"]["upstream.response.success"] is True
     service = next(span for span in request_spans if span["name"] == "tool.invoke")
     assert service["attributes"]["baggage.tenant.id"] == "tenant-a"
     httpx_spans = [span for span in request_spans if span["kind"] == 3 and span["name"] == "POST"]

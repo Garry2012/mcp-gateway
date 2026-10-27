@@ -4303,9 +4303,6 @@ class ToolService(BaseService):
                     timeout=settings.mcpgateway_direct_proxy_timeout,
                     httpx_client_factory=get_httpx_client_factory,
                 ) as client:
-                    with create_span("mcp.client.initialize", {"contextforge.transport": "streamablehttp", "contextforge.runtime": "python"}):
-                        pass  # Client auto-initializes on first RPC call
-
                     with create_span(
                         "mcp.client.request",
                         {
@@ -4313,7 +4310,7 @@ class ToolService(BaseService):
                             "contextforge.gateway_id": str(gateway.id),
                             "contextforge.runtime": "python",
                         },
-                    ):
+                    ) as request_span:
                         request_meta_data = _sync_meta_traceparent(meta_data, traced_headers)  # noqa: F841 -- used in call_tool below
                         # Call tool with meta if provided
                         if request_meta_data:
@@ -4321,16 +4318,11 @@ class ToolService(BaseService):
                             tool_result = await client.call_tool(name=remote_name, arguments=arguments, meta=request_meta_data)
                         else:
                             tool_result = await client.call_tool(name=remote_name, arguments=arguments)
-                    with create_span(
-                        "mcp.client.response",
-                        {
-                            "mcp.tool.name": remote_name,
-                            "contextforge.gateway_id": str(gateway.id),
-                            "contextforge.runtime": "python",
-                            "upstream.response.success": not getattr(tool_result, "is_error", False) and not getattr(tool_result, "isError", False),
-                        },
-                    ):
-                        pass
+                        set_span_attribute(
+                            request_span,
+                            "upstream.response.success",
+                            not getattr(tool_result, "is_error", False) and not getattr(tool_result, "isError", False),
+                        )
 
                     logger.info(
                         "[INVOKE TOOL] Using direct_proxy mode for gateway %s (from X-Context-Forge-Gateway-Id header). Meta Attached: %s",
@@ -6449,8 +6441,6 @@ class ToolService(BaseService):
                                         httpx_client_factory=get_httpx_client_factory,
                                         transport="sse",
                                     ) as client:
-                                        with create_span("mcp.client.initialize", {"contextforge.transport": "sse", "contextforge.runtime": "python"}):
-                                            pass  # Client auto-initializes on first RPC call
                                         with create_span(
                                             "mcp.client.request",
                                             {
@@ -6459,7 +6449,7 @@ class ToolService(BaseService):
                                                 "contextforge.gateway_id": tool_gateway_id,
                                                 "contextforge.runtime": "python",
                                             },
-                                        ):
+                                        ) as request_span:
                                             with anyio.fail_after(effective_timeout):
                                                 tool_call_result = await _call_upstream_tool(
                                                     client.session,
@@ -6475,17 +6465,11 @@ class ToolService(BaseService):
                                                     if allow_input_required:
                                                         raise ToolInputRequired(tool_call_result)
                                                     raise ToolInvocationError("Elicitation not supported")
-                                        with create_span(
-                                            "mcp.client.response",
-                                            {
-                                                "mcp.tool.name": tool_name_original,
-                                                "contextforge.tool.id": tool_id,
-                                                "contextforge.gateway_id": tool_gateway_id,
-                                                "contextforge.runtime": "python",
-                                                "upstream.response.success": not getattr(tool_call_result, "is_error", False) and not getattr(tool_call_result, "isError", False),
-                                            },
-                                        ):
-                                            pass
+                                            set_span_attribute(
+                                                request_span,
+                                                "upstream.response.success",
+                                                not getattr(tool_call_result, "is_error", False) and not getattr(tool_call_result, "isError", False),
+                                            )
 
                             # Log successful MCP call
                             mcp_duration_ms = (time.time() - mcp_start_time) * 1000
@@ -6686,8 +6670,6 @@ class ToolService(BaseService):
                                         timeout=effective_timeout,
                                         httpx_client_factory=get_httpx_client_factory,
                                     ) as client:
-                                        with create_span("mcp.client.initialize", {"contextforge.transport": "streamablehttp", "contextforge.runtime": "python"}):
-                                            pass  # Client auto-initializes on first RPC call
                                         with create_span(
                                             "mcp.client.request",
                                             {
@@ -6696,7 +6678,7 @@ class ToolService(BaseService):
                                                 "contextforge.gateway_id": tool_gateway_id,
                                                 "contextforge.runtime": "python",
                                             },
-                                        ):
+                                        ) as request_span:
                                             with anyio.fail_after(effective_timeout):
                                                 tool_call_result = await _call_upstream_tool(
                                                     client.session,
@@ -6712,17 +6694,11 @@ class ToolService(BaseService):
                                                     if allow_input_required:
                                                         raise ToolInputRequired(tool_call_result)
                                                     raise ToolInvocationError("Elicitation not supported")
-                                        with create_span(
-                                            "mcp.client.response",
-                                            {
-                                                "mcp.tool.name": tool_name_original,
-                                                "contextforge.tool.id": tool_id,
-                                                "contextforge.gateway_id": tool_gateway_id,
-                                                "contextforge.runtime": "python",
-                                                "upstream.response.success": not getattr(tool_call_result, "is_error", False) and not getattr(tool_call_result, "isError", False),
-                                            },
-                                        ):
-                                            pass
+                                            set_span_attribute(
+                                                request_span,
+                                                "upstream.response.success",
+                                                not getattr(tool_call_result, "is_error", False) and not getattr(tool_call_result, "isError", False),
+                                            )
 
                             # Log successful MCP call
                             mcp_duration_ms = (time.time() - mcp_start_time) * 1000
