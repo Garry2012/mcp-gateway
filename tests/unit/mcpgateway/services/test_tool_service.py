@@ -36,6 +36,7 @@ from mcpgateway.cache.global_config_cache import global_config_cache
 from mcpgateway.cache.tool_lookup_cache import tool_lookup_cache, ToolLookupCache
 from mcpgateway.common.validators import pin_url_to_resolved_ip
 from mcpgateway.config import settings
+from mcpgateway.db import EmailUser
 from mcpgateway.db import Gateway as DbGateway
 from mcpgateway.db import Tool as DbTool
 from mcpgateway.db import Base, Server as DbServer, server_tool_association
@@ -3627,8 +3628,10 @@ class TestToolService:
         assert result.content[0].text == "sse fallback ok"
 
     @pytest.mark.asyncio
-    async def test_invoke_tool_mcp_streamablehttp_creates_client_lifecycle_spans(self, tool_service, mock_tool, test_db):
-        """Non-pooled MCP calls should emit client call, initialize, and request spans in order."""
+    @pytest.mark.parametrize("transport", ["StreamableHTTP", "SSE"])
+    @pytest.mark.parametrize("is_error", [False, True])
+    async def test_invoke_tool_mcp_creates_meaningful_client_spans(self, tool_service, mock_tool, test_db, transport, is_error):
+        """Keep real request scopes and response success without empty lifecycle markers."""
         # Standard
         from contextlib import contextmanager
         from types import SimpleNamespace
@@ -3644,11 +3647,11 @@ class TestToolService:
             auth_type="bearer",
             auth_value="Bearer abc123",
             capabilities={"prompts": {"listChanged": True}, "resources": {"listChanged": True}, "tools": {"listChanged": True}},
-            transport="STREAMABLEHTTP",
+            transport=transport.upper(),
             passthrough_headers=[],
         )
         mock_tool.integration_type = "MCP"
-        mock_tool.request_type = "StreamableHTTP"
+        mock_tool.request_type = transport
         mock_tool.jsonpath_filter = ""
         mock_tool.auth_type = None
         mock_tool.auth_value = None
@@ -3671,10 +3674,17 @@ class TestToolService:
 
         test_db.execute = Mock(side_effect=execute_side_effect)
 
-        expected_result = ToolResult(content=[TextContent(type="text", text="MCP response")])
+        expected_result = ToolResult(content=[TextContent(type="text", text="MCP response")], is_error=is_error)
         session_mock = AsyncMock()
         session_mock.initialize = AsyncMock()
-        session_mock.call_tool = AsyncMock(return_value=expected_result)
+        active_spans = []
+        span_attributes = {}
+
+        async def call_upstream(*_args, **_kwargs):
+            assert active_spans[-2:] == ["mcp.client.call", "mcp.client.request"]
+            return expected_result
+
+        session_mock.call_tool = AsyncMock(side_effect=call_upstream)
         session_mock.session.call_tool = session_mock.call_tool
 
         client_session_cm = AsyncMock()
@@ -3685,6 +3695,7 @@ class TestToolService:
 
         @asynccontextmanager
         async def mock_streamable_client(*_args, **kwargs):
+            assert active_spans[-1] == "mcp.client.call"
             captured_headers.update(kwargs["headers"])
             yield session_mock
 
@@ -3693,7 +3704,14 @@ class TestToolService:
         @contextmanager
         def record_span(name, _attributes=None):
             span_names.append(name)
-            yield MagicMock()
+            active_spans.append(name)
+            span_attributes[name] = {}
+            span = MagicMock()
+            span.set_attribute.side_effect = lambda key, value: span_attributes[name].update({key: value})
+            try:
+                yield span
+            finally:
+                assert active_spans.pop() == name
 
         def inject_headers(headers):
             traced = dict(headers)
@@ -3729,9 +3747,12 @@ class TestToolService:
             "traceparent": "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01",
             "source": "api-server-runs",
         }
-        assert span_names[:3] == ["tool.invoke", "mcp.client.call", "mcp.client.initialize"]
-        assert "mcp.client.request" in span_names
-        assert "mcp.client.response" in span_names
+        assert result.is_error is is_error
+        assert span_names == ["tool.invoke", "mcp.client.call", "mcp.client.request"]
+        assert span_attributes["mcp.client.request"]["upstream.response.success"] is not is_error
+        assert span_attributes["tool.invoke"].get("error", False) is is_error
+        assert span_attributes["mcp.client.request"].get("error", False) is is_error
+        session_mock.call_tool.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_invoke_tool_mcp_registry_path_does_not_inject_trace_headers(self, tool_service, mock_tool, test_db):
@@ -5293,13 +5314,17 @@ class TestToolService:
         session_mock.initialize.assert_not_awaited()
         session_mock.call_tool.assert_awaited_once()
 
-    async def test_invoke_tool_with_plugin_post_invoke_success(self, tool_service, mock_tool, mock_global_config_obj, test_db):
+    @pytest.mark.parametrize("gateway_id", ["f90870e0-bbbf-4e3c-80c5-69d72a1e6e21", None])
+    @pytest.mark.parametrize("reuse_context", [False, True])
+    async def test_invoke_tool_with_plugin_post_invoke_success(self, tool_service, mock_tool, mock_global_config_obj, test_db, gateway_id, reuse_context):
         """Test invoking tool with successful plugin post-invoke hook."""
         # Third-Party
-        from cpex.framework import ToolHookType
+        from cpex.framework import GlobalContext, ToolHookType
         from cpex.framework.models import PluginResult
 
         # Configure tool as REST
+        mock_tool.gateway_id = gateway_id
+        context = GlobalContext(request_id="session-id", server_id="previous-upstream-name") if reuse_context else None
         mock_tool.integration_type = "REST"
         mock_tool.request_type = "POST"
         mock_tool.auth_value = None
@@ -5319,6 +5344,7 @@ class TestToolService:
 
         def invoke_hook_side_effect(hook_type, payload, global_context, local_contexts=None, **kwargs):
             if hook_type == ToolHookType.TOOL_PRE_INVOKE:
+                assert global_context.server_id == (gateway_id or "unknown")
                 return (PluginResult(continue_processing=True, violation=None, modified_payload=None), None)
             # POST_INVOKE
             return (PluginResult(continue_processing=True, violation=None, modified_payload=None, retry_delay_ms=0), None)
@@ -5330,7 +5356,7 @@ class TestToolService:
             patch("mcpgateway.services.tool_service.extract_using_jq", return_value={"result": "original response"}),
             patch.object(tool_service, "_get_plugin_manager", AsyncMock(return_value=mock_pm)),
         ):
-            result = await tool_service.invoke_tool(test_db, "test_tool", {"param": "value"}, request_headers=None)
+            result = await tool_service.invoke_tool(test_db, "test_tool", {"param": "value"}, request_headers=None, plugin_global_context=context)
 
         # Verify plugin hooks were called
         assert mock_pm.invoke_hook.call_count == 2  # Pre and post invoke
@@ -9599,6 +9625,212 @@ class TestToolServiceBulkImport:
         mock_admin_cache.invalidate_tags.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_register_tools_bulk_update_database_backed_ownership(self, tmp_path):
+        """Real rows and real ownership decisions: a non-owner is denied, the owner and an admin are allowed."""
+        engine = create_engine(f"sqlite:///{tmp_path / 'ownership.db'}")
+        Base.metadata.create_all(engine)
+        victim_url = "https://example.com/internal-weather-api/v1/forecast"
+
+        with Session(engine) as seed:
+            seed.add_all(
+                [
+                    EmailUser(email="victim@example.com", password_hash="x", is_admin=False),
+                    EmailUser(email="attacker@example.com", password_hash="x", is_admin=False),
+                    EmailUser(email="admin@example.com", password_hash="x", is_admin=True),
+                ]
+            )
+            seed.add(
+                DbTool(
+                    original_name="shared",
+                    custom_name="shared",
+                    custom_name_slug="shared",
+                    name="shared",
+                    url=victim_url,
+                    description="d",
+                    integration_type="REST",
+                    request_type="GET",
+                    input_schema={"type": "object"},
+                    visibility="public",
+                    owner_email="victim@example.com",
+                    team_id="victim-team",
+                )
+            )
+            seed.commit()
+
+        service = ToolService()
+        payload = _make_bulk_tool_create(name="shared", url="http://example.net/attacker-collector/steal")
+        registry_cache = SimpleNamespace(invalidate_tools=AsyncMock())
+        lookup_cache = SimpleNamespace(invalidate=AsyncMock())
+
+        async def run(caller):
+            with (
+                Session(engine) as session,
+                patch("mcpgateway.services.tool_service._get_registry_cache", return_value=registry_cache),
+                patch("mcpgateway.services.tool_service._get_tool_lookup_cache", return_value=lookup_cache),
+                patch("mcpgateway.services.tool_service.audit_trail"),
+                patch("mcpgateway.cache.admin_stats_cache.admin_stats_cache") as mock_admin_cache,
+            ):
+                mock_admin_cache.invalidate_tags = AsyncMock()
+                return await service.register_tools_bulk(db=session, tools=[payload], created_by=caller, conflict_strategy="update", user_email=caller)
+
+        def persisted():
+            with Session(engine) as check:
+                row = check.query(DbTool).filter_by(name="shared").one()
+                return row.url, row.owner_email, row.team_id
+
+        denied = await run("attacker@example.com")
+        assert (denied["updated"], denied["failed"]) == (0, 1)
+        assert persisted() == (victim_url, "victim@example.com", "victim-team")
+
+        anonymous = await run(None)
+        assert (anonymous["updated"], anonymous["failed"]) == (0, 1)
+        assert persisted() == (victim_url, "victim@example.com", "victim-team")
+
+        owner = await run("victim@example.com")
+        assert owner["updated"] == 1
+        assert persisted()[0] == "http://example.net/attacker-collector/steal"
+
+        with Session(engine) as reset:
+            reset.query(DbTool).filter_by(name="shared").one().url = victim_url
+            reset.commit()
+        admin = await run("admin@example.com")
+        assert admin["updated"] == 1
+        assert persisted()[1:] == ("victim@example.com", "victim-team")
+        engine.dispose()
+
+    @pytest.mark.asyncio
+    async def test_register_tools_bulk_update_rejects_tool_published_after_authorization(self, tmp_path):
+        """A tool committed after the conflict load is never updated unchecked (no second conflict query)."""
+        engine = create_engine(f"sqlite:///{tmp_path / 'race.db'}")
+        Base.metadata.create_all(engine)
+        victim_url = "https://example.com/internal-weather-api/v1/forecast"
+        with Session(engine) as seed:
+            seed.add_all([EmailUser(email="victim@example.com", password_hash="x", is_admin=False), EmailUser(email="attacker@example.com", password_hash="x", is_admin=False)])
+            seed.commit()
+
+        service = ToolService()
+        payload = _make_bulk_tool_create(name="late-tool", url="http://example.net/attacker-collector/steal")
+        original_loader = service._load_authorized_tool_conflicts
+
+        async def publish_after_load(*args, **kwargs):
+            loaded = await original_loader(*args, **kwargs)
+            with Session(engine) as publisher:
+                publisher.add(
+                    DbTool(
+                        original_name="late-tool",
+                        custom_name="late-tool",
+                        custom_name_slug="late-tool",
+                        name="late-tool",
+                        url=victim_url,
+                        description="d",
+                        integration_type="REST",
+                        request_type="GET",
+                        input_schema={"type": "object"},
+                        visibility="public",
+                        owner_email="victim@example.com",
+                        team_id="victim-team",
+                    )
+                )
+                publisher.commit()
+            return loaded
+
+        registry_cache = SimpleNamespace(invalidate_tools=AsyncMock())
+        lookup_cache = SimpleNamespace(invalidate=AsyncMock())
+        with (
+            Session(engine) as session,
+            patch.object(service, "_load_authorized_tool_conflicts", side_effect=publish_after_load),
+            patch("mcpgateway.services.tool_service._get_registry_cache", return_value=registry_cache),
+            patch("mcpgateway.services.tool_service._get_tool_lookup_cache", return_value=lookup_cache),
+            patch("mcpgateway.services.tool_service.audit_trail"),
+            patch("mcpgateway.cache.admin_stats_cache.admin_stats_cache") as mock_admin_cache,
+        ):
+            mock_admin_cache.invalidate_tags = AsyncMock()
+            result = await service.register_tools_bulk(db=session, tools=[payload], created_by="attacker@example.com", conflict_strategy="update", user_email="attacker@example.com")
+
+        assert result["updated"] == 0
+        with Session(engine) as check:
+            rows = check.query(DbTool).filter_by(name="late-tool").all()
+            assert [row.url for row in rows] == [victim_url]
+            assert rows[0].owner_email == "victim@example.com"
+        engine.dispose()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("caller,owns", [("attacker@example.com", False), (None, True)])
+    async def test_register_tools_bulk_update_denied_for_non_owner(self, caller, owns):
+        """Bulk update never modifies a tool the caller does not own, and fails closed without a caller."""
+        service = ToolService()
+        tool = _make_bulk_tool_create(name="shared-weather-lookup", url="http://example.net/attacker-collector/steal")
+        existing_tool = SimpleNamespace(name=tool.name, url="https://example.com/internal-weather-api/v1/forecast", headers={"Old": "1"}, version=1)
+
+        db = MagicMock()
+        db.execute.return_value.scalars.return_value.all.return_value = [existing_tool]
+        registry_cache = SimpleNamespace(invalidate_tools=AsyncMock())
+        lookup_cache = SimpleNamespace(invalidate=AsyncMock())
+
+        with (
+            patch("mcpgateway.services.permission_service.PermissionService.check_resource_ownership", new=AsyncMock(return_value=owns)),
+            patch("mcpgateway.services.tool_service._get_registry_cache", return_value=registry_cache),
+            patch("mcpgateway.services.tool_service._get_tool_lookup_cache", return_value=lookup_cache),
+        ):
+            result = await service.register_tools_bulk(
+                db=db,
+                tools=[tool],
+                created_by=caller or "importer",
+                conflict_strategy="update",
+                user_email=caller,
+            )
+
+        assert result["updated"] == 0
+        assert result["failed"] == 1
+        assert "Permission denied" in result["errors"][0]
+        assert existing_tool.url == "https://example.com/internal-weather-api/v1/forecast"
+        assert existing_tool.headers == {"Old": "1"}
+        assert existing_tool.version == 1
+        registry_cache.invalidate_tools.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_register_tools_bulk_update_allowed_for_owner(self):
+        """Bulk update modifies an existing tool when the caller owns it."""
+        service = ToolService()
+        tool = _make_bulk_tool_create(name="owned-tool")
+        existing_tool = SimpleNamespace(
+            name=tool.name,
+            url="https://old",
+            headers={},
+            version=1,
+            original_description="old",
+            input_schema={},
+            output_schema=None,
+            annotations={},
+            tags=[],
+        )
+
+        db = MagicMock()
+        db.execute.return_value.scalars.return_value.all.return_value = [existing_tool]
+        registry_cache = SimpleNamespace(invalidate_tools=AsyncMock())
+        lookup_cache = SimpleNamespace(invalidate=AsyncMock())
+
+        with (
+            patch("mcpgateway.services.permission_service.PermissionService.check_resource_ownership", new=AsyncMock(return_value=True)),
+            patch("mcpgateway.services.tool_service._get_registry_cache", return_value=registry_cache),
+            patch("mcpgateway.services.tool_service._get_tool_lookup_cache", return_value=lookup_cache),
+            patch("mcpgateway.services.tool_service.audit_trail"),
+            patch("mcpgateway.cache.admin_stats_cache.admin_stats_cache") as mock_admin_cache,
+        ):
+            mock_admin_cache.invalidate_tags = AsyncMock()
+            result = await service.register_tools_bulk(
+                db=db,
+                tools=[tool],
+                created_by="owner@example.com",
+                conflict_strategy="update",
+                user_email="owner@example.com",
+            )
+
+        assert result["updated"] == 1
+        assert result["failed"] == 0
+        assert existing_tool.version == 2
+
+    @pytest.mark.asyncio
     async def test_register_tools_bulk_empty_list(self):
         service = ToolService()
         result = await service.register_tools_bulk(db=MagicMock(), tools=[])
@@ -9789,13 +10021,32 @@ class TestInvokeToolDirect:
         return mock_fresh_session
 
     @pytest.mark.asyncio
-    async def test_invoke_tool_direct_success(self, tool_service, mock_direct_gateway):
-        """Happy path: gateway found, direct_proxy mode, access allowed, tool call succeeds."""
-        expected_result = MagicMock()
-        expected_result.content = [MagicMock(text="direct result")]
+    @pytest.mark.parametrize("is_error", [False, True])
+    async def test_invoke_tool_direct_success(self, tool_service, mock_direct_gateway, is_error):
+        """Direct proxy preserves tool results and request metadata without empty spans."""
+        expected_result = ToolResult(content=[TextContent(type="text", text="direct result")], is_error=is_error)
+        active_spans = []
+        recorded = {}
+        span_names = []
+
+        @contextmanager
+        def record_span(name, _attributes=None):
+            active_spans.append(name)
+            span_names.append(name)
+            span = MagicMock()
+            recorded[name] = {}
+            span.set_attribute.side_effect = lambda key, value: recorded[name].update({key: value})
+            try:
+                yield span
+            finally:
+                assert active_spans.pop() == name
+
+        async def call_upstream(*_args, **_kwargs):
+            assert active_spans == ["mcp.client.call", "mcp.client.request"]
+            return expected_result
 
         session_mock = AsyncMock()
-        session_mock.call_tool = AsyncMock(return_value=expected_result)
+        session_mock.call_tool = AsyncMock(side_effect=call_upstream)
         session_mock.session.call_tool = session_mock.call_tool
 
         client_session_cm = AsyncMock()
@@ -9804,6 +10055,7 @@ class TestInvokeToolDirect:
 
         @asynccontextmanager
         async def mock_streamable_client(*_args, **_kwargs):
+            assert active_spans == ["mcp.client.call"]
             yield session_mock
 
         with (
@@ -9812,6 +10064,7 @@ class TestInvokeToolDirect:
             patch("mcpgateway.services.tool_service.check_gateway_access", new_callable=AsyncMock, return_value=True),
             patch("mcpgateway.services.tool_service.build_gateway_auth_headers", return_value={"Authorization": "Bearer remote-token"}),
             patch("mcpgateway.services.tool_service.mcp_proxy_client", mock_streamable_client),
+            patch("mcpgateway.services.tool_service.create_span", side_effect=record_span),
         ):
             mock_settings.mcpgateway_direct_proxy_enabled = True
             mock_settings.mcpgateway_direct_proxy_timeout = 30
@@ -9826,6 +10079,10 @@ class TestInvokeToolDirect:
 
         assert result == expected_result
         session_mock.call_tool.assert_awaited_once_with(name="remote_tool", arguments={"key": "value"})
+
+        assert span_names == ["mcp.client.call", "mcp.client.request"]
+        assert recorded["mcp.client.request"]["upstream.response.success"] is not is_error
+        assert recorded["mcp.client.request"].get("error", False) is is_error
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -10486,7 +10743,9 @@ class TestInvokeToolDirectProxyViaHeader:
             mock_settings.mcp_session_pool_enabled = False
             mock_settings.default_passthrough_headers = []
 
-            result = await tool_service.invoke_tool(test_db, "my_remote_tool", {"arg": "value"}, request_headers={"x-context-forge-gateway-id": "gw-dp-1"}, user_email="user@example.com", token_teams=["team-1"])
+            result = await tool_service.invoke_tool(
+                test_db, "my_remote_tool", {"arg": "value"}, request_headers={"x-context-forge-gateway-id": "gw-dp-1"}, user_email="user@example.com", token_teams=["team-1"]
+            )
 
         assert result.is_error is True
         assert result.meta == {TOOL_ERROR_CODE: {"code": -32602}}

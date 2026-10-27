@@ -19,11 +19,13 @@ import pytest
 ROOT = Path(__file__).resolve().parents[3]
 
 
-def run_deploy(tmp_path: Path, **settings: str) -> tuple[subprocess.CompletedProcess[str], list[list[str]]]:
+def run_deploy(tmp_path: Path, entrypoint: str = "03-deploy-gateway.sh", script_root: Path = ROOT, **settings: str) -> tuple[subprocess.CompletedProcess[str], list[list[str]]]:
     """Execute deployment with an isolated Azure CLI boundary.
 
     Args:
         tmp_path: Temporary directory for the CLI and recorded calls.
+        entrypoint: Script to execute.
+        script_root: Repository containing the deployment scripts.
         settings: Environment overrides for the deployment.
 
     Returns:
@@ -34,6 +36,7 @@ def run_deploy(tmp_path: Path, **settings: str) -> tuple[subprocess.CompletedPro
     fake_az.write_text(
         f"#!{sys.executable}\n"
         "import json, os, sys\n"
+        "from pathlib import Path\n"
         "args = sys.argv[1:]\n"
         "with open(os.environ['AZ_CALLS'], 'a') as out:\n"
         "    out.write(json.dumps(args) + '\\n')\n"
@@ -44,18 +47,82 @@ def run_deploy(tmp_path: Path, **settings: str) -> tuple[subprocess.CompletedPro
         "        sys.exit(1)\n"
         "if args[:2] == ['identity', 'show']:\n"
         "    print('/subscriptions/test/resourceGroups/test/providers/Microsoft.ManagedIdentity/userAssignedIdentities/gateway')\n"
+        "elif args[:3] == ['acr', 'repository', 'show']:\n"
+        "    if os.environ.get('TEST_DIGEST_ERROR'): sys.exit(1)\n"
+        "    print(os.environ.get('TEST_DIGEST', 'sha256:' + 'a' * 64))\n"
+        "elif args[:2] in (['containerapp', 'create'], ['containerapp', 'update']):\n"
+        "    Path(os.environ['AZ_CALLS'] + '.created').touch()\n"
+        "    if '--revision-suffix' in args:\n"
+        "        revision = args[args.index('--name' if '--name' in args else '-n') + 1] + '--' + args[args.index('--revision-suffix') + 1]\n"
+        "    else: revision = 'gateway--new'\n"
+        "    if os.environ.get('TEST_STALE_UPDATE'): revision = 'gateway--old'\n"
+        "    Path(os.environ['AZ_CALLS'] + '.revision').write_text(revision)\n"
+        "    if '--query' in args: print(revision)\n"
+        "elif args[:2] == ['containerapp', 'show'] and os.environ.get('TEST_APP_ERROR') and not Path(os.environ['AZ_CALLS'] + '.created').exists():\n"
+        "    print(os.environ['TEST_APP_ERROR'], file=sys.stderr)\n"
+        "    sys.exit(1)\n"
         "elif args[:3] == ['acr', 'repository', 'show-tags']:\n"
         "    print('test-image')\n"
         "elif args[:2] == ['containerapp', 'show'] and '--query' in args:\n"
         "    query = args[args.index('--query') + 1]\n"
-        "    print('https://gateway.example' if 'APP_DOMAIN' in query else 'gateway.example')\n"
+        "    if query == os.environ.get('TEST_READ_ERROR'): sys.exit(1)\n"
+        "    revision_file = Path(os.environ['AZ_CALLS'] + '.revision')\n"
+        "    if query == 'properties.latestRevisionName' and revision_file.exists():\n"
+        "        print('gateway--concurrent' if os.environ.get('TEST_CONCURRENT_REVISION') else revision_file.read_text())\n"
+        "        sys.exit(0)\n"
+        "    values = {'properties.latestRevisionName': 'gateway--new', 'name': 'mcp-gateway', 'length(properties.template.containers)': os.environ.get('TEST_CONTAINER_COUNT', '1'),\n"
+        "        'properties.template.containers[0].name': 'gateway-container',\n"
+        "        'properties.template.containers[0].image': os.environ.get('TEST_LIVE_IMAGE', 'vcarercacr.azurecr.io/mcp-gateway@sha256:' + 'b' * 64),\n"
+        "        'properties.template.containers[0].resources.cpu': '1.5',\n"
+        "        'properties.template.containers[0].resources.memory': '3Gi',\n"
+        "        'properties.template.scale.minReplicas': '0', 'properties.template.scale.maxReplicas': '3'}\n"
+        "    if 'DEFAULT_USER_PASSWORD' in query: print('default-user-password')\n"
+        "    else: print(values.get(query, 'https://gateway.example' if 'APP_DOMAIN' in query else 'gateway.example'))\n"
+        "elif args[:3] == ['containerapp', 'revision', 'list']:\n"
+        "    import re\n"
+        "    query = args[args.index('--query') + 1]\n"
+        "    image = os.environ.get('TEST_SERVING_IMAGE', 'vcarercacr.azurecr.io/mcp-gateway@sha256:' + 'a' * 64)\n"
+        "    revision_file = Path(os.environ['AZ_CALLS'] + '.revision')\n"
+        "    revision = os.environ.get('TEST_SERVING_REVISION', revision_file.read_text() if revision_file.exists() else 'gateway--new')\n"
+        "    if '-o' in args and args[args.index('-o') + 1] == 'table': sys.exit(0)\n"
+        "    expected_name = re.search(r\"name=='([^']+)'\", query)\n"
+        "    expected_image = re.search(r\"image=='([^']+)'\", query)\n"
+        "    assert expected_image, 'unexpected revision query'\n"
+        "    assert 'properties.active' in query and 'properties.trafficWeight==`100`' in query\n"
+        "    assert \"properties.healthState=='Healthy'\" in query and \"starts_with(properties.runningState, 'Running')\" in query\n"
+        "    print(revision if expected_image[1] == image and (not expected_name or expected_name[1] == revision) else '')\n"
     )
     fake_az.chmod(0o755)
-    excluded = ("OTEL_", "LANGFUSE_", "KV_OTEL_HEADERS", "TEST_OTEL_", "DEPLOY_PROFILE", "MCP_CLIENT_CONNECT_MODE", "MCP_INBOUND_PROTOCOL_MODE")
+    fake_curl = tmp_path / "curl"
+    fake_curl.write_text(
+        '#!/usr/bin/env bash\ncase "$*" in\n  *gateways*) echo 401 ;;\n  *admin/login*) echo "<title>Login</title>" ;;\n  *http_code*) echo 200 ;;\n  *) echo \'{"status":"healthy"}\' ;;\nesac\n'
+    )
+    fake_curl.chmod(0o755)
+    fake_sleep = tmp_path / "sleep"
+    fake_sleep.write_text("#!/usr/bin/env bash\nexit 0\n")
+    fake_sleep.chmod(0o755)
+    excluded = (
+        "OTEL_",
+        "LANGFUSE_",
+        "KV_OTEL_HEADERS",
+        "TEST_",
+        "IMAGE",
+        "EXPECTED_REVISION",
+        "DEPLOY_RESULT_FILE",
+        "APP_CPU",
+        "APP_MEMORY",
+        "APP_MIN_REPLICAS",
+        "APP_MAX_REPLICAS",
+        "DCR_ALLOWED_ISSUERS",
+        "DEPLOY_PROFILE",
+        "MCPGATEWAY_",
+        "MCP_CLIENT_CONNECT_MODE",
+        "MCP_INBOUND_PROTOCOL_MODE",
+    )
     env = {key: value for key, value in os.environ.items() if not key.startswith(excluded)}
     env.update(PATH=f"{tmp_path}:{env['PATH']}", AZ_CALLS=str(calls_path), IMAGE_TAG="test-image", APP_DOMAIN="https://gateway.example")
     env.update(settings)
-    result = subprocess.run(["bash", str(ROOT / "deploy/scripts/03-deploy-gateway.sh")], env=env, text=True, capture_output=True, check=False)
+    result = subprocess.run(["bash", str(script_root / "deploy/scripts" / entrypoint)], env=env, text=True, capture_output=True, check=False)
     calls = [json.loads(line) for line in calls_path.read_text().splitlines()] if calls_path.exists() else []
     return result, calls
 
@@ -176,3 +243,13 @@ def test_invalid_export_configuration_stops_before_azure_mutations(tmp_path, end
     result, calls = run_deploy(tmp_path, OTEL_ENABLE_OBSERVABILITY="true", OTEL_EXPORTER_OTLP_ENDPOINT=endpoint, OTEL_EXPORTER_OTLP_PROTOCOL=protocol)
     assert result.returncode != 0
     assert not any(call[:2] == ["containerapp", "update"] or call[:3] == ["containerapp", "secret", "set"] for call in calls)
+
+
+def test_trace_environment_does_not_change_auth_environment(tmp_path):
+    """Custom trace labels must not change token environment validation."""
+    result, calls = run_deploy(tmp_path, DEPLOYMENT_ENV="staging", OTEL_TOOL_RESULT_METADATA_FIELDS="outcome,nextStep")
+    assert result.returncode == 0, result.stderr
+    update = next(call for call in calls if call[:2] == ["containerapp", "update"])
+    assert "DEPLOYMENT_ENV=staging" in update
+    assert "ENVIRONMENT=production" in update
+    assert "OTEL_TOOL_RESULT_METADATA_FIELDS=outcome,nextStep" in update

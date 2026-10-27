@@ -7,14 +7,62 @@ does the **how**.
 cd deploy/scripts
 az login
 ./deploy.sh                 # infra -> build -> deploy -> verify
-./deploy.sh --skip-build    # redeploy the image already in ACR
+./deploy.sh --skip-infra --skip-build  # update configuration using the live image digest
 
 # A named target: overrides live in profiles/<name>.env
 DEPLOY_PROFILE=profiles/healthcare-rg.env ./deploy.sh
 ```
 
-Every script is idempotent. Re-running against an existing deployment updates it
-rather than duplicating anything.
+Deployment updates the existing app. Build scripts archive committed `HEAD`; commit reviewed application changes before building.
+Uncommitted files are not included in the image.
+
+## Image and configuration updates
+
+Container Apps receives immutable `repository@sha256:...` image references. New builds use a commit, timestamp and random suffix for their default tag.
+Builds no longer publish a mutable `latest` alias. An explicit `IMAGE_TAG` is resolved to a digest before deployment.
+The orchestrator carries the selected digest into deployment and smoke checks.
+
+With no image selector, `03-deploy-gateway.sh` preserves the existing app's pinned digest.
+It refuses a live tag reference because resolving that tag could select a different image.
+For a first deployment, supply `IMAGE_TAG` or `IMAGE_DIGEST`, or run the full build flow.
+Set only one selector. Use `--skip-build` when supplying `IMAGE_DIGEST`.
+
+```bash
+# Configuration only; preserve the deployed digest.
+DEPLOY_PROFILE=profiles/healthcare-rg.env ./deploy.sh --skip-infra --skip-build
+
+# Deploy or roll back to an explicitly selected release. Substitute its actual digest.
+DEPLOY_PROFILE=profiles/healthcare-rg.env IMAGE_DIGEST="sha256:<64-hex-digest>" \
+  ./deploy.sh --skip-infra --skip-build
+```
+
+`APP_CPU`, `APP_MEMORY`, `APP_MIN_REPLICAS` and `APP_MAX_REPLICAS` apply on both creation and update.
+Unspecified resource values preserve live settings during updates.
+Creation defaults to 1 CPU, 2 GiB and minimum/maximum replica counts of 1.
+Profiles are authoritative; review their settings before deploying after a manual Azure resource change.
+The scripts support one gateway container and reject multi-container updates for separate review.
+Azure read errors stop deployment; only an explicit `ResourceNotFound` permits creation.
+
+Three optional settings support deliberate removal:
+
+| Script setting | Container environment variable |
+|---|---|
+| `DCR_ALLOWED_ISSUERS` | `DCR_ALLOWED_ISSUERS` |
+| `OTEL_REDACT_FIELDS` | `OTEL_REDACT_FIELDS` |
+| `KV_OTEL_HEADERS` | `OTEL_EXPORTER_OTLP_HEADERS` |
+
+An unset setting preserves the live value. A nonempty setting replaces it. An explicit empty string removes the variable.
+For example, `OTEL_REDACT_FIELDS=''` restores application defaults; it does not mean an empty redaction list.
+Set removals in the selected profile when that profile already defines the setting.
+Other environment variables and secrets remain intact. Removing an exporter reference does not delete its stored secret.
+Fixed script-owned settings still reconcile to the selected profile and script defaults.
+The update uses Azure CLI's targeted [environment variable operations](https://learn.microsoft.com/en-us/cli/azure/containerapp#az-containerapp-update).
+
+Each deployment starts a fresh revision, including configuration-only updates, so changed secret references reload.
+The orchestrator passes the returned revision name to smoke checks through a temporary file, then removes the file.
+Smoke checks require that exact revision, the selected digest, health and 100% traffic.
+Standalone `04-smoke.sh` defaults to the latest revision; set `EXPECTED_REVISION` to verify a specific rollout.
+An older healthy revision with the same image cannot prove a configuration update succeeded.
 
 ## Why Container Apps, not AKS
 
@@ -137,8 +185,8 @@ The deployment script requires an endpoint and a supported protocol when export 
 
 ### Healthcare Azure deployment
 
-The `healthcare-rg` profile currently exports traces to Langfuse Cloud in Japan for an interface trial.
-The endpoint is `https://jp.cloud.langfuse.com/api/public/otel/v1/traces`, using HTTP with TLS verification.
+The `healthcare-rg` profile currently exports traces to Langfuse Cloud in the EU for an interface trial.
+The endpoint is `https://cloud.langfuse.com/api/public/otel/v1/traces`, using HTTP with TLS verification.
 `KV_OTEL_HEADERS` names the Key Vault secret containing the OTLP authorization and `x-langfuse-ingestion-version=4` headers.
 Provision the secret before deployment. The preparation script grants the gateway identity access to that secret only.
 The deployment script uses a Key Vault reference; it never reads the header value.

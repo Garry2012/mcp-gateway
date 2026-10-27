@@ -99,6 +99,8 @@ OBSERVABILITY_ENABLED="${OBSERVABILITY_ENABLED:-true}"
 
 # Payload capture applies to exported spans, not the built-in observability database.
 # Tool output capture records successful results only.
+DEPLOYMENT_ENV="${DEPLOYMENT_ENV:-production}"
+OTEL_TOOL_RESULT_METADATA_FIELDS="${OTEL_TOOL_RESULT_METADATA_FIELDS:-}"
 OTEL_CAPTURE_INPUT_SPANS="${OTEL_CAPTURE_INPUT_SPANS:-tool.invoke}"
 OTEL_CAPTURE_OUTPUT_SPANS="${OTEL_CAPTURE_OUTPUT_SPANS:-tool.invoke}"
 OTEL_ENABLE_OBSERVABILITY="${OTEL_ENABLE_OBSERVABILITY:-false}"
@@ -113,23 +115,15 @@ OTEL_CAPTURE_IDENTITY_ATTRIBUTES="${OTEL_CAPTURE_IDENTITY_ATTRIBUTES:-false}"
 # Container app.
 APP_NAME_AZ="${APP_NAME_AZ:-mcp-gateway}"
 IMAGE_REPO="${IMAGE_REPO:-mcp-gateway}"
-# The tag MUST be unique per build. It was previously the fixed, mutable "v1",
-# which made redeploys silently do nothing: `az containerapp update --image
-# <repo>:v1` produces a template identical to the deployed one, and in Single
-# revision mode Container Apps only rolls a new revision when the template
-# changes. The build succeeded, the tag moved to the new digest, every script
-# exited 0, and the old replica kept serving - with the smoke test passing
-# against it, because those assertions only check the brand and cannot tell two
-# post-rebrand builds apart.
-# Defaulting to the commit SHA makes each deploy a distinct template, so a new
-# revision always rolls and the running image is traceable to a commit.
-IMAGE_TAG="${IMAGE_TAG:-$(git -C "$ROOT_DIR" rev-parse --short HEAD 2>/dev/null || echo latest)}"
-IMAGE="${REGISTRY}/${IMAGE_REPO}:${IMAGE_TAG}"
+# Image selection is explicit. Configuration-only updates preserve the live digest.
+IMAGE_TAG="${IMAGE_TAG:-}"
+IMAGE_DIGEST="${IMAGE_DIGEST:-}"
 APP_PORT="${APP_PORT:-4444}"
-APP_CPU="${APP_CPU:-1.0}"
-APP_MEMORY="${APP_MEMORY:-2.0Gi}"
-APP_MIN_REPLICAS="${APP_MIN_REPLICAS:-1}"
-APP_MAX_REPLICAS="${APP_MAX_REPLICAS:-1}"
+# Unspecified resources preserve live values; creation supplies defaults.
+APP_CPU="${APP_CPU:-}"
+APP_MEMORY="${APP_MEMORY:-}"
+APP_MIN_REPLICAS="${APP_MIN_REPLICAS:-}"
+APP_MAX_REPLICAS="${APP_MAX_REPLICAS:-}"
 
 PLATFORM_ADMIN_EMAIL="${PLATFORM_ADMIN_EMAIL:-admin@intimetec.com}"
 
@@ -154,13 +148,12 @@ APP_DOMAIN="${APP_DOMAIN:-}"
 
 # Upstream MCP servers the gateway may dynamically register itself with.
 # DCR_ALLOWED_ISSUERS is a JSON list of issuer URLs. When set, an issuer absent
-# from it is refused. When empty, the variable is not passed and config.py's
-# default applies (empty list = allow any issuer). Keep this OUT of a local
+# from it is refused. An explicit empty value removes the override.
+# An unset value preserves the live setting. Keep this OUT of a local
 # .env - it makes tests in tests/unit/mcpgateway/services/test_dcr_service.py
 # fail, because they use https://as.example.com as a fixture issuer.
 DCR_ENABLED="${DCR_ENABLED:-true}"
 DCR_AUTO_REGISTER_ON_MISSING_CREDENTIALS="${DCR_AUTO_REGISTER_ON_MISSING_CREDENTIALS:-true}"  # pragma: allowlist secret
-DCR_ALLOWED_ISSUERS="${DCR_ALLOWED_ISSUERS:-}"
 DCR_TOKEN_ENDPOINT_AUTH_METHOD="${DCR_TOKEN_ENDPOINT_AUTH_METHOD:-client_secret_post}"
 
 # Key Vault secret names. Values are never stored in this repo.
@@ -194,3 +187,28 @@ log()  { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 ok()   { printf '  \033[0;32mOK\033[0m   %s\n' "$*"; }
 warn() { printf '  \033[0;33mWARN\033[0m %s\n' "$*"; }
 die()  { printf '  \033[0;31mFAIL\033[0m %s\n' "$*" >&2; exit 1; }
+
+# Resolve tags once; all deployment and verification operations use the digest.
+resolve_image() {
+  local digest="$IMAGE_DIGEST" live_image
+  [ -z "$IMAGE_DIGEST" ] || [ -z "$IMAGE_TAG" ] || die "Set IMAGE_DIGEST or IMAGE_TAG, not both"
+  if [ -n "$IMAGE_TAG" ]; then
+    digest="$(az acr repository show -n "$ACR_NAME" --image "${IMAGE_REPO}:${IMAGE_TAG}" --query digest -o tsv)" \
+      || die "Cannot resolve IMAGE_TAG in ACR"
+  elif [ -z "$digest" ]; then
+    live_image="$(az containerapp show -n "$APP_NAME_AZ" -g "$RESOURCE_GROUP" \
+      --query 'properties.template.containers[0].image' -o tsv)" || die "Cannot read the live image; check Azure access or select an explicit release"
+    case "$live_image" in
+      "${REGISTRY}/${IMAGE_REPO}@sha256:"*) digest="${live_image##*@}" ;;
+      *) die "Live image is not pinned to the configured repository; supply IMAGE_DIGEST explicitly" ;;
+    esac
+  fi
+  [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]] || die "Expected a sha256 image digest"
+  printf '%s/%s@%s\n' "$REGISTRY" "$IMAGE_REPO" "$digest"
+}
+
+new_build_tag() {
+  local commit
+  commit="$(git -C "$ROOT_DIR" rev-parse --short HEAD)" || die "Cannot identify build commit"
+  printf '%s-%s-%s-%s\n' "$commit" "$(date -u +%Y%m%d%H%M%S)" "$$" "$RANDOM"
+}

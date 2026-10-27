@@ -12,6 +12,10 @@ FQDN="$(az containerapp show -n "$APP_NAME_AZ" -g "$RESOURCE_GROUP" \
   || die "app '$APP_NAME_AZ' not found - run ./03-deploy-gateway.sh first"
 URL="https://${FQDN}"
 
+IMAGE="$(resolve_image)"
+EXPECTED_REVISION="${EXPECTED_REVISION:-$(az containerapp show -n "$APP_NAME_AZ" -g "$RESOURCE_GROUP" --query properties.latestRevisionName -o tsv)}"
+[[ "$EXPECTED_REVISION" =~ ^[a-z0-9][a-z0-9-]*$ ]] || die "Cannot identify the intended revision"
+
 log "Smoke test: $URL"
 
 DEFAULT_PASSWORD_REF="$(az containerapp show -n "$APP_NAME_AZ" -g "$RESOURCE_GROUP" \
@@ -42,7 +46,7 @@ ok "default user password uses a dedicated secret reference"
 # running, healthy (readiness passed) and to carry all ingress traffic.
 for i in $(seq 1 12); do
   SERVING_REV="$(az containerapp revision list -n "$APP_NAME_AZ" -g "$RESOURCE_GROUP" \
-    --query "[?properties.active && properties.trafficWeight==\`100\` && properties.healthState=='Healthy' && properties.template.containers[0].image=='${IMAGE}' && starts_with(properties.runningState, 'Running')] | [0].name" \
+    --query "[?name=='${EXPECTED_REVISION}' && properties.active && properties.trafficWeight==\`100\` && properties.healthState=='Healthy' && properties.template.containers[0].image=='${IMAGE}' && starts_with(properties.runningState, 'Running')] | [0].name" \
     -o tsv 2>/dev/null || true)"
   [ -n "$SERVING_REV" ] && break
   [ "$i" = "12" ] && {

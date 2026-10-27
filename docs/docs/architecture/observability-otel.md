@@ -9,7 +9,7 @@ The OTEL integration provides:
 - **W3C Trace Context Propagation**: Automatic propagation of trace context via `traceparent` headers
 - **W3C Baggage Support**: Optional extraction of allowlisted HTTP headers into OTEL baggage
 - **Request-Root Spans**: Every HTTP request creates a root span in the observability middleware
-- **MCP Client Spans**: Detailed tracing of MCP protocol operations (initialize, request, response)
+- **MCP Client Spans**: Connection lifecycle and tool request timing, with response success on the request span
 - **Plugin Hook Spans**: Visibility into plugin execution lifecycle
 - **Session Pool Awareness**: Non-pooled sessions propagate trace context and baggage; pooled sessions skip per-request propagation to prevent context pollution
 
@@ -17,16 +17,20 @@ The OTEL integration provides:
 
 ### Span Hierarchy
 
+Example for a non-pooled tool call with HTTP client instrumentation enabled:
+
+```text
+HTTP request span
+└── tool.invoke
+    └── mcp.client.call
+        ├── HTTP client spans (connection setup and initialization)
+        └── mcp.client.request
+            └── HTTP client spans (tool request)
 ```
-http.request (root span)
-├── mcp.client.call
-│   ├── mcp.client.initialize
-│   ├── mcp.client.request
-│   └── mcp.client.response
-├── plugin.hook.prompt_pre_fetch
-├── plugin.hook.tool_pre_invoke
-└── plugin.hook.tool_post_invoke
-```
+
+`mcp.client.call` covers the client connection lifecycle. `mcp.client.request` covers the tool request
+and records `upstream.response.success` when a result returns. Empty initialization and response markers are omitted.
+Real inbound `mcp.initialize` spans and HTTP timing remain available.
 
 Span attributes may also include request baggage dimensions, for example:
 - `baggage.tenant.id`

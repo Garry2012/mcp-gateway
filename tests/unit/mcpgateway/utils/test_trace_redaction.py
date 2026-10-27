@@ -134,6 +134,33 @@ def test_serialize_trace_payload_redacts_and_sanitizes(monkeypatch):
     }
 
 
+def test_serialize_trace_payload_drops_deep_payload_without_mutating_it(caplog):
+    """A redaction recursion error drops telemetry without changing tool data."""
+    original = {"password": "private-probe"}  # pragma: allowlist secret
+    payload = original
+    for _ in range(1200):
+        payload = {"nested": payload}
+
+    rendered = serialize_trace_payload(payload)
+
+    assert json.loads(rendered) == {"_error": "trace_payload_unavailable"}
+    assert original == {"password": "private-probe"}  # pragma: allowlist secret
+    assert "private-probe" not in rendered + caplog.text
+
+
+def test_serialize_trace_payload_drops_failed_model_conversion(caplog):
+    """Model conversion failures cannot escape or disclose exception details."""
+
+    class InvalidPayload:
+        def model_dump(self, **kwargs):
+            raise ValueError("private-probe")
+
+    rendered = serialize_trace_payload(InvalidPayload())
+
+    assert json.loads(rendered) == {"_error": "trace_payload_unavailable"}
+    assert "private-probe" not in rendered + caplog.text
+
+
 def test_serialize_trace_payload_sanitizes_generic_string_content(monkeypatch):
     monkeypatch.setenv("OTEL_REDACT_FIELDS", "token")
     reload_trace_redaction_config()
@@ -274,3 +301,66 @@ def test_oversized_json_integer_does_not_interrupt_capture_or_expose_secrets(mon
 
     assert captured["note"] == '{"_error":"redaction_value_exceeded"}'
     assert "synthetic-secret" not in json.dumps(captured)
+
+
+@pytest.mark.parametrize("shape", ["structuredContent", "structured_content", "text"])
+def test_result_metadata_uses_captured_redacted_fields(monkeypatch, shape):
+    """Expose selected result codes without re-reading unredacted tool output."""
+    from mcpgateway.utils import trace_redaction
+
+    monkeypatch.setenv("OTEL_CAPTURE_OUTPUT_SPANS", "tool.invoke")
+    monkeypatch.setenv("OTEL_TOOL_RESULT_METADATA_FIELDS", "outcome,nextStep,patientName")
+    monkeypatch.setenv("OTEL_REDACT_FIELDS", "password,nextStep")
+    reload_trace_redaction_config()
+    body = {"outcome": "BOOKED", "nextStep": "DONE", "patientName": "Synthetic Person"}
+    result = {"content": [{"type": "text", "text": json.dumps(body)}]} if shape == "text" else {shape: body}
+    captured = serialize_trace_payload(result)
+    assert trace_redaction.extract_tool_result_metadata(captured) == {"outcome": "BOOKED"}
+
+
+@pytest.mark.parametrize("capture,fields", [("", "outcome"), ("llm.chat", "outcome"), ("tool.invoke", "")])
+def test_result_metadata_requires_capture_and_explicit_fields(monkeypatch, capture, fields):
+    """Metadata cannot bypass disabled output capture or its own opt-in setting."""
+    from mcpgateway.utils import trace_redaction
+
+    monkeypatch.setenv("OTEL_CAPTURE_OUTPUT_SPANS", capture)
+    monkeypatch.setenv("OTEL_TOOL_RESULT_METADATA_FIELDS", fields)
+    reload_trace_redaction_config()
+    assert trace_redaction.extract_tool_result_metadata('{"structuredContent":{"outcome":"BOOKED"}}') == {}
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        {"structuredContent": {"outcome": ["BOOKED"]}},
+        {"structuredContent": {"outcome": "a" * 65}},
+        {"structuredContent": {"outcome": "free form patient text"}},
+        {"structuredContent": {"outcome": "***"}},
+        {"_truncated": True, "_preview": '{"outcome":"BOOKED"}'},
+        {"content": [{"type": "text", "text": '{"outcome":"BOOKED"}'}, {"type": "text", "text": '{"outcome":"FAILED"}'}]},
+        {"structuredContent": {}, "content": [{"type": "text", "text": '{"outcome":"BOOKED"}'}]},
+        {"content": [{"type": "text", "text": "not JSON"}]},
+    ],
+)
+def test_result_metadata_omits_ambiguous_or_unsafe_values(monkeypatch, result):
+    """Malformed, ambiguous, redacted and oversized results produce no searchable codes."""
+    from mcpgateway.utils import trace_redaction
+
+    monkeypatch.setenv("OTEL_CAPTURE_OUTPUT_SPANS", "tool.invoke")
+    monkeypatch.setenv("OTEL_TOOL_RESULT_METADATA_FIELDS", "outcome,nextStep")
+    reload_trace_redaction_config()
+    assert trace_redaction.extract_tool_result_metadata(json.dumps(result)) == {}
+
+
+def test_result_metadata_respects_whole_output_redaction(monkeypatch):
+    """Masking the output attribute must also suppress derived result metadata."""
+    from mcpgateway.utils import trace_redaction
+
+    with monkeypatch.context() as patch:
+        patch.setenv("OTEL_CAPTURE_OUTPUT_SPANS", "tool.invoke")
+        patch.setenv("OTEL_TOOL_RESULT_METADATA_FIELDS", "outcome,nextStep")
+        patch.setenv("OTEL_REDACT_FIELDS", "langfuse.observation.output")
+        reload_trace_redaction_config()
+        captured = serialize_trace_payload({"structuredContent": {"outcome": "BOOKED"}})
+        assert sanitize_trace_attribute_value("langfuse.observation.output", captured) == "***"
+        assert trace_redaction.extract_tool_result_metadata(captured) == {}

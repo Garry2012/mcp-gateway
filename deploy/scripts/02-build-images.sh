@@ -29,6 +29,8 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/00-config.sh"
 
 log "Preflight"
+[ -z "$IMAGE_DIGEST" ] || die "IMAGE_DIGEST selects an existing release; unset it before building"
+IMAGE_TAG="${IMAGE_TAG:-$(new_build_tag)}"
 az account show -o none 2>/dev/null || die "not logged in - run 'az login'"
 az acr show -n "$ACR_NAME" -o none 2>/dev/null || die "registry '$ACR_NAME' not found"
 ok "registry $REGISTRY"
@@ -51,7 +53,6 @@ cd "$BUILD_CTX"
 az acr build \
   --registry "$ACR_NAME" \
   --image "${IMAGE_REPO}:${IMAGE_TAG}" \
-  --image "${IMAGE_REPO}:latest" \
   --file Containerfile \
   --build-arg UBI_BASE="$UBI_BASE" \
   --build-arg NODEJS_IMAGE="$NODEJS_IMAGE" \
@@ -59,10 +60,7 @@ az acr build \
   --build-arg WHEELS_REF="$WHEELS_REF" \
   . || die "ACR build failed - see output above"
 
-# Verify by listing tags. The build command's exit code alone is not proof the
-# image was pushed.
 log "Verifying push"
-az acr repository show-tags -n "$ACR_NAME" --repository "$IMAGE_REPO" -o tsv 2>/dev/null \
-  | grep -qx "$IMAGE_TAG" || die "tag '$IMAGE_TAG' not present in $ACR_NAME after build"
+IMAGE="$(resolve_image)"
 ok "$IMAGE"
-echo "  Next: ./03-deploy-gateway.sh"
+printf '  Next: IMAGE_DIGEST=%s ./03-deploy-gateway.sh (unset IMAGE_TAG first)\n' "${IMAGE##*@}"

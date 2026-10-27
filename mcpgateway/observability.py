@@ -5,11 +5,12 @@ SPDX-License-Identifier: Apache-2.0
 
 Vendor-agnostic OpenTelemetry instrumentation for ContextForge.
 Supports any OTLP-compatible backend (Jaeger, Zipkin, Tempo, Phoenix, etc.).
+OTEL_AVAILABLE indicates core tracing support. Baggage support remains independently optional.
 """
 
 # Standard
 import base64
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager, ExitStack, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass
 from importlib import import_module as _im
@@ -17,11 +18,12 @@ import inspect
 import logging
 import os
 import re
-from typing import Any, Callable, cast, Dict, Iterator, Mapping, Optional
+from typing import Any, Callable, cast, Dict, Generator, Iterator, Mapping, MutableMapping, Optional
 from urllib.parse import urlparse
 
 # Third-Party - Try to import OpenTelemetry core components - make them truly optional
 OTEL_AVAILABLE = False
+otel_baggage: Any = None  # pylint: disable=invalid-name
 try:
     # Third-Party
     from opentelemetry import trace
@@ -30,18 +32,18 @@ try:
     from opentelemetry.sdk.resources import Resource
     from opentelemetry.sdk.trace import SpanProcessor, TracerProvider
     from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter, SimpleSpanProcessor
+    from opentelemetry.sdk.trace.sampling import Decision, Sampler, SamplingResult
     from opentelemetry.trace import SpanKind, Status, StatusCode
 
     try:
         # Third-Party
         from opentelemetry import baggage as otel_baggage
     except ImportError:
-        otel_baggage = None
+        logging.getLogger(__name__).debug("OpenTelemetry baggage support unavailable")
 
     OTEL_AVAILABLE = True
 except ImportError:
     # OpenTelemetry not installed - set to None for graceful degradation
-    otel_baggage = None
     trace = None
     otel_extract = None
     otel_inject = None
@@ -50,6 +52,15 @@ except ImportError:
         """Minimal SpanKind shim used when OpenTelemetry isn't installed."""
 
         SERVER = "server"
+
+    class _SamplerShim:
+        """Minimal sampler base used when OpenTelemetry isn't installed."""
+
+    class _SpanProcessorShim:
+        """Minimal span-processor base used when OpenTelemetry isn't installed."""
+
+    Sampler = cast(Any, _SamplerShim)
+    SpanProcessor = cast(Any, _SpanProcessorShim)
 
     # Provide a lightweight shim so tests can patch Resource.create
     class _ResourceShim:
@@ -77,6 +88,8 @@ except ImportError:
     SpanProcessor = object  # type: ignore[misc, assignment]
     BatchSpanProcessor = None
     ConsoleSpanExporter = None
+    Decision = None
+    SamplingResult = None
     SimpleSpanProcessor = None
     SpanKind = cast(Any, _SpanKindShim)
     Status = None
@@ -131,6 +144,146 @@ from mcpgateway.utils.trace_context import (  # noqa: E402  # pylint: disable=wr
     primary_team_from_scope,
 )
 from mcpgateway.utils.trace_redaction import sanitize_trace_attribute_value, sanitize_trace_text  # noqa: E402  # pylint: disable=wrong-import-position
+
+_SamplerBase = cast(Any, Sampler)
+_SpanProcessorBase = cast(Any, SpanProcessor)
+
+
+class RequestRootSampler(_SamplerBase):  # type: ignore[misc]
+    """Restrict exported traces to request roots and their descendants."""
+
+    def __init__(self, delegate: Any, system_traces_enabled: bool = False):
+        """Initialize request-root sampling policy.
+
+        Args:
+            delegate: SDK-configured sampler that controls accepted traces.
+            system_traces_enabled: Permit local non-server roots when true.
+        """
+        self._delegate = delegate
+        self._system_traces_enabled = system_traces_enabled
+
+    def should_sample(
+        self,
+        parent_context: Any,
+        trace_id: int,
+        name: str,
+        kind: Any = None,
+        attributes: Any = None,
+        links: Any = None,
+        trace_state: Any = None,
+    ) -> Any:
+        """Apply parent-based request policy before configured sampling.
+
+        Args:
+            parent_context: OpenTelemetry parent context.
+            trace_id: Candidate trace identifier.
+            name: Candidate span name.
+            kind: Candidate span kind.
+            attributes: Candidate span attributes.
+            links: Candidate span links.
+            trace_state: Candidate trace state.
+
+        Returns:
+            SamplingResult: Policy and configured-sampler decision.
+        """
+        parent_span_context = None
+        if trace is not None:
+            parent_span_context = trace.get_current_span(parent_context).get_span_context()
+
+        if parent_span_context is not None and parent_span_context.is_valid and not parent_span_context.trace_flags.sampled:
+            return cast(Any, SamplingResult)(cast(Any, Decision).DROP, trace_state=trace_state)
+
+        has_parent = bool(parent_span_context is not None and parent_span_context.is_valid)
+        is_server_root = not has_parent and kind == SpanKind.SERVER
+        if not has_parent and not is_server_root and not self._system_traces_enabled:
+            return cast(Any, SamplingResult)(cast(Any, Decision).DROP, trace_state=trace_state)
+
+        return self._delegate.should_sample(
+            parent_context=parent_context,
+            trace_id=trace_id,
+            name=name,
+            kind=kind,
+            attributes=attributes,
+            links=links,
+            trace_state=trace_state,
+        )
+
+    def get_description(self) -> str:
+        """Return sampler description.
+
+        Returns:
+            str: Human-readable sampler description.
+        """
+        return f"RequestRootSampler({self._delegate.get_description()})"
+
+
+class RequestRootFilteringSpanProcessor(_SpanProcessorBase):  # type: ignore[misc]
+    """Filter local non-request roots before queueing. RequestRootSampler suppresses their descendants."""
+
+    def __init__(self, delegate: Any, system_traces_enabled: bool = False):
+        """Initialize filtering processor.
+
+        Args:
+            delegate: Downstream span processor.
+            system_traces_enabled: Permit local non-server roots when true.
+        """
+        self._delegate = delegate
+        self._system_traces_enabled = system_traces_enabled
+
+    def on_start(self, span: Any, parent_context: Any = None) -> None:
+        """Attach allowed baggage and forward span start.
+
+        Args:
+            span: Writable span.
+            parent_context: Parent OpenTelemetry context.
+        """
+        if otel_baggage is not None:
+            try:
+                for key, value in _baggage_span_attributes(otel_baggage.get_all()).items():
+                    set_span_attribute(span, key, value)
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                logger.debug("Failed to inject baggage into auto-instrumented span: %s", exc)
+        self._delegate.on_start(span, parent_context)
+
+    def _should_forward(self, span: Any) -> bool:
+        """Return whether downstream processor should receive a span."""
+        parent = getattr(span, "parent", None)
+        is_root = parent is None or not getattr(parent, "is_valid", False)
+        return not (is_root and getattr(span, "kind", None) != SpanKind.SERVER and not self._system_traces_enabled)
+
+    def _on_ending(self, span: Any) -> None:
+        """Forward pre-end notification for an allowed span.
+
+        Args:
+            span: Ending writable span.
+        """
+        if self._should_forward(span):
+            self._delegate._on_ending(span)  # pylint: disable=protected-access
+
+    def on_end(self, span: Any) -> None:
+        """Forward allowed finished spans to downstream processor.
+
+        Args:
+            span: Finished readable span.
+        """
+        if self._should_forward(span):
+            self._delegate.on_end(span)
+
+    def shutdown(self) -> None:
+        """Shut down downstream processor."""
+        self._delegate.shutdown()
+
+    def force_flush(self, timeout_millis: int = 30000) -> bool:
+        """Flush downstream processor.
+
+        Args:
+            timeout_millis: Maximum flush duration in milliseconds.
+
+        Returns:
+            bool: Downstream flush result.
+        """
+        return bool(self._delegate.force_flush(timeout_millis))
+
 
 # Try to import optional exporters
 try:
@@ -573,8 +726,53 @@ def _baggage_span_attributes(baggage_items: Mapping[str, Any]) -> Dict[str, Any]
         if policy.allowed_keys is not None and key not in policy.allowed_keys:
             continue
         attribute_name = f"baggage.{key}" if policy.emit_prefixed else key
-        span_attributes.setdefault(attribute_name, value)
+        span_attributes.setdefault(attribute_name, sanitize_trace_attribute_value(key, value))
     return span_attributes
+
+
+@contextmanager
+def _safe_span_context(name: str, **kwargs: Any) -> Generator[Any, None, None]:
+    """Isolate span lifecycle failures from the wrapped application.
+
+    Args:
+        name: Span name.
+        kwargs: Context and span-kind arguments for the tracer.
+
+    Yields:
+        The active span, or None when span creation fails.
+    """
+    stack = ExitStack()
+    span = None
+    try:
+        # Exception details cross the export boundary only through our sanitizer.
+        tracer = _TRACER
+        if tracer is not None:
+            candidate = tracer.start_as_current_span(name, record_exception=False, set_status_on_exception=False, **kwargs)
+            span = stack.enter_context(candidate)
+    except Exception:
+        logger.debug("Trace span creation failed")
+    try:
+        yield span
+    finally:
+        try:
+            stack.close()
+        except Exception:
+            logger.debug("Trace span completion failed")
+
+
+def _set_span_status(span: Any, status: Any) -> None:
+    """Set telemetry status without changing application control flow.
+
+    Args:
+        span: Active span.
+        status: OpenTelemetry status to record.
+    """
+    try:
+        if StatusCode and status.status_code == StatusCode.OK and getattr(getattr(span, "status", None), "status_code", None) == StatusCode.ERROR:
+            return
+        span.set_status(status)
+    except Exception:
+        logger.debug("Trace status recording failed")
 
 
 def set_span_attribute(span: Any, attribute_name: str, value: Any) -> None:
@@ -585,11 +783,12 @@ def set_span_attribute(span: Any, attribute_name: str, value: Any) -> None:
         attribute_name: Span attribute key.
         value: Attribute value to set.
     """
-    if not span or value is None:
-        return
-    if not _should_emit_span_attribute(attribute_name):
-        return
-    span.set_attribute(attribute_name, sanitize_trace_attribute_value(attribute_name, value))
+    try:
+        if not span or value is None or not _should_emit_span_attribute(attribute_name):
+            return
+        span.set_attribute(attribute_name, sanitize_trace_attribute_value(attribute_name, value))
+    except Exception:
+        logger.debug("Trace attribute recording failed")
 
 
 def _set_pre_sanitized_span_attribute(span: Any, attribute_name: str, value: Any) -> None:
@@ -600,11 +799,12 @@ def _set_pre_sanitized_span_attribute(span: Any, attribute_name: str, value: Any
         attribute_name: Span attribute key.
         value: Pre-sanitized attribute value to set.
     """
-    if not span or value is None:
-        return
-    if not _should_emit_span_attribute(attribute_name):
-        return
-    span.set_attribute(attribute_name, value)
+    try:
+        if not span or value is None or not _should_emit_span_attribute(attribute_name):
+            return
+        span.set_attribute(attribute_name, value)
+    except Exception:
+        logger.debug("Trace attribute recording failed")
 
 
 def _record_sanitized_exception_event(span: Any, exc_type: Optional[type], error_message: str) -> None:
@@ -651,28 +851,34 @@ def set_span_error(
         exc_type: Optional explicit exception type for the failure.
         record_exception: Whether to add a sanitized exception event to the span.
     """
-    if not span:
-        return
+    try:
+        if not span:
+            return
 
-    if isinstance(error, BaseException):
-        error_message = _sanitize_span_exception_message(error)
-        resolved_exc_type = exc_type or type(error)
-    else:
-        error_message = sanitize_for_log(sanitize_trace_text(str(error))).strip() or "Error"
-        resolved_exc_type = exc_type
+        resolved_exc_type = exc_type or (type(error) if isinstance(error, BaseException) else None)
+        try:
+            if isinstance(error, BaseException):
+                error_message = _sanitize_span_exception_message(error)
+            else:
+                error_message = sanitize_for_log(sanitize_trace_text(str(error))).strip() or "Error"
+        except Exception:
+            error_message = "Error details unavailable"
+            logger.debug("Trace error details unavailable")
 
-    if record_exception:
-        _record_sanitized_exception_event(span, resolved_exc_type, error_message)
+        if record_exception:
+            _record_sanitized_exception_event(span, resolved_exc_type, error_message)
 
-    if OTEL_AVAILABLE and Status and StatusCode:
-        span.set_status(Status(StatusCode.ERROR, error_message))
+        if OTEL_AVAILABLE and Status and StatusCode:
+            _set_span_status(span, Status(StatusCode.ERROR, error_message))
 
-    set_span_attribute(span, "error", True)
-    if resolved_exc_type is not None:
-        set_span_attribute(span, "error.type", resolved_exc_type.__name__)
-    _set_pre_sanitized_span_attribute(span, "error.message", error_message)
-    set_span_attribute(span, "langfuse.observation.level", "ERROR")
-    _set_pre_sanitized_span_attribute(span, "langfuse.observation.status_message", error_message)
+        set_span_attribute(span, "error", True)
+        if resolved_exc_type is not None:
+            set_span_attribute(span, "error.type", resolved_exc_type.__name__)
+        _set_pre_sanitized_span_attribute(span, "error.message", error_message)
+        set_span_attribute(span, "langfuse.observation.level", "ERROR")
+        _set_pre_sanitized_span_attribute(span, "langfuse.observation.status_message", error_message)
+    except Exception:
+        logger.debug("Trace error recording failed")
 
 
 def _derive_langfuse_trace_name(name: str, attributes: Dict[str, Any]) -> str:
@@ -798,7 +1004,8 @@ def inject_trace_context_headers(headers: Optional[Mapping[str, str]] = None) ->
                     from mcpgateway.baggage import format_w3c_baggage_header, sanitize_baggage_for_propagation
 
                     # Sanitize baggage before propagation
-                    sanitized_baggage = sanitize_baggage_for_propagation(baggage_dict)
+                    string_baggage = {str(key): str(value) for key, value in baggage_dict.items() if value is not None}
+                    sanitized_baggage = sanitize_baggage_for_propagation(string_baggage)
                     if sanitized_baggage:
                         baggage_header = format_w3c_baggage_header(sanitized_baggage)
                         carrier["baggage"] = baggage_header
@@ -882,17 +1089,21 @@ def call_trace_session(headers: Optional[Mapping[str, Any]], request_trace: Opti
         None while the validated call identifier applies to new spans.
     """
     call_id = None
-    if _should_emit_langfuse_attributes():
-        if request_trace is not None and request_trace.active:
-            call_id = request_trace.call_id
-        else:
-            values = [value for key, value in (headers or {}).items() if key.lower() == "x-call-id"]
-            if len(values) == 1:
-                call_id = values[0]
-        if not isinstance(call_id, str) or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", call_id) is None:
-            call_id = None
-        elif sanitize_trace_attribute_value("langfuse.session.id", call_id) != call_id:
-            call_id = None
+    try:
+        if _should_emit_langfuse_attributes():
+            if request_trace is not None and request_trace.active:
+                call_id = request_trace.call_id
+            else:
+                values = [value for key, value in (headers or {}).items() if key.lower() == "x-call-id"]
+                if len(values) == 1:
+                    call_id = values[0]
+            if not isinstance(call_id, str) or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", call_id) is None:
+                call_id = None
+            elif sanitize_trace_attribute_value("langfuse.session.id", call_id) != call_id:
+                call_id = None
+    except Exception:
+        call_id = None
+        logger.debug("Trace call identifier unavailable")
     token = _call_trace_session_id.set(call_id)
     try:
         yield
@@ -901,7 +1112,15 @@ def call_trace_session(headers: Optional[Mapping[str, Any]], request_trace: Opti
 
 
 class CallSessionSpanProcessor(SpanProcessor):
-    """Attach the current voice call session to automatically instrumented child spans."""
+    """Attach deployment labels and voice call sessions to all recorded spans."""
+
+    def __init__(self, environment: str = "") -> None:
+        """Cache the deployment label for span enrichment.
+
+        Args:
+            environment: Configured deployment label.
+        """
+        self.environment = environment
 
     def on_start(self, span: Any, parent_context: Any = None) -> None:  # pylint: disable=unused-argument
         """Enrich a new span with the request-scoped call identifier.
@@ -910,6 +1129,8 @@ class CallSessionSpanProcessor(SpanProcessor):
             span: Recording span to enrich.
             parent_context: OpenTelemetry parent context, unused.
         """
+        if self.environment:
+            set_span_attribute(span, "langfuse.environment", self.environment)
         call_id = _call_trace_session_id.get()
         if call_id:
             set_span_attribute(span, "langfuse.session.id", call_id)
@@ -941,9 +1162,11 @@ def record_tool_trace_name(server_id: Optional[str], tool_name: str, original_na
         request_trace: Request context carried across an MCP task boundary.
     """
     context = request_trace if request_trace is not None else get_tool_trace_context()
-    if context is None or not context.active or not server_id or not context.span.is_recording():
+    if context is None or not context.active or not server_id or context.span is None:
         return
     try:
+        if not context.span.is_recording():
+            return
         if context.first_call is None:
             if context.server_id != server_id or not isinstance(context.server_name, str) or not context.server_name:
                 return
@@ -991,7 +1214,7 @@ class OpenTelemetryRequestMiddleware:
 
         return getattr(self.app, name)
 
-    async def __call__(self, scope: Mapping[str, Any], receive: Any, send: Any) -> None:
+    async def __call__(self, scope: MutableMapping[str, Any], receive: Any, send: Any) -> None:
         """Handle an ASGI request and create a request-root span when tracing applies.
 
         Args:
@@ -1041,7 +1264,11 @@ class OpenTelemetryRequestMiddleware:
             query_text = str(query_string)
 
         # Sanitize query string to prevent leaking session_id and other sensitive parameters
-        sanitized_query = sanitize_trace_text(query_text) if query_text else None
+        try:
+            sanitized_query = sanitize_trace_text(query_text) if query_text else None
+        except Exception:
+            sanitized_query = None
+            logger.debug("Trace query unavailable")
 
         span_name = f"{method} {path or '/'}"
         span_attributes: Dict[str, Any] = {
@@ -1084,12 +1311,12 @@ class OpenTelemetryRequestMiddleware:
                     set_span_attribute(span, "http.response.status_code", status_code)
                     if OTEL_AVAILABLE and Status and StatusCode:
                         if status_code >= 500:
-                            span.set_status(Status(StatusCode.ERROR))
+                            _set_span_status(span, Status(StatusCode.ERROR))
                         else:
-                            span.set_status(Status(StatusCode.OK))
+                            _set_span_status(span, Status(StatusCode.OK))
             await send(message)
 
-        with call_trace_session(carrier), _TRACER.start_as_current_span(span_name, **start_span_kwargs) as span:
+        with call_trace_session(carrier), _safe_span_context(span_name, **start_span_kwargs) as span:
             # No valid inbound envelope: publish this new root span's context into
             # the ASGI headers so downstream raw-header copies (session-task handoff,
             # affinity envelopes, trusted-internal dispatch) carry the trace and
@@ -1126,22 +1353,20 @@ class OpenTelemetryRequestMiddleware:
                 except Exception as exc:
                     logger.debug("Failed to inject baggage into request span: %s", exc)
 
-            request_trace = ToolTraceContext(span, call_id=_call_trace_session_id.get())
+            request_trace = ToolTraceContext(span, call_id=_call_trace_session_id.get()) if span is not None else None
             scope.setdefault("state", {})["tool_trace_context"] = request_trace
             context_token = _tool_trace_context.set(request_trace)
             try:
                 await self.app(scope, receive, _send_with_span_status)
                 if span is not None and "status" not in status_code_holder and OTEL_AVAILABLE and Status and StatusCode:
-                    span.set_status(Status(StatusCode.OK))
+                    _set_span_status(span, Status(StatusCode.OK))
             except Exception as exc:
                 if span is not None:
-                    error_message = _sanitize_span_exception_message(exc)
                     set_span_error(span, exc, record_exception=True)
-                    if OTEL_AVAILABLE and Status and StatusCode:
-                        span.set_status(Status(StatusCode.ERROR, error_message))
                 raise
             finally:
-                request_trace.active = False
+                if request_trace is not None:
+                    request_trace.active = False
                 _tool_trace_context.reset(context_token)
 
 
@@ -1220,12 +1445,14 @@ def init_telemetry() -> Optional[Any]:
         else:
             provider = cast(Any, TracerProvider)()
 
+        provider.sampler = RequestRootSampler(provider.sampler, system_traces_enabled=cfg.otel_system_traces_enabled)
+
         # Register provider if trace API is present
         if trace is not None and hasattr(trace, "set_tracer_provider"):
             cast(Any, trace).set_tracer_provider(provider)
 
         if _should_emit_langfuse_attributes():
-            provider.add_span_processor(CallSessionSpanProcessor())
+            provider.add_span_processor(CallSessionSpanProcessor(environment=_get_deployment_environment()))
 
         # Create a custom span processor to copy resource attributes to span attributes
         # This is needed because Arize requires arize.project.name as a span attribute
@@ -1337,6 +1564,7 @@ def init_telemetry() -> Optional[Any]:
                     max_export_batch_size=cfg.otel_bsp_max_export_batch_size,
                     schedule_delay_millis=cfg.otel_bsp_schedule_delay,
                 )
+            span_processor = RequestRootFilteringSpanProcessor(span_processor, system_traces_enabled=cfg.otel_system_traces_enabled)
             provider.add_span_processor(span_processor)
 
         # Get tracer
@@ -1348,11 +1576,12 @@ def init_telemetry() -> Optional[Any]:
             class _NoopTracer:
                 """No-op tracer used when OpenTelemetry API isn't available."""
 
-                def start_as_current_span(self, _name: str):  # type: ignore[override]
+                def start_as_current_span(self, _name: str, **_kwargs: Any):  # type: ignore[override]
                     """Return a no-op context manager for span creation.
 
                     Args:
                         _name: Span name (ignored in no-op implementation).
+                        _kwargs: Tracing options ignored by the no-op implementation.
 
                     Returns:
                         contextlib.AbstractContextManager: A null context.
@@ -1543,8 +1772,8 @@ def create_span(name: str, attributes: Optional[Dict[str, Any]] = None) -> Any:
             trace_name_attributes = {key: sanitize_trace_attribute_value(key, value) for key, value in attributes.items() if _should_emit_span_attribute(key)}
             attributes.setdefault("langfuse.trace.name", _derive_langfuse_trace_name(name, trace_name_attributes))
             attributes.setdefault("langfuse.observation.level", "DEFAULT")
-    except Exception as exc:
-        logger.debug("Failed to auto-inject trace context into span: %s", exc)
+    except Exception:
+        logger.debug("Failed to auto-inject trace context into span")
 
     # Auto-inject baggage as span attributes
     try:
@@ -1556,69 +1785,63 @@ def create_span(name: str, attributes: Optional[Dict[str, Any]] = None) -> Any:
                     attributes.setdefault(key, value)
                 logger.debug(f"Injected {len(baggage_attrs)} baggage entries as span attributes")
     except Exception:
-        logger.warning("Failed to inject baggage into span attributes", exc_info=True)
+        logger.warning("Failed to inject baggage into span attributes")
 
     # Start span and return the context manager
-    span_context = _TRACER.start_as_current_span(name)
+    span_context = _safe_span_context(name)
 
-    # If we have attributes and the span context is entered, set them
-    if attributes:
-        # We need to set attributes after entering the context
-        # So we'll create a wrapper that sets attributes
-        class SpanWithAttributes:
-            """Context manager wrapper that adds attributes to a span.
+    class SpanWithAttributes:
+        """Context manager wrapper that adds attributes to a span.
 
-            This class wraps an OpenTelemetry span context and adds attributes
-            when entering the context. It also handles exception recording when
-            exiting the context.
+        This class wraps an OpenTelemetry span context and adds attributes
+        when entering the context. It also handles exception recording when
+        exiting the context.
+        """
+
+        def __init__(self, span_context: Any, attrs: Dict[str, Any]):
+            """Initialize the span wrapper.
+
+            Args:
+                span_context: The OpenTelemetry span context to wrap.
+                attrs: Dictionary of attributes to add to the span.
             """
+            self.span_context: Any = span_context
+            self.attrs: Dict[str, Any] = attrs
+            self.span: Any = None
 
-            def __init__(self, span_context: Any, attrs: Dict[str, Any]):
-                """Initialize the span wrapper.
+        def __enter__(self) -> Any:
+            """Enter the context and set span attributes.
 
-                Args:
-                    span_context: The OpenTelemetry span context to wrap.
-                    attrs: Dictionary of attributes to add to the span.
-                """
-                self.span_context: Any = span_context
-                self.attrs: Dict[str, Any] = attrs
-                self.span: Any = None
+            Returns:
+                The OpenTelemetry span with attributes set.
+            """
+            self.span = self.span_context.__enter__()
+            if self.attrs and self.span:
+                for key, value in self.attrs.items():
+                    if value is not None:  # Skip None values
+                        set_span_attribute(self.span, key, value)
+            return self.span
 
-            def __enter__(self) -> Any:
-                """Enter the context and set span attributes.
+        def __exit__(self, exc_type: Optional[type], exc_val: Optional[BaseException], exc_tb: Any) -> Any:
+            """Exit the context and record any exceptions.
 
-                Returns:
-                    The OpenTelemetry span with attributes set.
-                """
-                self.span = self.span_context.__enter__()
-                if self.attrs and self.span:
-                    for key, value in self.attrs.items():
-                        if value is not None:  # Skip None values
-                            set_span_attribute(self.span, key, value)
-                return self.span
+            Args:
+                exc_type: The exception type if an exception occurred.
+                exc_val: The exception value if an exception occurred.
+                exc_tb: The exception traceback if an exception occurred.
 
-            def __exit__(self, exc_type: Optional[type], exc_val: Optional[BaseException], exc_tb: Any) -> Any:
-                """Exit the context and record any exceptions.
+            Returns:
+                The result of the wrapped span context's __exit__ method.
+            """
+            # Record exception if one occurred
+            if exc_type is not None and self.span:
+                set_span_error(self.span, exc_val or exc_type.__name__, exc_type=exc_type, record_exception=True)
+            elif self.span:
+                if OTEL_AVAILABLE and Status and StatusCode:
+                    _set_span_status(self.span, Status(StatusCode.OK))
+            return self.span_context.__exit__(exc_type, exc_val, exc_tb)
 
-                Args:
-                    exc_type: The exception type if an exception occurred.
-                    exc_val: The exception value if an exception occurred.
-                    exc_tb: The exception traceback if an exception occurred.
-
-                Returns:
-                    The result of the wrapped span context's __exit__ method.
-                """
-                # Record exception if one occurred
-                if exc_type is not None and self.span:
-                    set_span_error(self.span, exc_val or exc_type.__name__, exc_type=exc_type, record_exception=True)
-                elif self.span:
-                    if OTEL_AVAILABLE and Status and StatusCode:
-                        self.span.set_status(Status(StatusCode.OK))
-                return self.span_context.__exit__(exc_type, exc_val, exc_tb)
-
-        return SpanWithAttributes(span_context, attributes)
-
-    return span_context
+    return SpanWithAttributes(span_context, attributes)
 
 
 def create_child_span(name: str, attributes: Optional[Dict[str, Any]] = None) -> Any:

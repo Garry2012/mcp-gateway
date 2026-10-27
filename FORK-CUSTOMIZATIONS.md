@@ -6,11 +6,20 @@ This repository (`Garry2012/mcp-gateway`) is a fork of
 The fork tracks upstream as closely as possible. It carries only the divergences below.
 Keep UI changes limited to the functional fixes listed below. Submit fixes upstream and avoid branding or cosmetic changes.
 
-Last updated: **2026-10-14**.
+Last updated: **2026-10-26**.
 
 ## Syncing with upstream
 
-The 2026-10-14 integration targets upstream `51a4ee414`. It retains the divergences below.
+The 2026-10-26 integration targets upstream `85dabf0be` (1.1.0). It retains the divergences below.
+The published baseline matches deployed source `0cdfa2109`; temporary LLM Chat changes remain excluded.
+
+Upstream rewrites historical commits. The ancestry reconciliation maps `51a4ee414` to `2dd1c487e` and accepts three example-redaction changes.
+The subsequent merge imports the 23 newer commits without replaying equivalent history.
+
+Request-root tracing suppresses background spans by default. Preserve HTTP request roots, call-ID grouping, and tool payload attributes.
+Keep `OTEL_HTTPX_INSTRUMENTATION_ENABLED=true` in the healthcare profile for HTTP trace propagation.
+The per-user MCP-server rate-limiter plugin remains disabled unless explicitly configured.
+The healthcare profile uses the EU Langfuse endpoint and its existing Key Vault header reference.
 The healthcare profile pins both MCP protocol modes to `legacy` to preserve deployed handshake behavior.
 Automatic negotiation fails discovery against an older sample server that omits modern cache metadata.
 Test modern negotiation separately before changing this profile.
@@ -32,6 +41,8 @@ Preserve upstream secret-scan audit decisions when the filename and finding hash
 
 The live E2E module keeps the synchronous Playwright resource-renaming test after the asynchronous MCP tests.
 It uses the SDK v2 `is_error` property and accepts both existing detached-tool denial messages.
+Pagination tests inspect response headers to distinguish stateful session isolation from stateless scope reuse.
+Both modes retain team, permission, anonymous-access, and revoked-membership denial checks.
 Preserve these test compatibility fixes until upstream includes them.
 
 ### Upstream reset: 2026-10-02

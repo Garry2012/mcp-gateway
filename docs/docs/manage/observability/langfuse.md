@@ -188,6 +188,8 @@ Each span includes:
 | `OTEL_CAPTURE_IDENTITY_ATTRIBUTES` | Force-enable or disable user/team identity enrichment | auto in normal runtime, `true` in local Langfuse compose overlay |
 | `OTEL_CAPTURE_INPUT_SPANS` | Comma-separated allowlist of span names allowed to capture observation input payloads | empty in normal runtime, `tool.invoke,prompt.render,llm.proxy,a2a.invoke` in local Langfuse compose overlay |
 | `OTEL_CAPTURE_OUTPUT_SPANS` | Comma-separated allowlist of span names allowed to capture observation output payloads | empty |
+| `OTEL_TOOL_RESULT_METADATA_FIELDS` | Opt-in result codes: `outcome,nextStep`; requires `tool.invoke` output capture | empty |
+| `DEPLOYMENT_ENV` | Environment for resources and Langfuse spans; falls back to `ENVIRONMENT` | `development` |
 | `OTEL_REDACT_FIELDS` | Structured-field and free-text redaction keys used before export | `password,secret,token,...` |
 | `OTEL_MAX_TRACE_PAYLOAD_SIZE` | Max serialized input/output payload size in characters | `32768` |
 
@@ -212,6 +214,46 @@ Each span includes:
     - Duration and latency
     - Service attributes (deployment environment, namespace)
     - Error details if the invocation failed
+
+### Environment and tool results
+
+Set `DEPLOYMENT_ENV` to label gateway request, manual and instrumented spans consistently.
+Langfuse attributes must be enabled. The Azure deployment scripts default this label to `production`.
+Use a lowercase label of at most 40 characters, containing letters, numbers, hyphens or underscores.
+The label must not start with `langfuse`.
+See [Langfuse environments](https://langfuse.com/docs/observability/features/environments).
+These are Langfuse label requirements; the gateway does not validate their format.
+This label does not change the authentication setting `ENVIRONMENT`.
+Without `DEPLOYMENT_ENV`, the existing `ENVIRONMENT` fallback now also labels automatic spans.
+
+An MCP result with `isError=true` marks `tool.invoke` and its direct upstream request span as errors.
+The status message is `MCP tool returned an error`; it contains no upstream payload.
+A valid business result such as `COULD_NOT_CHECK` remains a successful MCP response.
+Its result code can distinguish it from `AVAILABLE` without changing tool behavior.
+
+To expose selected result codes as observation metadata, configure:
+
+```bash
+OTEL_CAPTURE_OUTPUT_SPANS=tool.invoke
+OTEL_TOOL_RESULT_METADATA_FIELDS=outcome,nextStep
+```
+
+Preserve any other required entries in your existing output-capture allowlist.
+The gateway extracts codes from the already-redacted, size-limited output of successful MCP calls.
+It prefers `structuredContent` and otherwise reads a single JSON text block.
+It does not search nested wrappers such as `structuredContent.result`.
+It exports the selected top-level fields as `tool.result.outcome` and `tool.result.nextStep`, plus
+`langfuse.observation.metadata.outcome` and `langfuse.observation.metadata.nextStep` when Langfuse attributes are enabled.
+These map to observation metadata keys `outcome` and `nextStep` for
+[Langfuse metadata filtering](https://langfuse.com/docs/observability/features/metadata).
+
+Each code must start with a letter and contain at most 64 letters, digits, underscores, colons or hyphens.
+The gateway omits masked, malformed, truncated or ambiguous values, nested fields and free-text explanations.
+This format check does not replace your redaction policy.
+Disabling output capture, masking the whole output attribute, or clearing
+`OTEL_TOOL_RESULT_METADATA_FIELDS` disables metadata extraction.
+Existing input/output capture and redaction settings otherwise keep their behavior.
+Restart the gateway after changing these settings. No MCP schema refresh is required.
 
 ### Viewing Users, Sessions, and Generations
 

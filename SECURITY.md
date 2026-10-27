@@ -1,6 +1,6 @@
 # 🔐 Security Policy
 
-**Current Version: 1.0.11**
+**Current Version: 1.1.0**
 
 
 ### Admin UI is Development-Only
@@ -113,7 +113,7 @@ Our security toolchain includes **40+ different security and quality tools**, ea
 - **Go Security**: gosec for Go static security analysis, golangci-lint with security rules, govulncheck for Go vulnerability database checking
 - **Rust Security**: cargo audit for Rust dependency vulnerability scanning, cargo clippy for Rust linting
 - **Shell Security**: shellcheck for shell script security and correctness linting
-- **Web & Frontend Security**: ESLint, HTMLHint, Stylelint, retire.js for known-vulnerable JS library detection, nodejsscan for JavaScript/Node.js security vulnerability scanning, npm audit for package vulnerabilities
+- **Web & Frontend Security**: ESLint, HTMLHint, Biome (CSS), retire.js for known-vulnerable JS library detection, nodejsscan for JavaScript/Node.js security vulnerability scanning, npm audit for package vulnerabilities
 - **Code Quality & Best Practices**: Interrogate for docstring coverage
 - **Code Modernization**: pyupgrade for syntax modernization to latest Python versions
 - **AI Content Integrity**: Pre-commit hooks preventing AI-generated artifacts (hallucinated citations, stock phrases, placeholder references, malformed code fences)
@@ -683,7 +683,7 @@ flowchart TD
     X --> X4[Vulnerability Assessment]
 
     Y --> Y1[htmlhint - HTML Validation]
-    Y --> Y2[stylelint - CSS Security]
+    Y --> Y2[Biome - CSS Linting]
     Y --> Y3[eslint - JavaScript Security]
     Y --> Y4[retire.js - JS Library Vulnerabilities]
     Y --> Y5[npm audit - Package Vulnerabilities]
@@ -786,6 +786,6 @@ This process ensures that security patches not only address vulnerabilities but 
 
 ## 🛡️ Reporting a Vulnerability
 
-Report a security issue via e-mail or anonymous form to the IBM Product Security Incident Response Team (PSIRT) following the guidelines under the [IBM Security Vulnerability Management](https://www.ibm.com/support/pages/ibm-security-vulnerability-management) pages.
+Report a security issue to the IBM Product Security Incident Response Team (PSIRT) via https://hackerone.com/ibm. More details can be found under the IBM Security Vulnerability Management pages.
 
 Thank you for helping to keep the project secure!

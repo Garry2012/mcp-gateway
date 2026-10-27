@@ -120,31 +120,19 @@ For detailed configuration options, see `plugins/span_attribute_customizer/READM
 | `url.path`                | `"/mcp"`                             | URL path               |
 | `url.full`                | `"https://mcp.example.com:8080/mcp"` | Full sanitized URL     |
 
-### MCP Client Initialize Attributes
-
-| Attribute                | Example Value               | Description         |
-| ------------------------ | --------------------------- | ------------------- |
-| `contextforge.transport` | `"sse"`, `"streamablehttp"` | Transport type      |
-| `contextforge.runtime`   | `"python"`                  | Runtime environment |
-
 ### MCP Client Request Attributes
 
-| Attribute                 | Example Value    | Description     |
-| ------------------------- | ---------------- | --------------- |
-| `mcp.tool.name`           | `"get_time"`     | MCP tool name   |
-| `contextforge.tool.id`    | `"time-tool-id"` | Tool identifier |
-| `contextforge.gateway_id` | `"gw-123"`       | Gateway ID      |
-| `contextforge.runtime`    | `"python"`       | Runtime         |
+| Attribute | Example Value | Description |
+| --- | --- | --- |
+| `mcp.tool.name` | `"get_time"` | MCP tool name |
+| `contextforge.tool.id` | `"time-tool-id"` | Tool identifier |
+| `contextforge.gateway_id` | `"gw-123"` | Gateway ID |
+| `contextforge.runtime` | `"python"` | Runtime |
+| `upstream.response.success` | `true` | Returned MCP result has no error flag |
 
-### MCP Client Response Attributes
-
-| Attribute                   | Example Value    | Description                |
-| --------------------------- | ---------------- | -------------------------- |
-| `mcp.tool.name`             | `"get_time"`     | Tool name                  |
-| `contextforge.tool.id`      | `"time-tool-id"` | Tool ID                    |
-| `contextforge.gateway_id`   | `"gw-123"`       | Gateway ID                 |
-| `contextforge.runtime`      | `"python"`       | Runtime                    |
-| `upstream.response.success` | `true`           | Whether upstream succeeded |
+The success attribute appears on `mcp.client.request` after a result returns.
+It describes the MCP error flag, not a business outcome such as appointment availability.
+Direct-proxy calls do not include `contextforge.tool.id` when they bypass the tool catalog.
 
 ---
 
@@ -408,12 +396,10 @@ For detailed configuration options, see `plugins/span_attribute_customizer/READM
 - Lookup: `tool.name`, `tool.id`, `tool.integration_type`
 - Gateway Call: `tool.name`, `tool.id`, `tool.integration_type`
 
-### MCP Protocol (15 attributes)
+### MCP Protocol
 
 - Call: `mcp.tool.name`, `contextforge.tool.id`, `contextforge.gateway_id`, `contextforge.runtime`, `contextforge.transport`, `network.protocol.name`, `server.address`, `server.port`, `url.path`, `url.full`
-- Initialize: `contextforge.transport`, `contextforge.runtime`
-- Request: `mcp.tool.name`, `contextforge.tool.id`, `contextforge.gateway_id`, `contextforge.runtime`
-- Response: `mcp.tool.name`, `contextforge.tool.id`, `contextforge.gateway_id`, `contextforge.runtime`, `upstream.response.success`
+- Request: `mcp.tool.name`, `contextforge.tool.id`, `contextforge.gateway_id`, `contextforge.runtime`, `upstream.response.success`
 
 ### Plugin Framework (13 attributes)
 

@@ -7,7 +7,6 @@ Tests for observability module.
 """
 
 # Standard
-import inspect
 import logging
 import os
 from unittest.mock import MagicMock, patch
@@ -19,18 +18,14 @@ import pytest
 from mcpgateway import observability
 from mcpgateway.config import get_settings
 from mcpgateway.observability import (
-    BaggageSpanAttributePolicy,
     configure_baggage_span_attribute_policy,
     OpenTelemetryRequestMiddleware,
     create_span,
-    extract_baggage_span_attribute_policy,
     inject_trace_context_headers,
     init_telemetry,
     otel_context_active,
     otel_tracing_enabled,
-    trace_operation,
 )
-from mcpgateway.utils.trace_context import clear_trace_context, set_trace_context_from_teams, set_trace_session_id
 
 
 class TestObservability:
@@ -55,6 +50,7 @@ class TestObservability:
             "LANGFUSE_PUBLIC_KEY",
             "LANGFUSE_SECRET_KEY",
             "OTEL_COPY_RESOURCE_ATTRS_TO_SPANS",
+            "OTEL_SYSTEM_TRACES_ENABLED",
         ]
         for var in env_vars:
             os.environ.pop(var, None)
@@ -87,9 +83,10 @@ class TestObservability:
         result = init_telemetry()
         assert result is None
 
-    def test_observability_disabled_without_otlp_endpoint(self):
+    def test_observability_disabled_without_otlp_endpoint(self, monkeypatch):
         """Test that observability is disabled when OTLP endpoint is not configured."""
         self._enable_observability()
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
         os.environ["OTEL_TRACES_EXPORTER"] = "otlp"
         get_settings.cache_clear()
         result = init_telemetry()
@@ -830,3 +827,206 @@ class TestRequestMiddlewareTraceEnvelope:
             await middleware(scope, receive, send)
 
         assert captured["headers"] == original_headers
+
+
+@pytest.fixture
+def failure_tracing(monkeypatch):
+    """Create a real isolated tracer for telemetry failure injection."""
+    sdk = pytest.importorskip("opentelemetry.sdk.trace")
+    from opentelemetry import context, trace
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    exporter = InMemorySpanExporter()
+    provider = sdk.TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = provider.get_tracer("failure-isolation")
+    monkeypatch.setattr(observability, "_TRACER", tracer)
+    monkeypatch.setenv("OTEL_EMIT_LANGFUSE_ATTRIBUTES", "false")
+    get_settings.cache_clear()
+    token = context.attach(context.Context())
+    try:
+        yield provider, tracer, exporter, trace
+    finally:
+        context.detach(token)
+        provider.shutdown()
+        get_settings.cache_clear()
+
+
+def _break_tracing(phase, provider, tracer, monkeypatch):
+    """Inject a telemetry failure without replacing application execution."""
+    from opentelemetry.sdk.trace import Span, SpanProcessor
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("private-probe")
+
+    if phase == "start":
+        monkeypatch.setattr(tracer, "start_as_current_span", fail)
+    elif phase == "attribute":
+        monkeypatch.setattr(Span, "set_attribute", fail)
+    elif phase == "redaction":
+        monkeypatch.setattr(observability, "sanitize_trace_attribute_value", fail)
+    elif phase == "status":
+        monkeypatch.setattr(Span, "set_status", fail)
+    elif phase == "error-redaction":
+        monkeypatch.setattr(observability, "_sanitize_span_exception_message", fail)
+    elif phase == "query-redaction":
+        monkeypatch.setattr(observability, "sanitize_trace_text", fail)
+    elif phase == "end":
+
+        class FailingProcessor(SpanProcessor):
+            def on_end(self, span):
+                fail()
+
+        provider.add_span_processor(FailingProcessor())
+
+
+@pytest.mark.parametrize("phase", ["start", "attribute", "redaction", "status", "end"])
+def test_manual_tracing_failure_preserves_result(failure_tracing, monkeypatch, caplog, phase):
+    """Telemetry failures cannot prevent the body or replace its result."""
+    provider, tracer, exporter, trace = failure_tracing
+    _break_tracing(phase, provider, tracer, monkeypatch)
+    calls = []
+    caplog.set_level(logging.DEBUG, logger="mcpgateway.observability")
+
+    def invoke():
+        with create_span("tool.invoke", {"probe": "value"}):
+            calls.append("executed")
+            return {"result": "unchanged"}
+
+    assert invoke() == {"result": "unchanged"}
+    assert calls == ["executed"]
+    if phase != "start":
+        assert [span.name for span in exporter.get_finished_spans()] == ["tool.invoke"]
+    assert not trace.get_current_span().get_span_context().is_valid
+    assert "private-probe" not in caplog.text
+
+
+@pytest.mark.parametrize("phase", ["error-redaction", "status", "end"])
+def test_manual_tracing_preserves_original_error(failure_tracing, monkeypatch, caplog, phase):
+    """Error reporting cannot replace application errors or export raw details."""
+    provider, tracer, exporter, trace = failure_tracing
+    _break_tracing(phase, provider, tracer, monkeypatch)
+    original = ValueError("password=private-probe")
+    caplog.set_level(logging.DEBUG, logger="mcpgateway.observability")
+
+    with pytest.raises(ValueError) as caught:
+        with create_span("tool.invoke", {"probe": "value"}):
+            raise original
+
+    assert caught.value is original
+    assert not trace.get_current_span().get_span_context().is_valid
+    spans = exporter.get_finished_spans()
+    assert len(spans) == 1
+    if phase == "error-redaction":
+        assert spans[0].status.status_code == trace.StatusCode.ERROR
+        assert spans[0].attributes["error.type"] == "ValueError"
+        assert spans[0].attributes["error.message"] == "Error details unavailable"
+    exported = " ".join(span.to_json() for span in spans)
+    assert "private-probe" not in exported + caplog.text
+
+
+def test_trace_teardown_preserves_cancellation(failure_tracing, monkeypatch):
+    """A teardown failure cannot swallow cancellation or replace its identity."""
+    import asyncio
+
+    provider, tracer, exporter, trace = failure_tracing
+    _break_tracing("end", provider, tracer, monkeypatch)
+    cancelled = asyncio.CancelledError()
+    with pytest.raises(asyncio.CancelledError) as caught:
+        with create_span("tool.invoke", {"probe": "value"}):
+            raise cancelled
+    assert caught.value is cancelled
+    assert not trace.get_current_span().get_span_context().is_valid
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["start", "attribute", "redaction", "status", "end", "query-redaction"])
+async def test_request_tracing_failure_preserves_response(failure_tracing, monkeypatch, caplog, phase):
+    """Request tracing failures preserve one application call and its HTTP response."""
+    provider, tracer, exporter, trace = failure_tracing
+    _break_tracing(phase, provider, tracer, monkeypatch)
+    messages = []
+    calls = []
+    caplog.set_level(logging.DEBUG, logger="mcpgateway.observability")
+
+    async def app(scope, receive, send):
+        with create_span("tool.invoke", {"probe": "value"}):
+            calls.append("executed")
+            await send({"type": "http.response.start", "status": 403, "headers": []})
+            await send({"type": "http.response.body", "body": b"denied"})
+
+    async def receive():
+        return {"type": "http.request", "body": b""}
+
+    async def send(message):
+        messages.append(message)
+
+    scope = {"type": "http", "method": "POST", "path": "/mcp", "headers": [], "query_string": b"password=private-probe"}
+    await OpenTelemetryRequestMiddleware(app)(scope, receive, send)
+    assert calls == ["executed"]
+    assert messages == [{"type": "http.response.start", "status": 403, "headers": []}, {"type": "http.response.body", "body": b"denied"}]
+    if phase != "start":
+        spans = {span.name: span for span in exporter.get_finished_spans()}
+        assert set(spans) == {"POST /mcp", "tool.invoke"}
+        assert spans["tool.invoke"].parent.span_id == spans["POST /mcp"].context.span_id
+    assert not trace.get_current_span().get_span_context().is_valid
+    assert "private-probe" not in caplog.text
+
+
+def test_call_session_redaction_failure_drops_label(failure_tracing, monkeypatch, caplog):
+    """A failed call-ID sanitizer drops the label and preserves request execution."""
+    provider, tracer, exporter, trace = failure_tracing
+    monkeypatch.setenv("OTEL_EMIT_LANGFUSE_ATTRIBUTES", "true")
+    get_settings.cache_clear()
+    _break_tracing("redaction", provider, tracer, monkeypatch)
+    with observability.call_trace_session({"X-Call-Id": "private-probe"}):
+        with create_span("tool.invoke"):
+            assert observability._call_trace_session_id.get() is None
+    assert exporter.get_finished_spans()
+    assert "private-probe" not in " ".join(span.to_json() for span in exporter.get_finished_spans()) + caplog.text
+    assert observability._call_trace_session_id.get() is None
+
+
+@pytest.mark.asyncio
+async def test_request_error_redaction_preserves_original_error(failure_tracing, monkeypatch, caplog):
+    """A request error remains unchanged when sanitizing its trace details fails."""
+    provider, tracer, exporter, trace = failure_tracing
+    _break_tracing("error-redaction", provider, tracer, monkeypatch)
+    original = ValueError("password=private-probe")
+
+    async def app(scope, receive, send):
+        raise original
+
+    with pytest.raises(ValueError) as caught:
+        await OpenTelemetryRequestMiddleware(app)({"type": "http", "method": "POST", "path": "/mcp", "headers": []}, None, None)
+    assert caught.value is original
+    assert not trace.get_current_span().get_span_context().is_valid
+    assert exporter.get_finished_spans()
+    assert "private-probe" not in " ".join(span.to_json() for span in exporter.get_finished_spans()) + caplog.text
+
+
+def test_baggage_failure_omits_raw_error(failure_tracing, monkeypatch, caplog):
+    """Baggage enrichment failures preserve spans and omit raw error details."""
+    provider, tracer, exporter, trace = failure_tracing
+    caplog.set_level(logging.DEBUG, logger="mcpgateway.observability")
+
+    def fail():
+        raise ValueError("private-probe")
+
+    monkeypatch.setattr(observability.otel_baggage, "get_all", fail)
+    with create_span("tool.invoke"):
+        pass
+    assert [span.name for span in exporter.get_finished_spans()] == ["tool.invoke"]
+    assert "Failed to inject baggage" in caplog.text
+    assert "private-probe" not in caplog.text
+
+
+def test_explicit_error_status_survives_successful_context_exit(failure_tracing):
+    """Returned MCP errors retain ERROR status even when no exception escapes."""
+    _provider, _tracer, exporter, _trace = failure_tracing
+    with create_span("tool.invoke") as span:
+        observability.set_span_error(span, "MCP tool returned an error")
+    finished = exporter.get_finished_spans()[0]
+    assert finished.status.status_code == observability.StatusCode.ERROR
+    assert finished.attributes["error"] is True
