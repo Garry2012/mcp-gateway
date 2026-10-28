@@ -219,12 +219,12 @@ az() {{
     assert all("--assignee-object-id gateway-identity --assignee-principal-type ServicePrincipal" in line for line in vault_grants)
 
 
-def test_healthcare_deployment_preserves_protocol_and_session_behavior(tmp_path):
-    """Keep existing MCP handshakes and eight-hour sessions during upstream updates."""
+def test_healthcare_deployment_accepts_modern_clients_and_preserves_upstream_handshakes(tmp_path):
+    """Accept both inbound eras while preserving upstream handshakes and dashboard sessions."""
     result, calls = run_deploy(tmp_path, DEPLOY_PROFILE="profiles/healthcare-rg.env")
     assert result.returncode == 0, result.stderr
     update = next(call for call in calls if call[:2] == ["containerapp", "update"])
-    for setting in ("MCP_CLIENT_CONNECT_MODE=legacy", "MCP_INBOUND_PROTOCOL_MODE=legacy", "TOKEN_EXPIRY=480", "TOKEN_IDLE_TIMEOUT=480"):
+    for setting in ("MCP_CLIENT_CONNECT_MODE=legacy", "MCP_INBOUND_PROTOCOL_MODE=auto", "TOKEN_EXPIRY=480", "TOKEN_IDLE_TIMEOUT=480"):
         assert setting in update
 
 
