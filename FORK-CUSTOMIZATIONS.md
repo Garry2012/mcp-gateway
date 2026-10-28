@@ -6,7 +6,7 @@ This repository (`Garry2012/mcp-gateway`) is a fork of
 The fork tracks upstream as closely as possible. It carries only the divergences below.
 Keep UI changes limited to the functional fixes listed below. Submit fixes upstream and avoid branding or cosmetic changes.
 
-Last updated: **2026-10-26**.
+Last updated: **2026-10-28**.
 
 ## Syncing with upstream
 
@@ -20,9 +20,12 @@ Request-root tracing suppresses background spans by default. Preserve HTTP reque
 Keep `OTEL_HTTPX_INSTRUMENTATION_ENABLED=true` in the healthcare profile for HTTP trace propagation.
 The per-user MCP-server rate-limiter plugin remains disabled unless explicitly configured.
 The healthcare profile uses the EU Langfuse endpoint and its existing Key Vault header reference.
-The healthcare profile pins both MCP protocol modes to `legacy` to preserve deployed handshake behavior.
-Automatic negotiation fails discovery against an older sample server that omits modern cache metadata.
-Test modern negotiation separately before changing this profile.
+The healthcare profile accepts both inbound protocol eras with `MCP_INBOUND_PROTOCOL_MODE=auto`.
+It keeps `MCP_CLIENT_CONNECT_MODE=legacy` for upstream servers and LLM Chat.
+Some upstream servers reject modern discovery or omit its required cache metadata.
+The current voice client retains its `2025-11-25` handshake. Modern clients can use `2026-07-28` discovery.
+Restore `MCP_INBOUND_PROTOCOL_MODE=legacy` to roll back inbound acceptance.
+This configuration does not enable upstream session reuse or change upstream protocol negotiation.
 
 Upstream now resolves exact tool names first and permits an original-name fallback only when one accessible tool matches.
 A virtual-server request cannot also select an upstream through `X-Context-Forge-Gateway-Id`.
@@ -102,7 +105,7 @@ FastMCP client therefore declines MCP elicitation requests (`_decline_elicitatio
 `MCPAdapter` turns them into a LangGraph interrupt and the chat returns an empty answer.
 
 LLM Chat uses `MCP_CLIENT_CONNECT_MODE` for its FastMCP connections, including external targets.
-The healthcare profile sets `legacy`, so chat skips the rejected modern discovery probe.
+The healthcare profile keeps outbound mode at `legacy`, so chat uses the existing initialization handshake.
 Other deployments retain the setting's `auto` default.
 
 **Merge guidance:** when upstream fixes #7090, take upstream's version and drop this divergence.

@@ -40,6 +40,10 @@ import uuid
 
 # Third-Party
 import httpx
+import httpx2
+from mcp import Client
+from mcp.client.streamable_http import streamable_http_client
+from mcp_types.methods import validate_server_result
 import pytest
 
 # First-Party
@@ -162,6 +166,21 @@ def test_auto_mode_serves_modern_discover() -> None:
     assert resp.status_code == 200, f"auto mode rejected {MODERN_PROTOCOL_VERSION}: {resp.status_code} {resp.text[:300]}"
     result = _jsonrpc_payload(resp)["result"]
     assert MODERN_PROTOCOL_VERSION in result["supportedVersions"], f"server/discover omitted {MODERN_PROTOCOL_VERSION}: {result}"
+    validate_server_result("server/discover", MODERN_PROTOCOL_VERSION, result)
+
+
+@skip_unless_auto
+@pytest.mark.asyncio
+async def test_auto_mode_preserves_catalog_across_client_eras() -> None:
+    """Serve identical tool contracts through legacy and modern SDK clients."""
+    catalogs = []
+    for mode, expected_version in (("legacy", "2025-11-25"), ("auto", MODERN_PROTOCOL_VERSION)):
+        async with httpx2.AsyncClient(headers={"Authorization": f"Bearer {_admin_jwt()}"}) as http_client:
+            async with Client(streamable_http_client(MCP_URL, http_client=http_client), mode=mode) as client:
+                assert client.session.protocol_version == expected_version
+                listing = await client.list_tools()
+                catalogs.append(sorted((tool.model_dump(by_alias=True, exclude_none=True) for tool in listing.tools), key=lambda tool: tool["name"]))
+    assert catalogs[0] == catalogs[1]
 
 
 @skip_unless_legacy
