@@ -8257,6 +8257,8 @@ def _gateway_test_endpoint_url(base_url: str, path_suffix: str) -> str:
     Returns:
         The base URL with ``path_suffix`` appended to its path component.
     """
+    if not path_suffix:
+        return base_url
     parsed = urlparse(base_url)
     joined_path = (parsed.path.rstrip("/") + "/" + path_suffix.lstrip("/")).rstrip("/")
     return urlunparse(parsed._replace(path=joined_path))
@@ -8393,9 +8395,9 @@ def _classify_handshake_error(root_cause: BaseException) -> tuple[str, str]:
     Returns:
         Tuple of (failure_class, actionable error copy).
     """
-    if isinstance(root_cause, httpx.HTTPStatusError) and root_cause.response.status_code in (401, 403):
+    if isinstance(root_cause, (httpx.HTTPStatusError, httpx2.HTTPStatusError)) and root_cause.response.status_code in (401, 403):
         return "auth", _HANDSHAKE_AUTH_COPY
-    if isinstance(root_cause, (httpx.RequestError, OSError)):
+    if isinstance(root_cause, (httpx.RequestError, httpx2.RequestError, OSError)):
         return "transport", _HANDSHAKE_TRANSPORT_COPY
     if isinstance(root_cause, MCPError) or (isinstance(root_cause, RuntimeError) and "protocol" in str(root_cause).lower()):
         return "protocol", _HANDSHAKE_PROTOCOL_COPY
@@ -9065,7 +9067,7 @@ async def test_gateway_handshake(
                     "MCP-Protocol-Version": MCP_STATELESS_PROTOCOL_VERSION,
                     "Mcp-Method": "server/discover",
                     "Content-Type": "application/json",
-                    "Accept": "application/json",
+                    "Accept": "application/json, text/event-stream",
                 }
                 # Per-request metadata required by the stateless mode: the server reads the requested
                 # protocol version from `_meta`, not just from the HTTP header.
