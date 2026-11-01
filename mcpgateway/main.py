@@ -2048,6 +2048,7 @@ async def setup_passthrough_headers():
 
 # Initialize FastAPI app with orjson for 2-3x faster JSON serialization
 app = FastAPI(
+    telemetry={"tracing": False, "operation_spans": False},
     title=settings.app_name,
     version=__version__,
     description="ContextForge AI Gateway — an AI gateway, registry, and proxy for MCP, A2A, and REST/gRPC APIs. Exposes a unified control plane with centralized governance, discovery, and observability. Optimizes agent and tool calling, and supports plugins.",

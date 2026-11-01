@@ -148,6 +148,21 @@ from mcpgateway.utils.trace_redaction import sanitize_trace_attribute_value, san
 _SamplerBase = cast(Any, Sampler)
 _SpanProcessorBase = cast(Any, SpanProcessor)
 
+LLMCHAT_TOOL_SPAN = "llmchat.tool.call"
+
+
+def _is_request_root(name: str, kind: Any) -> bool:
+    """Permit inbound requests and explicit playground tool requests as trace roots.
+
+    Args:
+        name: Span name available at creation and export.
+        kind: OpenTelemetry span kind.
+
+    Returns:
+        Whether the span represents an allowed request root.
+    """
+    return kind == SpanKind.SERVER or (kind == SpanKind.CLIENT and name == LLMCHAT_TOOL_SPAN)
+
 
 class RequestRootSampler(_SamplerBase):  # type: ignore[misc]
     """Restrict exported traces to request roots and their descendants."""
@@ -194,8 +209,7 @@ class RequestRootSampler(_SamplerBase):  # type: ignore[misc]
             return cast(Any, SamplingResult)(cast(Any, Decision).DROP, trace_state=trace_state)
 
         has_parent = bool(parent_span_context is not None and parent_span_context.is_valid)
-        is_server_root = not has_parent and kind == SpanKind.SERVER
-        if not has_parent and not is_server_root and not self._system_traces_enabled:
+        if not has_parent and not _is_request_root(name, kind) and not self._system_traces_enabled:
             return cast(Any, SamplingResult)(cast(Any, Decision).DROP, trace_state=trace_state)
 
         return self._delegate.should_sample(
@@ -249,7 +263,7 @@ class RequestRootFilteringSpanProcessor(_SpanProcessorBase):  # type: ignore[mis
         """Return whether downstream processor should receive a span."""
         parent = getattr(span, "parent", None)
         is_root = parent is None or not getattr(parent, "is_valid", False)
-        return not (is_root and getattr(span, "kind", None) != SpanKind.SERVER and not self._system_traces_enabled)
+        return not (is_root and not _is_request_root(getattr(span, "name", ""), getattr(span, "kind", None)) and not self._system_traces_enabled)
 
     def _on_ending(self, span: Any) -> None:
         """Forward pre-end notification for an allowed span.
@@ -1697,13 +1711,26 @@ def trace_operation(operation_name: str, attributes: Optional[Dict[str, Any]] = 
     return decorator
 
 
-def create_span(name: str, attributes: Optional[Dict[str, Any]] = None) -> Any:
+def create_tool_client_span(tool_name: str) -> Any:
+    """Trace one explicit playground tool request using the normal export policy.
+
+    Args:
+        tool_name: Registered name of the requested MCP tool.
+
+    Returns:
+        A span context manager that preserves parent sampling and sanitization.
+    """
+    return create_span(LLMCHAT_TOOL_SPAN, {"tool.name": tool_name}, kind=getattr(SpanKind, "CLIENT", None))
+
+
+def create_span(name: str, attributes: Optional[Dict[str, Any]] = None, *, kind: Any = None) -> Any:
     """
     Create a span for manual instrumentation.
 
     Args:
         name: Name of the span to create (e.g., "database.query").
         attributes: Optional dictionary of attributes to add to the span.
+        kind: Optional OpenTelemetry span kind. Defaults to INTERNAL.
 
     Returns:
         Context manager that creates and manages the span lifecycle.
@@ -1788,7 +1815,7 @@ def create_span(name: str, attributes: Optional[Dict[str, Any]] = None) -> Any:
         logger.warning("Failed to inject baggage into span attributes")
 
     # Start span and return the context manager
-    span_context = _safe_span_context(name)
+    span_context = _safe_span_context(name, **({"kind": kind} if kind is not None else {}))
 
     class SpanWithAttributes:
         """Context manager wrapper that adds attributes to a span.
