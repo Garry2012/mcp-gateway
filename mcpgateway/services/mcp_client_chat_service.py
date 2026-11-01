@@ -18,7 +18,9 @@ The module consists of several key components:
 """
 
 # Standard
+from contextlib import nullcontext
 from datetime import datetime, timezone
+from functools import wraps
 import time
 from typing import Any, AsyncGenerator, Dict, List, Literal, Optional, Union
 from uuid import uuid4
@@ -34,7 +36,7 @@ try:
     from langchain.mcp import MCPAdapter
     from langchain_core.language_models import BaseChatModel
     from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
-    from langchain_core.tools import BaseTool
+    from langchain_core.tools import BaseTool, StructuredTool
     from langchain_ollama import ChatOllama, OllamaLLM
     from langchain_openai import AzureChatOpenAI, AzureOpenAI, ChatOpenAI, OpenAI
     from langgraph.prebuilt import create_react_agent
@@ -51,6 +53,7 @@ except ImportError as _import_error:
     BaseMessage = None  # type: ignore
     HumanMessage = None  # type: ignore
     BaseTool = None  # type: ignore
+    StructuredTool = None  # type: ignore
     MCPAdapter = None  # type: ignore
     FastMCPClient = None  # type: ignore
     ElicitResult = None  # type: ignore
@@ -102,7 +105,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 # First-Party
 from mcpgateway.common.validators import SecurityValidator
 from mcpgateway.config import settings
-from mcpgateway.observability import create_span, set_span_attribute
+from mcpgateway.observability import call_trace_session, create_span, create_tool_client_span, otel_context_active, set_span_attribute
 from mcpgateway.services.cancellation_service import cancellation_service
 from mcpgateway.services.logging_service import LoggingService
 from mcpgateway.utils.trace_redaction import is_input_capture_enabled, is_output_capture_enabled, serialize_trace_payload
@@ -2340,12 +2343,34 @@ class MCPClient:
         try:
             logger.info("Loading tools from MCP server...")
             self._tools = await self._client.list_tools()
+            for tool in self._tools:
+                if isinstance(tool, StructuredTool) and tool.coroutine is not None:
+                    tool.coroutine = self._trace_tool_call(tool)
             logger.info("Successfully loaded %s tools", len(self._tools))
             return self._tools
 
         except Exception as e:
             logger.error("Failed to load tools: %s", e)
             raise
+
+    def _trace_tool_call(self, tool: Any) -> Any:
+        """Wrap one adapted tool before its coroutine opens the MCP session.
+
+        Args:
+            tool: Structured tool with its original coroutine and schema.
+
+        Returns:
+            A coroutine that preserves the result and propagates its trace context.
+        """
+        invoke = tool.coroutine
+
+        @wraps(invoke)
+        async def traced_call(*args: Any, **kwargs: Any) -> Any:
+            """Trace a tool request without changing execution or retry behavior."""
+            with call_trace_session(self.config.headers), create_tool_client_span(tool.name):
+                return await invoke(*args, **kwargs)
+
+        return traced_call
 
     @property
     def is_connected(self) -> bool:
@@ -2549,7 +2574,7 @@ class MCPChatService:
         if is_input_capture_enabled("llm.chat"):
             span_attributes["langfuse.observation.input"] = serialize_trace_payload({"message": message})
 
-        with create_span("llm.chat", span_attributes) as span:
+        with create_span("llm.chat", span_attributes) if otel_context_active() else nullcontext() as span:
             try:
                 logger.debug("Processing chat message...")
 
@@ -2817,7 +2842,7 @@ class MCPChatService:
         if is_input_capture_enabled("llm.chat"):
             span_attributes["langfuse.observation.input"] = serialize_trace_payload({"message": message})
 
-        with create_span("llm.chat", span_attributes) as span:
+        with create_span("llm.chat", span_attributes) if otel_context_active() else nullcontext() as span:
             try:
                 async for event in self._agent.astream_events({"messages": lc_messages}, version="v2"):
                     kind = event.get("event")
