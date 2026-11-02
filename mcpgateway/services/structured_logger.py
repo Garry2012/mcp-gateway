@@ -322,6 +322,17 @@ class StructuredLogger:
         self.enricher = LogEnricher()
         self.router = LogRouter()
 
+    def is_enabled_for(self, level: Union[LogLevel, str]) -> bool:
+        """Check the configured threshold before preparing structured fields.
+
+        Args:
+            level: Severity of the proposed record.
+
+        Returns:
+            Whether the configured threshold accepts this severity.
+        """
+        return _should_log(level)
+
     def log(
         self,
         level: Union[LogLevel, str],
