@@ -1266,6 +1266,73 @@ async def _call_upstream_tool(
     )
 
 
+def _tool_completion_error_code(error: Optional[BaseException]) -> str:
+    """Classify an invocation error without reading its message or payload.
+
+    Args:
+        error: Invocation-local exception, or None for an MCP error result.
+
+    Returns:
+        A fixed diagnostic code suitable for console logs.
+    """
+    if isinstance(error, asyncio.CancelledError):
+        return "CANCELLED"
+    if isinstance(error, ToolInputRequired):
+        return "INPUT_REQUIRED"
+    if isinstance(error, PluginViolationError):
+        return "POLICY_DENIED"
+    if isinstance(error, (ToolTimeoutError, TimeoutError, httpx.TimeoutException, httpx2.TimeoutException)):
+        return "TIMEOUT"
+    if isinstance(error, (httpx.HTTPStatusError, httpx2.HTTPStatusError)):
+        return "UPSTREAM_HTTP_ERROR"
+    if isinstance(error, (httpx.NetworkError, httpx2.NetworkError, ConnectionError)):
+        return "CONNECTION_ERROR"
+    if isinstance(error, (httpx.ProtocolError, httpx2.ProtocolError, json.JSONDecodeError, ValidationError)):
+        return "INVALID_RESPONSE"
+    if isinstance(error, MCPError):
+        return "MCP_ERROR"
+    return "UNEXPECTED_ERROR" if error is not None else "TOOL_ERROR"
+
+
+def _log_tool_completion(
+    *,
+    level: str,
+    name: str,
+    tool_id: str,
+    integration_type: str,
+    duration_ms: float,
+    success: bool,
+    error_code: Optional[str],
+    request_headers: Optional[Mapping[str, str]],
+) -> None:
+    """Enrich the existing completion record with bounded request identifiers.
+
+    Args:
+        level: Selected completion severity.
+        name: Registered tool name.
+        tool_id: Registered tool identifier.
+        integration_type: Registered integration type.
+        duration_ms: Elapsed invocation time.
+        success: Whether tool execution succeeds.
+        error_code: Fixed diagnostic code, without exception text.
+        request_headers: Original inbound headers for this invocation.
+    """
+    try:
+        fields: Dict[str, Any] = {"event": "tool_invocation_completed", "durationMs": duration_ms, "success": success}
+        for key, value in (("toolName", name), ("toolId", tool_id), ("integrationType", integration_type), ("gatewayCorrelationId", get_correlation_id())):
+            if isinstance(value, str) and len(value) <= 255 and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]*", value):
+                fields[key] = value
+        for header, field in (("x-call-id", "callId"), ("x-operation-id", "operationId")):
+            values = [value for key, value in (request_headers or {}).items() if key.lower() == header]
+            if len(values) == 1 and isinstance(values[0], str) and len(values[0]) <= 128 and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]*", values[0]):
+                fields[field] = values[0]
+        if error_code is not None:
+            fields["errorCode"] = error_code
+        structured_logger.log(level, "Tool invocation completed", resource_type="tool", resource_action="invoke", resource_id=fields.get("toolId"), duration_ms=duration_ms, **fields)
+    except Exception:  # nosec B110 - Logging failures must preserve the tool result.
+        pass
+
+
 class ToolService(BaseService):
     """Service for managing and invoking tools.
 
@@ -5608,6 +5675,8 @@ class ToolService(BaseService):
         start_time = time.monotonic()
         success = False
         error_message = None
+        completion_error: Optional[BaseException] = None
+        completion_result: Optional[ToolResult] = None
         tool_result: Optional[ToolResult] = None
         tool_team_scope = format_trace_team_scope(token_teams)
 
@@ -6345,6 +6414,8 @@ class ToolService(BaseService):
                             SystemExit, GeneratorExit, KeyboardInterrupt: Propagated without wrapping.
 
                         """
+                        nonlocal completion_error
+
                         # Get correlation ID for distributed tracing
                         correlation_id = get_correlation_id()
                         tracing_active = otel_context_active()
@@ -6545,6 +6616,7 @@ class ToolService(BaseService):
                             # Log failed MCP call (using local variables)
                             mcp_duration_ms = (time.time() - mcp_start_time) * 1000
                             # Sanitize error message to prevent URL secrets from leaking in logs
+                            completion_error = e if isinstance(root_cause, asyncio.CancelledError) else root_cause
                             sanitized_error = sanitize_exception_message(str(root_cause), gateway_auth_query_params_decrypted)
                             structured_logger.log(
                                 level="ERROR",
@@ -6552,7 +6624,7 @@ class ToolService(BaseService):
                                 component="tool_service",
                                 correlation_id=correlation_id,
                                 duration_ms=mcp_duration_ms,
-                                error_details={"error_type": type(root_cause).__name__, "error_message": sanitized_error},
+                                error_details={"error_code": _tool_completion_error_code(completion_error)},
                                 metadata={"event": "mcp_call_failed", "tool_name": tool_name_original, "tool_id": tool_id, "transport": "sse"},
                             )
                             # Include HTTP status code in structured_content so the retry plugin can
@@ -6581,6 +6653,8 @@ class ToolService(BaseService):
                             SystemExit, GeneratorExit, KeyboardInterrupt: Propagated without wrapping.
 
                         """
+                        nonlocal completion_error
+
                         # Get correlation ID for distributed tracing
                         correlation_id = get_correlation_id()
                         tracing_active = otel_context_active()
@@ -6776,6 +6850,7 @@ class ToolService(BaseService):
                             # Log failed MCP call
                             mcp_duration_ms = (time.time() - mcp_start_time) * 1000
                             # Sanitize error message to prevent URL secrets from leaking in logs
+                            completion_error = e if isinstance(root_cause, asyncio.CancelledError) else root_cause
                             sanitized_error = sanitize_exception_message(str(root_cause), gateway_auth_query_params_decrypted)
                             structured_logger.log(
                                 level="ERROR",
@@ -6783,7 +6858,7 @@ class ToolService(BaseService):
                                 component="tool_service",
                                 correlation_id=correlation_id,
                                 duration_ms=mcp_duration_ms,
-                                error_details={"error_type": type(root_cause).__name__, "error_message": sanitized_error},
+                                error_details={"error_code": _tool_completion_error_code(completion_error)},
                                 metadata={"event": "mcp_call_failed", "tool_name": tool_name_original, "tool_id": tool_id, "transport": "streamablehttp"},
                             )
                             # Include HTTP status code in structured_content so the retry plugin can
@@ -7108,8 +7183,77 @@ class ToolService(BaseService):
                     # values 0..max_tool_retries-1, meaning up to max_tool_retries *retry* attempts on
                     # top of the original call (total attempts = max_tool_retries + 1).
                     if post_result is not None and post_result.retry_delay_ms > 0 and retry_attempt < settings.max_tool_retries:
-                        return await self._retry_tool_invocation(
-                            post_result.retry_delay_ms,
+                        try:
+                            completion_result = await self._retry_tool_invocation(
+                                post_result.retry_delay_ms,
+                                retry_attempt,
+                                name,
+                                arguments,
+                                request_headers,
+                                app_user_email,
+                                user_email,
+                                token_teams,
+                                jwt_teams_claim,
+                                server_id,
+                                context_table,
+                                global_context,
+                                meta_data,
+                                skip_pre_invoke=skip_pre_invoke,
+                                require_app_visible=require_app_visible,
+                                require_model_visible=require_model_visible,
+                                path_label="success",
+                                progress_callback=progress_callback,
+                                allow_input_required=allow_input_required,
+                                input_responses=input_responses,
+                                request_state=request_state,
+                            )
+                        except BaseException as retry_error:
+                            completion_error = retry_error
+                            raise
+                        completion_error = None
+                        return completion_result
+
+                # Emit CPEX control-execution telemetry for this invocation (best-effort).
+                # Placed here on the normal-return path so both pre and post records are
+                # accumulated before emitting.  Exception paths below also call this helper
+                # so partial pre-deny / error telemetry is never lost.
+                # Identity mapping rationale: see _emit_ctl_telemetry() docstring above.
+                _emit_ctl_telemetry()
+                return tool_result
+            except PluginViolationError as exc:
+                completion_error = exc
+                # Deliberate policy denial — emit partial telemetry so the summary span captures
+                # result.allowed=False and any pre-denial execution records.
+                # The hook-level handlers add CPEX's execution records and, when available,
+                # its immutable safe denial outcome before this outer handler flushes them.
+                _emit_ctl_telemetry()
+                raise
+            except PluginError as exc:
+                completion_error = exc
+                # Plugin outage (crash/timeout/misconfiguration) — mark the accumulator so
+                # the summary span carries cpex.control.plugin_error=True, emit partial
+                # telemetry (even when the accumulator is empty, e.g. first-plugin failure),
+                # and do NOT treat this as a policy denial (effective_allowed stays True).
+                # hook= is derived from _ctl_last_hook which is "pre" by default and updated
+                # to "post" immediately before the post-hook invoke_hook call.
+                _ctl_acc.mark_plugin_error(hook=_ctl_last_hook)
+                _emit_ctl_telemetry()
+                raise
+            except ToolTimeoutError as e:
+                completion_error = e
+                # ToolTimeoutError is raised by timeout handlers which already called tool_post_invoke.
+                # Do NOT call post_invoke again — the retry_delay_ms signal is carried on the exception.
+                # Emit partial telemetry before retrying or re-raising so timeout records are not lost.
+                _emit_ctl_telemetry()
+                error_message = str(e)
+                if span:
+                    set_span_error(span, error_message)
+
+                # Retry if the post-invoke hook (called by the timeout handler) requested it.
+                if e.retry_delay_ms > 0 and retry_attempt < settings.max_tool_retries:
+                    try:
+                        completion_result = await self._retry_tool_invocation(
+                            e.retry_delay_ms,
                             retry_attempt,
                             name,
                             arguments,
@@ -7125,76 +7269,24 @@ class ToolService(BaseService):
                             skip_pre_invoke=skip_pre_invoke,
                             require_app_visible=require_app_visible,
                             require_model_visible=require_model_visible,
-                            path_label="success",
+                            path_label="timeout",
                             progress_callback=progress_callback,
                             allow_input_required=allow_input_required,
                             input_responses=input_responses,
                             request_state=request_state,
                         )
-
-                # Emit CPEX control-execution telemetry for this invocation (best-effort).
-                # Placed here on the normal-return path so both pre and post records are
-                # accumulated before emitting.  Exception paths below also call this helper
-                # so partial pre-deny / error telemetry is never lost.
-                # Identity mapping rationale: see _emit_ctl_telemetry() docstring above.
-                _emit_ctl_telemetry()
-                return tool_result
-            except PluginViolationError:
-                # Deliberate policy denial — emit partial telemetry so the summary span captures
-                # result.allowed=False and any pre-denial execution records.
-                # The hook-level handlers add CPEX's execution records and, when available,
-                # its immutable safe denial outcome before this outer handler flushes them.
-                _emit_ctl_telemetry()
+                    except BaseException as retry_error:
+                        completion_error = retry_error
+                        raise
+                    completion_error = None
+                    return completion_result
                 raise
-            except PluginError:
-                # Plugin outage (crash/timeout/misconfiguration) — mark the accumulator so
-                # the summary span carries cpex.control.plugin_error=True, emit partial
-                # telemetry (even when the accumulator is empty, e.g. first-plugin failure),
-                # and do NOT treat this as a policy denial (effective_allowed stays True).
-                # hook= is derived from _ctl_last_hook which is "pre" by default and updated
-                # to "post" immediately before the post-hook invoke_hook call.
-                _ctl_acc.mark_plugin_error(hook=_ctl_last_hook)
-                _emit_ctl_telemetry()
-                raise
-            except ToolTimeoutError as e:
-                # ToolTimeoutError is raised by timeout handlers which already called tool_post_invoke.
-                # Do NOT call post_invoke again — the retry_delay_ms signal is carried on the exception.
-                # Emit partial telemetry before retrying or re-raising so timeout records are not lost.
-                _emit_ctl_telemetry()
-                error_message = str(e)
-                if span:
-                    set_span_error(span, error_message)
-
-                # Retry if the post-invoke hook (called by the timeout handler) requested it.
-                if e.retry_delay_ms > 0 and retry_attempt < settings.max_tool_retries:
-                    return await self._retry_tool_invocation(
-                        e.retry_delay_ms,
-                        retry_attempt,
-                        name,
-                        arguments,
-                        request_headers,
-                        app_user_email,
-                        user_email,
-                        token_teams,
-                        jwt_teams_claim,
-                        server_id,
-                        context_table,
-                        global_context,
-                        meta_data,
-                        skip_pre_invoke=skip_pre_invoke,
-                        require_app_visible=require_app_visible,
-                        require_model_visible=require_model_visible,
-                        path_label="timeout",
-                        progress_callback=progress_callback,
-                        allow_input_required=allow_input_required,
-                        input_responses=input_responses,
-                        request_state=request_state,
-                    )
-                raise
-            except asyncio.CancelledError:
+            except asyncio.CancelledError as exc:
+                completion_error = exc
                 # Never wrap a cancellation as a ToolInvocationError; cancellation is not a tool failure.
                 raise
-            except ToolInputRequired:
+            except ToolInputRequired as exc:
+                completion_error = exc
                 # 2026 MRTR control flow, not a failure - let the transport handle it.
                 raise
             except BaseException as e:
@@ -7204,6 +7296,7 @@ class ToolService(BaseService):
                 if isinstance(e, BaseExceptionGroup):
                     while isinstance(root_cause, BaseExceptionGroup) and root_cause.exceptions:
                         root_cause = root_cause.exceptions[0]
+                completion_error = e if isinstance(root_cause, asyncio.CancelledError) else root_cause
                 if isinstance(root_cause, ToolInputRequired):
                     # 2026 MRTR control flow arrived wrapped in a task-group ExceptionGroup.
                     raise root_cause
@@ -7245,29 +7338,35 @@ class ToolService(BaseService):
                 # Same counting convention as the success path: retry_attempt is 0-based,
                 # so this allows up to max_tool_retries retry attempts beyond the original call.
                 if exc_post_result is not None and exc_post_result.retry_delay_ms > 0 and retry_attempt < settings.max_tool_retries:
-                    return await self._retry_tool_invocation(
-                        exc_post_result.retry_delay_ms,
-                        retry_attempt,
-                        name,
-                        arguments,
-                        request_headers,
-                        app_user_email,
-                        user_email,
-                        token_teams,
-                        jwt_teams_claim,
-                        server_id,
-                        context_table,
-                        global_context,
-                        meta_data,
-                        skip_pre_invoke=skip_pre_invoke,
-                        require_app_visible=require_app_visible,
-                        require_model_visible=require_model_visible,
-                        path_label="exception",
-                        progress_callback=progress_callback,
-                        allow_input_required=allow_input_required,
-                        input_responses=input_responses,
-                        request_state=request_state,
-                    )
+                    try:
+                        completion_result = await self._retry_tool_invocation(
+                            exc_post_result.retry_delay_ms,
+                            retry_attempt,
+                            name,
+                            arguments,
+                            request_headers,
+                            app_user_email,
+                            user_email,
+                            token_teams,
+                            jwt_teams_claim,
+                            server_id,
+                            context_table,
+                            global_context,
+                            meta_data,
+                            skip_pre_invoke=skip_pre_invoke,
+                            require_app_visible=require_app_visible,
+                            require_model_visible=require_model_visible,
+                            path_label="exception",
+                            progress_callback=progress_callback,
+                            allow_input_required=allow_input_required,
+                            input_responses=input_responses,
+                            request_state=request_state,
+                        )
+                    except BaseException as retry_error:
+                        completion_error = retry_error
+                        raise
+                    completion_error = None
+                    return completion_result
 
                 raise ToolInvocationError(f"Tool invocation failed: {error_message}")
             finally:
@@ -7335,28 +7434,24 @@ class ToolService(BaseService):
                     except Exception as metric_error:
                         logger.warning("Failed to record server metric: %s", metric_error)
 
-                # Log structured message with performance tracking (using local variables)
-                if success:
-                    structured_logger.info(
-                        f"Tool '{name}' invoked successfully",  # noqa: G004
-                        user_id=app_user_email,
-                        resource_type="tool",
-                        resource_id=tool_id,
-                        resource_action="invoke",
-                        duration_ms=duration_ms,
-                        custom_fields={"tool_name": name, "integration_type": tool_integration_type, "arguments_count": len(arguments) if arguments else 0},
-                    )
-                else:
-                    structured_logger.error(
-                        f"Tool '{name}' invocation failed",  # noqa: G004
-                        error=Exception(error_message) if error_message else None,
-                        user_id=app_user_email,
-                        resource_type="tool",
-                        resource_id=tool_id,
-                        resource_action="invoke",
-                        duration_ms=duration_ms,
-                        custom_fields={"tool_name": name, "integration_type": tool_integration_type, "error_message": error_message},
-                    )
+                # Completion logging must not alter results, exceptions, or cancellation.
+                try:
+                    completion_success = (not completion_result.is_error if completion_result is not None else success) and completion_error is None
+                    completion_code = None if completion_success else _tool_completion_error_code(completion_error)
+                    completion_level = "INFO" if completion_success or completion_code in {"CANCELLED", "INPUT_REQUIRED", "POLICY_DENIED"} else "ERROR"
+                    if retry_attempt == 0 and structured_logger.is_enabled_for(completion_level):
+                        _log_tool_completion(
+                            level=completion_level,
+                            name=tool_name_computed,
+                            tool_id=tool_id,
+                            integration_type=tool_integration_type,
+                            duration_ms=duration_ms,
+                            success=completion_success,
+                            error_code=completion_code,
+                            request_headers=request_headers,
+                        )
+                except Exception:  # nosec B110 - Completion logging is best-effort.
+                    pass
 
                 # Track performance with threshold checking
                 with perf_tracker.track_operation("tool_invocation", name):
