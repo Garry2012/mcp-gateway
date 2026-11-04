@@ -968,6 +968,24 @@ def _form_team_id(form: Any) -> Optional[str]:
     return str(raw).strip() or None
 
 
+def _form_instructions(form: Any) -> Optional[str]:
+    """Extract the server ``instructions`` text from form data.
+
+    An empty or whitespace-only field maps to None, which clears the override.
+    The form cannot express the empty-string override; use the API for that.
+
+    Args:
+        form: The multipart form data object from the request.
+
+    Returns:
+        The submitted text, or None when the field is absent or blank.
+    """
+    raw = form.get("instructions")
+    if not raw or not str(raw).strip():
+        return None
+    return str(raw)
+
+
 async def _assemble_oauth_config_from_fields(fields: Any, *, encrypt_secret: bool, include_resource: bool = True) -> Optional[Dict[str, Any]]:
     """Assemble an ``oauth_config`` dict from individual OAuth form/JSON fields.
 
@@ -3222,6 +3240,7 @@ async def admin_add_server(request: Request, db: Session = Depends(get_db), user
             name=form.get("name"),
             description=form.get("description"),
             icon=form.get("icon"),
+            instructions=_form_instructions(form),
             associated_tools=",".join(str(x) for x in associated_tools_list),
             associated_resources=",".join(str(x) for x in associated_resources_list),
             associated_prompts=",".join(str(x) for x in associated_prompts_list),
@@ -3379,21 +3398,27 @@ async def admin_edit_server(
                 oauth_enabled = False
                 oauth_config = None
 
-        server = ServerUpdate(
-            id=form.get("id"),
-            name=form.get("name"),
-            description=form.get("description"),
-            icon=form.get("icon"),
-            associated_tools=",".join(str(x) for x in associated_tools_list),
-            associated_resources=",".join(str(x) for x in associated_resources_list),
-            associated_prompts=",".join(str(x) for x in associated_prompts_list),
-            tags=tags,
-            visibility=visibility,
-            team_id=team_id,
-            owner_email=user_email,
-            oauth_enabled=oauth_enabled,
-            oauth_config=oauth_config,
-        )
+        server_kwargs: Dict[str, Any] = {
+            "id": form.get("id"),
+            "name": form.get("name"),
+            "description": form.get("description"),
+            "icon": form.get("icon"),
+            "associated_tools": ",".join(str(x) for x in associated_tools_list),
+            "associated_resources": ",".join(str(x) for x in associated_resources_list),
+            "associated_prompts": ",".join(str(x) for x in associated_prompts_list),
+            "tags": tags,
+            "visibility": visibility,
+            "team_id": team_id,
+            "owner_email": user_email,
+            "oauth_enabled": oauth_enabled,
+            "oauth_config": oauth_config,
+        }
+        # Only include instructions when the form field was submitted; omitting it leaves the
+        # stored override unchanged.  Passing None explicitly would land in model_fields_set
+        # and clear a previously saved override.
+        if "instructions" in form:
+            server_kwargs["instructions"] = _form_instructions(form)
+        server = ServerUpdate(**server_kwargs)
 
         await server_service.update_server(
             db,
@@ -4279,6 +4304,7 @@ async def admin_ui(
             "selected_team_id": selected_team_id,
             "admin_viewing_non_member_team": admin_viewing_non_member_team,
             "ui_airgapped": settings.mcpgateway_ui_airgapped,
+            "ui_deprecation_notice_enabled": settings.mcpgateway_ui_deprecation_notice_enabled,
             "ui_hidden_sections": sorted(hidden_sections),
             "ui_hidden_header_items": ui_visibility_config["hidden_header_items"],
             "ui_hidden_tabs": ui_visibility_config["hidden_tabs"],
@@ -12223,6 +12249,9 @@ async def admin_add_tool(
             created_user_agent=metadata["created_user_agent"],
             import_batch_id=metadata["import_batch_id"],
             federation_source=metadata["federation_source"],
+            team_id=team_id,
+            owner_email=user_email,
+            visibility=visibility,
         )
         return ORJSONResponse(
             content={"message": "Tool registered successfully!", "success": True},
@@ -12685,7 +12714,7 @@ async def admin_discover_oauth(
         True
     """
     # First-Party
-    from mcpgateway.services.dcr_service import DcrService  # pylint: disable=import-outside-toplevel
+    from mcpgateway.services.dcr_service import DcrError, DcrService, validate_issuer_scoped_endpoint  # pylint: disable=import-outside-toplevel
 
     try:
         body = await request.json()
@@ -12739,11 +12768,28 @@ async def admin_discover_oauth(
             except ValueError:
                 return None
 
+        async def _issuer_scoped_endpoint(raw: str | None, name: str) -> str | None:
+            """Validate an OAuth endpoint URL against the issuer origin, or None if invalid.
+
+            Args:
+                raw: The raw endpoint URL string or None.
+                name: The name of the endpoint for validation error messages.
+
+            Returns:
+                The validated URL string if valid and on the issuer origin, None otherwise.
+            """
+            if not raw:
+                return None
+            try:
+                return await validate_issuer_scoped_endpoint(raw, issuer, name)
+            except DcrError:
+                return None
+
         return JSONResponse(
             {
                 "success": True,
-                "token_endpoint": _safe_endpoint(metadata.get("token_endpoint"), "token_endpoint"),
-                "authorization_endpoint": _safe_endpoint(metadata.get("authorization_endpoint"), "authorization_endpoint"),
+                "token_endpoint": await _issuer_scoped_endpoint(metadata.get("token_endpoint"), "token_endpoint"),
+                "authorization_endpoint": await _issuer_scoped_endpoint(metadata.get("authorization_endpoint"), "authorization_endpoint"),
                 "jwks_uri": _safe_endpoint(metadata.get("jwks_uri"), "jwks_uri"),
                 "registration_endpoint": _safe_endpoint(metadata.get("registration_endpoint"), "registration_endpoint"),
                 "dcr_available": bool(metadata.get("registration_endpoint")),
@@ -13303,8 +13349,8 @@ async def admin_edit_gateway(
             LOGGER.info("Auto-detected OAuth configuration in edit, setting auth_type='oauth'")
 
         gateway = GatewayUpdate(  # Pydantic validation happens here
-            name=str(form.get("name")),
-            url=str(form["url"]),
+            name=form.get("name"),
+            url=form.get("url"),
             description=str(form.get("description")),
             transport=str(form.get("transport", "SSE")),
             tags=tags,
@@ -13580,17 +13626,19 @@ async def admin_add_resource(request: Request, db: Session = Depends(get_db), us
         if isinstance(uri_value, str) and "{" in uri_value and "}" in uri_value:
             template = uri_value
 
-        resource = ResourceCreate(
-            uri=str(form["uri"]),
-            name=str(form["name"]),
-            description=str(form.get("description", "")),
-            mime_type=str(form.get("mimeType", "")),
-            uri_template=template,
-            content=str(form["content"]),
-            tags=tags,
-            visibility=visibility,
-            team_id=team_id,
-            owner_email=user_email,
+        resource = ResourceCreate.model_validate(
+            {
+                "uri": form.get("uri"),
+                "name": form.get("name"),
+                "description": str(form.get("description", "")),
+                "mime_type": str(form.get("mimeType", "")),
+                "uri_template": template,
+                "content": form.get("content"),
+                "tags": tags,
+                "visibility": visibility,
+                "team_id": team_id,
+                "owner_email": user_email,
+            }
         )
 
         metadata = MetadataCapture.extract_creation_metadata(request, user)
@@ -13979,16 +14027,18 @@ async def admin_add_prompt(request: Request, db: Session = Depends(get_db), user
     try:
         # Validate arguments JSON using prompt service
         arguments: List[Dict[str, Any]] = prompt_service.validate_arguments_json(args_value=form.get("arguments"), context="new prompt")
-        prompt = PromptCreate(
-            name=str(form["name"]),
-            display_name=str(form.get("display_name") or form["name"]),
-            description=str(form.get("description")),
-            template=str(form["template"]),
-            arguments=arguments,
-            tags=tags,
-            visibility=visibility,
-            team_id=team_id,
-            owner_email=user_email,
+        prompt = PromptCreate.model_validate(
+            {
+                "name": form.get("name"),
+                "display_name": form.get("display_name") or form.get("name"),
+                "description": str(form.get("description")),
+                "template": form.get("template"),
+                "arguments": arguments,
+                "tags": tags,
+                "visibility": visibility,
+                "team_id": team_id,
+                "owner_email": user_email,
+            }
         )
         # Extract creation metadata
         metadata = MetadataCapture.extract_creation_metadata(request, user)
@@ -14087,6 +14137,10 @@ async def admin_edit_prompt(
     """
     LOGGER.debug(f"User {get_user_email(user)} is editing prompt {prompt_id}")
     form = await request.form()
+    template = form.get("template")
+    if not isinstance(template, str) or not template.strip():
+        LOGGER.warning("admin_edit_prompt rejected request with missing template")
+        return ORJSONResponse(content={"detail": "Prompt template is required."}, status_code=422)
     team_id = _form_team_id(form)
 
     visibility = str(form.get("visibility", "private"))
@@ -14117,7 +14171,7 @@ async def admin_edit_prompt(
             custom_name=str(form.get("customName") or form.get("name")),
             display_name=str(form.get("displayName") or form.get("display_name") or form.get("name")),
             description=str(form.get("description")),
-            template=str(form["template"]),
+            template=template,
             arguments=arguments,
             tags=tags,
             visibility=visibility,
@@ -15252,10 +15306,20 @@ async def admin_import_tools(
 
         # Extract base metadata for bulk import
         base_metadata = MetadataCapture.extract_creation_metadata(request, user, import_batch_id=import_batch_id)
+        user_email = get_user_email(user)
+        token_teams = extract_token_team_ids(user)
+        is_public_only_token = token_teams is not None and len(token_teams) == 0
+        team_id = None if is_public_only_token else (getattr(request.state, "team_id", None) or await TeamManagementService(db).verify_team_for_user(user_email) or None)
         for i, item in enumerate(payload):
             name = (item or {}).get("name")
             try:
                 tool = ToolCreate(**item)  # pydantic validation
+                if is_public_only_token and (tool.visibility or "public") in ("team", "private"):
+                    errors.append(
+                        {"index": i, "name": name, "error": {"message": "Public-only tokens cannot create team or private resources. Use visibility='public' or obtain a team-scoped token."}}
+                    )
+                    continue
+                _check_public_visibility_allowed(tool.visibility or "public", team_id=team_id)
                 await tool_service.register_tool(
                     db,
                     tool,
@@ -15265,6 +15329,8 @@ async def admin_import_tools(
                     created_user_agent=base_metadata["created_user_agent"],
                     import_batch_id=import_batch_id,
                     federation_source=base_metadata["federation_source"],
+                    team_id=team_id,
+                    owner_email=user_email,
                 )
                 created.append({"index": i, "name": name})
             except IntegrityError as ex:
@@ -15285,6 +15351,8 @@ async def admin_import_tools(
                 errors.append({"index": i, "name": name, "error": formatted})
             except ToolError as ex:
                 errors.append({"index": i, "name": name, "error": {"message": str(ex)}})
+            except HTTPException as ex:
+                errors.append({"index": i, "name": name, "error": {"message": str(ex.detail)}})
             except Exception as ex:
                 LOGGER.exception("Unexpected error importing tool %r at index %d", name, i)
                 errors.append({"index": i, "name": name, "error": {"message": unexpected_error_detail(ex)}})
@@ -16441,33 +16509,35 @@ async def admin_add_a2a_agent(
         uaid_protocol = str(form.get("uaid_protocol", "a2a"))
         uaid_native_id_override = form.get("uaid_native_id_override") or None
 
-        agent_data = A2AAgentCreate(
-            name=form["name"],
-            description=form.get("description"),
-            endpoint_url=form["endpoint_url"],
-            agent_type=form.get("agent_type", "generic"),
-            protocol_version=str(form.get("protocol_version", "1.0")),
-            auth_type=auth_type_from_form,
-            auth_username=str(form.get("auth_username", "")),
-            auth_password=str(form.get("auth_password", "")),
-            auth_token=str(form.get("auth_token", "")),
-            auth_header_key=str(form.get("auth_header_key", "")),
-            auth_header_value=str(form.get("auth_header_value", "")),
-            auth_headers=auth_headers if auth_headers else None,
-            oauth_config=oauth_config,
-            auth_value=form.get("auth_value") if form.get("auth_value") else None,
-            auth_query_param_key=str(form.get("auth_query_param_key", "")) or None,
-            auth_query_param_value=str(form.get("auth_query_param_value", "")) or None,
-            tags=tags,
-            visibility=form.get("visibility", "private"),
-            team_id=team_id,
-            owner_email=user_email,
-            passthrough_headers=passthrough_headers,
-            # UAID fields for cross-gateway routing
-            generate_uaid=generate_uaid,
-            uaid_registry=uaid_registry if generate_uaid else None,
-            uaid_protocol=uaid_protocol if generate_uaid else None,
-            uaid_native_id_override=uaid_native_id_override if generate_uaid else None,
+        agent_data = A2AAgentCreate.model_validate(
+            {
+                "name": form.get("name"),
+                "description": form.get("description"),
+                "endpoint_url": form.get("endpoint_url"),
+                "agent_type": form.get("agent_type", "generic"),
+                "protocol_version": str(form.get("protocol_version", "1.0")),
+                "auth_type": auth_type_from_form,
+                "auth_username": str(form.get("auth_username", "")),
+                "auth_password": str(form.get("auth_password", "")),
+                "auth_token": str(form.get("auth_token", "")),
+                "auth_header_key": str(form.get("auth_header_key", "")),
+                "auth_header_value": str(form.get("auth_header_value", "")),
+                "auth_headers": auth_headers if auth_headers else None,
+                "oauth_config": oauth_config,
+                "auth_value": form.get("auth_value") if form.get("auth_value") else None,
+                "auth_query_param_key": str(form.get("auth_query_param_key", "")) or None,
+                "auth_query_param_value": str(form.get("auth_query_param_value", "")) or None,
+                "tags": tags,
+                "visibility": form.get("visibility", "private"),
+                "team_id": team_id,
+                "owner_email": user_email,
+                "passthrough_headers": passthrough_headers,
+                # UAID fields for cross-gateway routing
+                "generate_uaid": generate_uaid,
+                "uaid_registry": uaid_registry if generate_uaid else None,
+                "uaid_protocol": uaid_protocol if generate_uaid else None,
+                "uaid_native_id_override": uaid_native_id_override if generate_uaid else None,
+            }
         )
 
         LOGGER.info(f"Creating A2A agent: {agent_data.name} at {agent_data.endpoint_url}")
@@ -17049,6 +17119,9 @@ async def admin_create_grpc_service(
         _check_public_visibility_allowed(service.visibility or "", team_id=getattr(service, "team_id", None))
         metadata = MetadataCapture.extract_creation_metadata(request, user)
         user_email = get_user_email(user)
+        requested_team_id = getattr(service, "team_id", None)
+        if requested_team_id and await TeamManagementService(db).verify_team_for_user(user_email, requested_team_id) != requested_team_id:
+            raise HTTPException(status_code=403, detail="Access issue: the caller is not a member of the requested team.")
         result = await grpc_service_mgr.register_service(db, service, user_email, metadata)
         return ORJSONResponse(content=jsonable_encoder(result), status_code=201)
     except GrpcServiceNameConflictError as e:

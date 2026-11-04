@@ -719,6 +719,43 @@
           </div>
         </header>
 
+        {% if ui_deprecation_notice_enabled %}
+        <div
+          id="admin-ui-deprecation-notice"
+          role="note"
+          aria-label="Admin UI deprecation notice"
+          class="flex-shrink-0 border-b border-red-300 bg-red-50 px-4 py-3 text-sm text-red-800"
+        >
+          <div class="flex items-start gap-3">
+            <p class="flex-1">
+              <strong>Deprecation Notice:</strong>
+              Support for the Admin UI ends on
+              <time datetime="2027-01-27">27 January 2027</time>.
+              Please switch to the new user experience. Visit the
+              <a href="https://github.com/contextforge-org/contextforge-web-ui" target="_blank" rel="noopener noreferrer" class="underline font-semibold">new UI repository</a>
+              and follow the
+              <a href="https://github.com/IBM/mcp-context-forge#optional-web-ui" target="_blank" rel="noopener noreferrer" class="underline font-semibold">getting started documentation</a>.
+              <span class="mt-2 block">
+                To turn off this notice, set
+                <code class="break-all">MCPGATEWAY_UI_DEPRECATION_NOTICE_ENABLED=false</code>
+                and restart the gateway.
+              </span>
+            </p>
+            <button
+              type="button"
+              aria-label="Dismiss deprecation notice"
+              data-action-click="hideElement"
+              data-arg0="admin-ui-deprecation-notice"
+              class="flex-shrink-0 rounded p-1 focus:outline-none focus:ring-2 focus:ring-red-500"
+            >
+              <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M6 6l12 12M6 18L18 6" />
+              </svg>
+            </button>
+          </div>
+        </div>
+        {% endif %}
+
         <!-- Admin Non-Member Team Banner -->
         {% if admin_viewing_non_member_team %}
         <div class="bg-red-100 dark:bg-red-900/30 border-b border-red-300 dark:border-red-800">
@@ -2663,6 +2700,22 @@
                   name="description"
                   class="mt-1 px-3 py-2 block w-full rounded-md border border-gray-300 dark:border-gray-700 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 dark:bg-gray-900 dark:placeholder-gray-300 dark:text-gray-300"
                 ></textarea>
+              </div>
+              <div>
+                <label
+                  for="server-instructions"
+                  class="block text-sm font-medium text-gray-700 dark:text-gray-400"
+                  >Instructions</label
+                >
+                <textarea
+                  name="instructions"
+                  id="server-instructions"
+                  rows="3"
+                  class="mt-1 px-3 py-2 block w-full rounded-md border border-gray-300 dark:border-gray-700 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 dark:bg-gray-900 dark:placeholder-gray-300 dark:text-gray-300"
+                ></textarea>
+                <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                  Text that MCP clients receive when they connect to this server. Leave empty to use the default behavior.
+                </p>
               </div>
               <div>
                 <label
@@ -11167,6 +11220,22 @@ class="fixed z-40 inset-0 bg-gray-800 bg-opacity-75 flex items-center justify-ce
                         id="edit-server-description"
                         class="mt-1 px-3 py-2 block w-full rounded-md border border-gray-600 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 dark:bg-gray-900 dark:placeholder-gray-300 dark:text-gray-300"
                       ></textarea>
+                    </div>
+                    <div>
+                      <label
+                        for="edit-server-instructions"
+                        class="block text-sm font-medium text-gray-700 dark:text-gray-300"
+                        >Instructions</label
+                      >
+                      <textarea
+                        name="instructions"
+                        id="edit-server-instructions"
+                        rows="3"
+                        class="mt-1 px-3 py-2 block w-full rounded-md border border-gray-600 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 dark:bg-gray-900 dark:placeholder-gray-300 dark:text-gray-300"
+                      ></textarea>
+                      <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                        Text that MCP clients receive when they connect to this server. Leave empty to use the default behavior.
+                      </p>
                     </div>
                     <div>
                       <label

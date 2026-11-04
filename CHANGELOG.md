@@ -8,6 +8,60 @@
 
 ## [Unreleased]
 
+### Security
+
+- **`X-Upstream-Authorization` no longer overrides gateway-managed credentials** - The header is dropped, with a warning, for gateways with `auth_type` `oauth`, `bearer`, `basic`, or `authheaders`, and for REST tools and A2A agents with the same auth types. Previously any authenticated caller could replace the stored per-user upstream credential.
+
+### Breaking Changes
+
+- **REST tool URL template values are percent-encoded** - Values now fill `{param}` as one encoded path segment or one query value. Before, the gateway inserted the raw value into the URL.
+    - `/` reaches the backend as `%2F`. Tools that relied on a raw `/` in one parameter must use two parameters.
+    - In a query placeholder, `&` and `=` stay inside the value, and `+` arrives as a literal `+`, not a space.
+    - A space in a path placeholder used to fail URL validation and now goes out as `%20`.
+    - A value that already holds `%XX` (for example `42%2F43`) used to pass and now returns an error.
+    - A value with a `.` or `..` segment returns an error.
+- **LLM gateway models authorization** ([#7388](https://github.com/IBM/mcp-context-forge/pull/7388)) - `GET /llm/gateway/models` and `GET /v1/llm/gateway/models` now require the `llm.read` RBAC permission. Previously, authentication alone passed this route. It now matches `GET /llmchat/gateway/models` and `GET /v1/models`. All built-in roles hold `llm.read`. Principals without `llm.read` (no roles, custom roles, or a custom `DEFAULT_USER_ROLE`) now receive `403`.
+- **Credential updates require `auth_type`** ([#6704](https://github.com/IBM/mcp-context-forge/issues/6704)) - `PUT /a2a/{agent_id}` and `PUT /gateways/{gateway_id}` return 422 when a request sets `auth_token`, `auth_password`, or `auth_header_value` without `auth_type`. Before, the A2A route returned 200 and ignored the credential, and the gateway route returned 200 and wiped the stored credential. Empty strings count as unset. The Admin UI always sends `auth_type`. Partial-body REST clients must add `auth_type`.
+
+### Security
+
+- **Per-gateway identity propagation on tool and resource calls** (internal issue 1149, PSIRT ADV0369535, CWE-200) - MCP and REST tool calls and resource reads ignored the gateway `identity_propagation` override and sent user identity headers when the global setting was on. A gateway set to `enabled: false` now receives no identity headers or `_meta`. Deployments with global propagation on and a gateway override of off no longer disclose user identity to that gateway.
+
+### Fixed
+
+- **REST URL template reuses a placeholder** - A REST tool URL template that uses the same placeholder twice, such as `/{id}/x/{id}`, now fills both occurrences. Before, it failed with "Required URL parameter 'id' not found in arguments".
+
+- **A2A and gateway credential masking** ([#6704](https://github.com/IBM/mcp-context-forge/issues/6704)) - `A2AAgentRead` and `GatewayRead` mask stored credentials on every `a2a.read` and `gateways.read` path. Regression tests cover basic, bearer, and authheaders auth types.
+
+- **A2A agent credential rotation** - `PUT /a2a/{agent_id}` now persists a new basic, bearer, or custom-header credential. The update path ignored these values before.
+
+- **Admin UI A2A edit keeps stored credentials** - The Admin UI form resubmits the mask for an unchanged credential. `update_agent` no longer stores the mask in place of the real credential, for basic, bearer, and multi-header auth.
+
+- **Masked password with a new username** - An update that changes `auth_username` and keeps the masked `auth_password` now pairs the new username with the stored password, for A2A agents and gateways.
+
+- **Gateway description-only update keeps credentials** - `PUT /gateways/{gateway_id}` with only unrelated fields, such as `description`, no longer wipes `auth_value`.
+
+- **Plugin manager rebuilds** ([#6532](https://github.com/IBM/mcp-context-forge/issues/6532)) - Tools of a team without tool-specific plugin bindings share one cached plugin manager, so external plugins such as OPA initialise once per team instead of once per tool. Tools with their own bindings keep their own manager. The new `PLUGIN_MANAGER_CACHE_TTL` setting (default `300` seconds, was a fixed 30 seconds) controls how long a manager is cached; `0` disables expiry. The invalidation listener now rebuilds managers after each Redis resubscribe.
+- **LLM Chat loads MCP tools with the MCP SDK client** ([#7090](https://github.com/IBM/mcp-context-forge/issues/7090), [#7332](https://github.com/IBM/mcp-context-forge/pull/7332)) - `langchain-mcp-adapters` has no release compatible with MCP SDK 2.x and is removed from the `llmchat` extra; LLM Chat lists and calls tools through `mcp.client.Client`.
+
+- **Bearer token precedence over auth cookies** - When a request carries both a Bearer token in the configured auth header (`AUTH_HEADER_NAME`, default `Authorization`) and a `jwt_token` or `access_token` cookie, every auth layer (token scoping, `require_auth`, `require_admin_auth`, `/admin/*`, LLM chat `connect`) now authenticates the Bearer principal, and token scopes apply to that credential. Cookie-only and `Authorization: Basic` requests keep cookie authentication. LLM chat `connect` also accepts the `access_token` cookie.
+
+### Changed
+
+- **A2A agent cards follow the 1.0 schema (breaking for card consumers)** ([#7027](https://github.com/IBM/mcp-context-forge/issues/7027), [#7209](https://github.com/IBM/mcp-context-forge/pull/7209)) - Cards for agents with a stored protocol version of 1.x now use the A2A 1.0 `AgentCard` shape, with `supportedInterfaces`, `securitySchemes`, and `securityRequirements`. `protocol_version` defaults to `"1.0"`, so most existing agents change shape. These fields leave 1.x cards: `url`, `protocolVersion`, `supportsAuthenticatedExtendedCard`, and `capabilities.stateTransitionHistory`. A caller that sends `A2A-Version: 0.3` to the sidecar keeps the legacy shape for a 1.x agent. A caller that sends no version follows the stored version. Agents with a stored version of 0.x keep the legacy shape. Server cards now aggregate `streaming`, `pushNotifications`, and the default input and output modes from enabled associated agents instead of hardcoded values. Server cards skip malformed capability entries. Cards never expose credential values. Agents with `authheaders` auth, `query_param` auth without a stored parameter name, or an incomplete OAuth configuration omit the security scheme, because 1.0 requires a name or flow URLs that the stored configuration cannot supply. Scheme names are `basicAuth`, `bearerAuth`, `apiKeyAuth`, and `oauth2Auth`. OAuth schemes read the stored `scopes` list and always emit the scope map.
+
+### Added
+
+- **Webhook HMAC replay protection** (internal issue 1149, PSIRT ADV0369535) - The `webhook_notification` plugin accepts `hmac_include_timestamp: true`. The signature then covers `{timestamp}.{delivery_id}.{body}`, and the plugin sends `X-Timestamp` and `X-Delivery-Id` headers. Each retry is signed again with a fresh timestamp. The default stays `false`, so existing receivers keep verifying `HMAC(body)`. The default flips to `true` in a later minor release.
+
+#### **API & Platform**
+
+- **Product-terminology request aliases for `gateway_id` and the virtual-server `server` body key** ([#6544](https://github.com/IBM/mcp-context-forge/issues/6544)) - Tool, resource, and prompt create/update bodies, and the gateway/MCP-server handshake test request, now also accept `mcp_server_id` as an alias of `gateway_id` ("MCP server" is the product term for what the code calls a "gateway"). The tool, resource, and prompt list endpoints and `GET /v1/search` accept `mcp_server_id` as a query alias of `gateway_id`. `POST /servers` and `POST /v1/virtual-servers` also accept a top-level `virtual_server` key as an alias of `server`. Sending two spellings with different values returns 422. Existing field names and body keys keep working, OpenAPI property names are unchanged, and responses keep the existing key names. In OpenAPI, the `Body_create_server_*` request components are replaced by `ServerCreateRequest`. Output-side aliasing, RBAC permission strings, audit `resource_type` values, and config names remain tracked under #6544.
+
+- **A2A task and push notification config routes** ([#6702](https://github.com/IBM/mcp-context-forge/issues/6702)) - Clients can now read and manage A2A task data through `/v1/a2a/{agent_id}/tasks`. `GET` lists tasks with `pageSize`, `pageToken`, and `nextPageToken` pagination, `GET .../{task_id}` returns one task, and `POST .../{task_id}/cancel` cancels it. `POST`, `GET`, and `DELETE` on `.../{task_id}/pushNotificationConfigs` manage push notification configs. Reads require `a2a.read`, cancel requires `a2a.invoke`, and config writes require `a2a.update`. Routes apply the same team and visibility scoping as the internal handlers, and return 404 for tasks the caller cannot see. Responses never include `auth_token`. The `/_internal/a2a/*` routes are unchanged.
+
+- **Public A2A agent card lookup** ([#6700](https://github.com/IBM/mcp-context-forge/issues/6700)) - Added `GET /v1/a2a/{agent_id}/card`, gated on `a2a.read`. The route resolves a standalone A2A agent's card first, then falls back to a virtual server exposing an A2A interface. Previously the card was reachable only from the internal Rust-sidecar route.
+
 ## [1.1.0] - 2026-10-19 - Modern MCP Protocol, New Redesigned Web UI, Federated Completions, and Catalog Pagination
 
 ### Overview
@@ -19,6 +73,8 @@ Release 1.1.0 delivers **modern MCP protocol negotiation on by default**, **fede
 - **API & Platform** - Added named A2A response models, the invitee invitations API, passwordless SSO user provisioning, per-user MCP server rate limiting, and success and error counts in the metrics timeseries.
 - **Operations** - Added `make container-bump-image-versions`, moved CSS linting from Stylelint to Biome, migrated Tailwind CSS to v4, removed the anyio monkey-patch settings, the Rust MCP config surface, and the in-tree `mcp-servers/` directory.
 - **Testing** - Eliminated pytest warnings and redundant tests, restored OAuth gateway membership coverage, verified resource template federation, and fixed the live-gateway E2E suite.
+
+- **Gateway connect return arity** ([#4693](https://github.com/IBM/mcp-context-forge/issues/4693)) - `GatewayService._initialize_gateway`, `_initialize_gateway_with_timeout`, `connect_to_sse_server`, `connect_to_streamablehttp_server`, and `_connect_to_sse_server_without_validation` now return a 6-tuple `(capabilities, tools, resources, prompts, validation_errors, instructions)`. Previously they returned 5 items. Out-of-tree callers that unpack the return value must add the sixth binding. After upgrade, every single-upstream virtual server sends the upstream `instructions` text to connecting clients; add a per-server `instructions` override or an empty-string override (`""`) to opt out.
 
 ### Added
 
@@ -40,6 +96,7 @@ Release 1.1.0 delivers **modern MCP protocol negotiation on by default**, **fede
 
 #### **API & Platform**
 
+- **Server `instructions`** ([#4693](https://github.com/IBM/mcp-context-forge/issues/4693)) - A virtual server now sends `instructions` in the `initialize` result (legacy era) and in the `server/discover` result (modern era). An operator can set `instructions` on the virtual server, in the REST API and in the Admin UI. A virtual server whose tools, resources, and prompts all come from one registered gateway sends the text of that upstream server. Every other virtual server sends the default text, as before. An empty override sends no `instructions` field. A caller who cannot see the upstream gateway receives the default text. The gateway stores the upstream text at connect time and at refresh time. Configuration export and import carry `instructions`. The Admin UI edit form sends `instructions` only when the operator changes it. Two Alembic migrations add the `gateways.upstream_instructions` and `servers.instructions` columns. See [Server Instructions](docs/docs/manage/api-usage.md#server-instructions).
 - **Named response models for A2A routes** ([#6820](https://github.com/IBM/mcp-context-forge/pull/6820), [#6699](https://github.com/IBM/mcp-context-forge/issues/6699)) - Added named response models for `POST /v1/a2a/{agent_name}/invoke`, `POST /v1/a2a/invoke`, and `POST /v1/a2a/{agent_name}/jsonrpc`. The OpenAPI schema now exposes typed components while preserving the routes' passthrough behavior.
 - **Invitee invitations API** ([#6960](https://github.com/IBM/mcp-context-forge/pull/6960)) - Added an API for invitee invitations.
 - **Per-user MCP server rate limiting** ([#7191](https://github.com/IBM/mcp-context-forge/pull/7191)) - Adopted per-user rate limiting for MCP servers.

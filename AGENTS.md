@@ -7,7 +7,6 @@ For domain-specific guidance, see subdirectory AGENTS.md files:
 - `plugins/AGENTS.md` - Plugin framework and development
 - `charts/AGENTS.md` - Helm chart operations
 - `docs/AGENTS.md` - Documentation authoring
-- `crates/mcp_runtime/DEVELOPING.md` - Rust MCP runtime development workflows, command matrix, and validation
 
 **Note:** The `llms/` directory holds LLM guidance of two kinds: end-user runtime guidance for using ContextForge, and work prompts for agents changing this repository. Where `llms/` guidance overlaps an `AGENTS.md` file, the `AGENTS.md` file is authoritative.
 
@@ -32,11 +31,9 @@ mcpgateway/                 # Core FastAPI application
 
 tests/                      # Test suite (see tests/AGENTS.md)
 plugins/                    # Plugin implementations (see plugins/AGENTS.md)
-plugins_rust/               # Rust plugin implementations for performance-sensitive paths
 charts/                     # Helm charts (see charts/AGENTS.md)
 docs/                       # Architecture and usage documentation (see docs/AGENTS.md)
 a2a-agents/                 # A2A agent implementations (used for testing/examples)
-crates/                     # Direct Rust crate folders (runtime)
 llms/                       # End-user LLM guidance (not for code agents)
 ```
 
@@ -65,10 +62,6 @@ make pre-commit
 
 # Before committing, use ty, mypy and pyrefly to check just the new files, then run:
 make ruff bandit interrogate pylint verify
-
-# Before committing Rust changes (crates/mcp_runtime/):
-# Run fmt-check, clippy -D warnings, and cargo test for Rust crates
-cd crates/mcp_runtime && cargo fmt --check && cargo clippy -- -D warnings && cargo test
 ```
 
 ## PR Review
@@ -194,8 +187,11 @@ The derived triple is memoized on `request.state` per principal, so calling the 
 |------|-------|-----------------|
 | `platform_admin` | global | `*` (all) |
 | `team_admin` | team | teams.*, tools.read/execute, resources.read |
-| `developer` | team | tools.read/execute, resources.read |
+| `developer` | team | CRUD on gateways, servers, tools, resources, prompts, and A2A agents; execution/invocation; token self-service; dashboard access; team read/join |
 | `viewer` | team | tools.read/execute, resources.read |
+
+The `developer` role includes gateway registration, update, and deletion.
+See the [complete built-in permission table](docs/docs/manage/rbac.md#built-in-rbac-roles) before assigning this role.
 
 ### Documentation
 
@@ -525,9 +521,9 @@ Run from the worktree root, in order. Each command must pass, or the PR must doc
 | Command | Validates |
 |---------|-----------|
 | `make ruff interrogate pylint` | Lint, docstring coverage, deeper static analysis |
-| `make test` | Full pytest suite |
+| `make test` | Full rstest suite |
 | `make coverage diff-cover` | Coverage of changed lines vs. base |
-| `make docker-nuke docker-prod-rust testing-up RUST_MCP_MODE=` | Rebuilds and launches the production-style gateway stack |
+| `make docker-nuke docker-prod testing-up` | Rebuilds and launches the production-style gateway stack |
 | `make test-e2e` | MCP protocol E2E and RBAC against the live gateway |
 | `make detect-secrets-scan` | No new secrets in files changed vs `main`; exits non-zero on live/unaudited findings (jq merge preserves out-of-scope audited entries; remediate with `make detect-secrets-audit`) |
 
@@ -539,6 +535,7 @@ When `detect-secrets` identifies false positives:
 
 - **Python files**: suppress inline with `# pragma: allowlist secret` so they don't appear in `.secrets.baseline` after `make detect-secrets-scan`.
   - Exception: doctest strings where the comment breaks the assertion. Rely on `.secrets.baseline` and audit with `make detect-secrets-audit`.
+- **Makefile**: suppress audited false positives inline with `# pragma: allowlist secret`. In variable assignments, append the pragma directly after the value (no space): make keeps whitespace before a comment in the value.
 - **All other file types**: regenerate the baseline with `make detect-secrets-scan`.
 - **Merge conflicts**: resolve `.secrets.baseline` using the version from `main`.
 
@@ -580,5 +577,5 @@ When `detect-secrets` identifies false positives:
 - `gh` for GitHub operations
 - `make` for build/test automation
 - `uv` for virtual environment management and for `uv tool run` linter invocations
-- Dev-group tools installed in the venv: `pytest`, `mypy`, `bandit`, `pre-commit`, etc. (see `pyproject.toml` `[dependency-groups]`)
+- Dev-group tools installed in the venv: `rstest`, `pytest`, `mypy`, `bandit`, `pre-commit`, etc. (see `pyproject.toml` `[dependency-groups]`)
 - Formatters and linters (`ruff`, `vulture`, `interrogate`, `radon`, `yamllint`, `tomlcheck`) are pinned in the `Makefile` and invoked on demand via `uv tool run`; always prefer the Makefile targets (`make black`, `make ruff`, etc.) over calling the underlying tools directly

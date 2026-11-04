@@ -65,7 +65,7 @@ from starlette.types import Receive, Scope, Send
 # First-Party
 from mcpgateway import __version__
 from mcpgateway.cache.global_config_cache import global_config_cache
-from mcpgateway.common.models import LogLevel
+from mcpgateway.common.models import DEFAULT_SERVER_INSTRUCTIONS, LogLevel
 from mcpgateway.common.validators import validate_meta_data as _validate_meta_data
 from mcpgateway.config import settings
 from mcpgateway.db import Gateway as DbGateway
@@ -3150,8 +3150,8 @@ async def read_resource(resource_uri: str) -> Union[str, bytes, List[Any]]:
         >>> sig = inspect.signature(read_resource)
         >>> list(sig.parameters.keys())
         ['resource_uri']
-        >>> sig.return_annotation
-        typing.Union[str, bytes, typing.List[typing.Any]]
+        >>> sig.return_annotation == Union[str, bytes, List[Any]]
+        True
     """
     upstream_read_cache_var.set(None)  # only an upstream read made during this call may set it
     server_id, request_headers, user_context = await _get_request_context_or_default()
@@ -3256,7 +3256,7 @@ async def read_resource(resource_uri: str) -> Union[str, bytes, List[Any]]:
                 return ""
 
             # Return blob content if available (binary resources)
-            if result and getattr(result, "blob", None):
+            if result and getattr(result, "blob", None) is not None:
                 return _to_mcp_resource_contents(result, fallback_uri=str(resource_uri))
 
             # Return text content if available (text resources)
@@ -3607,6 +3607,65 @@ async def _catalog_ttl_ms(server_id: Optional[str]) -> int:
     return _upstream_refresh_seconds(None) * 1000
 
 
+async def _instructions_for_server(server_id: Optional[str], user_email: Optional[str] = None, token_teams: Optional[List[str]] = ()) -> Optional[str]:
+    """``instructions`` text for a handshake answer: the virtual server's own text, or the default text when unscoped.
+
+    ``user_email`` and ``token_teams`` are forwarded to the resolver so that it can enforce
+    per-server visibility (CWE-639 / CWE-200).  Pass them from the authenticated request
+    context; omit them only when no server is scoped (returns the default text directly).
+
+    Args:
+        server_id: The virtual server the request is scoped to, or None.
+        user_email: Email of the authenticated caller.
+        token_teams: Team IDs from the caller's token. ``None`` is admin bypass; the default is public-only.
+
+    Returns:
+        Optional[str]: The text to send, or None when the answer carries no ``instructions``.
+    """
+    if not server_id:
+        return DEFAULT_SERVER_INSTRUCTIONS
+    # First-Party
+    from mcpgateway.services.server_service import server_service as _server_svc  # pylint: disable=import-outside-toplevel,no-name-in-module
+
+    instructions: Optional[str] = await _server_svc.resolve_instructions(server_id, user_email=user_email, token_teams=token_teams)
+    return instructions
+
+
+async def _legacy_initialize_instructions(ctx: Any, call_next: Any) -> Any:
+    """Server middleware: put the virtual server's ``instructions`` on a legacy ``initialize`` answer.
+
+    The SDK builds the ``initialize`` answer from one shared set of options, so the text cannot
+    differ per virtual server there. This middleware replaces it after the SDK built the answer.
+    It makes no request to the client, because ``initialize`` runs inline.
+
+    Args:
+        ctx: SDK request context.
+        call_next: Next step of the middleware chain.
+
+    Returns:
+        The result of the chain, with the resolved ``instructions`` for an ``initialize`` request.
+    """
+    result = await call_next(ctx)
+    if ctx.method != "initialize" or not isinstance(result, dict):
+        return result
+    token = _v2_request_ctx.set(ctx)
+    try:
+        _, _, user_context = await _get_request_context_or_default()
+        # First-Party
+        from mcpgateway.auth_context import get_scoped_visibility_from_user_context  # pylint: disable=import-outside-toplevel
+
+        user_email, token_teams = get_scoped_visibility_from_user_context(user_context)
+        instructions = await _instructions_for_server(_request_server_id_var.get(), user_email=user_email, token_teams=token_teams)
+    finally:
+        _v2_request_ctx.reset(token)
+    result = dict(result)
+    if instructions:
+        result["instructions"] = instructions
+    else:
+        result.pop("instructions", None)
+    return result
+
+
 async def _adapt_discover_with_ttl_cache_scope(ctx: Any, params: Any = None) -> "types.DiscoverResult":
     """``server/discover`` with the cache directive set: the SDK's default answer plus ttlMs (catalog TTL) and cacheScope=private.
 
@@ -3621,10 +3680,15 @@ async def _adapt_discover_with_ttl_cache_scope(ctx: Any, params: Any = None) -> 
     try:
         # Resolve the request like the list handlers do, so a discover aimed at a
         # virtual server gets that server's TTL rather than the global default.
-        await _get_request_context_or_default()
+        _, _, user_context = await _get_request_context_or_default()
+        # First-Party
+        from mcpgateway.auth_context import get_scoped_visibility_from_user_context  # pylint: disable=import-outside-toplevel
+
+        user_email, token_teams = get_scoped_visibility_from_user_context(user_context)
         result = await mcp_app._handle_discover(ctx, params)  # pylint: disable=protected-access  # the SDK's documented default, overridden here only to add the directive
         result.ttl_ms = await _catalog_ttl_ms(_request_server_id_var.get())
         result.cache_scope = "private"
+        result.instructions = await _instructions_for_server(_request_server_id_var.get(), user_email=user_email, token_teams=token_teams)
         return result
     finally:
         _v2_request_ctx.reset(token)
@@ -3794,6 +3858,7 @@ async def _adapt_complete(ctx: Any, params: Any) -> "types.CompleteResult":
 # Register all handlers via the v2 add_request_handler API. set_logging_level
 # was already migrated to (_ctx, params) form so it registers directly.
 mcp_app.add_request_handler("server/discover", types.RequestParams, _adapt_discover_with_ttl_cache_scope)
+mcp_app.middleware.append(_legacy_initialize_instructions)
 mcp_app.add_request_handler("tools/list", types.PaginatedRequestParams, _adapt_list_tools)
 mcp_app.add_request_handler("tools/call", types.CallToolRequestParams, _adapt_call_tool)
 mcp_app.add_request_handler("prompts/list", types.PaginatedRequestParams, _adapt_list_prompts)

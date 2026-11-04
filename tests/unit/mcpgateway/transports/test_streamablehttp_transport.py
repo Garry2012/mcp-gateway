@@ -154,6 +154,43 @@ async def test_streamable_server_discover_omits_logging_key_for_modern_protocol(
     assert "logging" not in raw_result["capabilities"]
 
 
+@pytest.mark.parametrize("mode", ("legacy", "2026-07-28"))
+@pytest.mark.parametrize(
+    "resolved_server_id, resolved_text, expected",
+    [
+        pytest.param("default_server_id", "unused", tr.DEFAULT_SERVER_INSTRUCTIONS, id="unscoped-sends-default-text"),
+        pytest.param("srv-1", "Call the clock tools in UTC.", "Call the clock tools in UTC.", id="scoped-sends-resolved-text"),
+        pytest.param("srv-1", None, None, id="scoped-with-no-text-omits-field"),
+    ],
+)
+async def test_handshake_instructions_follow_the_server_scope_in_both_protocol_eras(monkeypatch, mode, resolved_server_id, resolved_text, expected):
+    """Legacy ``initialize`` and modern ``server/discover`` carry the same ``instructions`` for one scope."""
+    monkeypatch.setattr(tr, "_resolve_request_context", AsyncMock(return_value=(resolved_server_id, {}, {})))
+    resolve = AsyncMock(return_value=resolved_text)
+    monkeypatch.setattr("mcpgateway.services.server_service.ServerService.resolve_instructions", resolve)
+
+    async with Client(tr.mcp_app, mode=mode, cache=None) as client:
+        if mode == "legacy":
+            assert client.instructions == expected
+        else:
+            discovered = await client.session.send_discover("2026-07-28")
+            assert discovered.get("instructions") == expected
+
+    if resolved_server_id == "default_server_id":
+        resolve.assert_not_awaited()
+    else:
+        # Caller passes user_email and token_teams derived from the request user_context.
+        resolve.assert_awaited_with("srv-1", user_email=None, token_teams=[])
+
+
+async def test_legacy_initialize_middleware_leaves_other_methods_untouched():
+    """Only ``initialize`` answers get new ``instructions``."""
+    call_next = AsyncMock(return_value={"tools": []})
+    result = await tr._legacy_initialize_instructions(SimpleNamespace(method="tools/list"), call_next)  # pylint: disable=protected-access
+
+    assert result == {"tools": []}
+
+
 def test_streamable_server_app_info():
     """Verify that mcp_app is constructed with settings.app_name and __version__."""
     from mcpgateway import __version__
@@ -5352,7 +5389,8 @@ async def test_read_resource_admin_bypass(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_read_resource_returns_blob(monkeypatch):
+@pytest.mark.parametrize("blob", [b"binary content here", b""])
+async def test_read_resource_returns_blob(monkeypatch, blob):
     """Test read_resource returns blob content when available (line 1053)."""
     # Third-Party
     from pydantic import AnyUrl
@@ -5362,7 +5400,7 @@ async def test_read_resource_returns_blob(monkeypatch):
 
     mock_db = MagicMock()
     mock_result = MagicMock()
-    mock_result.blob = b"binary content here"
+    mock_result.blob = blob
     mock_result.text = None
 
     @asynccontextmanager
@@ -5374,7 +5412,7 @@ async def test_read_resource_returns_blob(monkeypatch):
 
     test_uri = AnyUrl("file:///binary.bin")
     result = await read_resource(test_uri)
-    assert _read_content(result) == b"binary content here"
+    assert _read_content(result) == blob
 
 
 # ---------------------------------------------------------------------------
@@ -12323,7 +12361,7 @@ class TestProxyUpstreamAuthorizationRename:
     rename happens correctly via compute_passthrough_headers_cached.
     """
 
-    def _make_gateway(self, auth_type="bearer", passthrough_headers=None):
+    def _make_gateway(self, auth_type="one_time_auth", passthrough_headers=None):
         gw = MagicMock()
         gw.id = "gw-upstream"
         gw.url = "http://remote.example.com/mcp"
@@ -12378,6 +12416,39 @@ class TestProxyUpstreamAuthorizationRename:
 
         assert "Authorization" in captured, "X-Upstream-Authorization was not renamed to Authorization"
         assert captured["Authorization"] == "Bearer upstream-token-123"
+
+    @pytest.mark.asyncio
+    async def test_list_tools_blocks_upstream_auth_for_managed_credential(self):
+        """X-Upstream-Authorization must not replace a gateway-managed Authorization header."""
+        gw = self._make_gateway(auth_type="bearer")
+        session = self._make_mocks("tools")
+        request_headers = {"x-upstream-authorization": "Bearer attacker-token"}
+        captured = {}
+
+        mock_db = MagicMock()
+        mock_db.__enter__ = MagicMock(return_value=mock_db)
+        mock_db.__exit__ = MagicMock(return_value=False)
+
+        def _return_session_with_header_capture(*_args, **_kwargs):
+            """Return session mock while capturing headers from mcp_proxy_client call."""
+            captured.update(_kwargs.get("headers", {}) or {})
+            return session
+
+        with patch("mcpgateway.transports.streamablehttp_transport.mcp_proxy_client", side_effect=_return_session_with_header_capture):
+            with patch("mcpgateway.transports.streamablehttp_transport.build_gateway_auth_headers", return_value={"Authorization": "Bearer stored-token"}):
+                with patch("mcpgateway.transports.streamablehttp_transport.SessionLocal", return_value=mock_db):
+                    with patch("mcpgateway.transports.streamablehttp_transport.global_config_cache") as mock_cache:
+                        mock_cache.get_passthrough_headers.return_value = []
+                        with patch("mcpgateway.transports.streamablehttp_transport.settings") as mock_settings:
+                            mock_settings.default_passthrough_headers = []
+                            mock_settings.mcpgateway_direct_proxy_timeout = 30
+                            with patch("mcpgateway.utils.passthrough_headers.settings") as mock_ph_settings:
+                                mock_ph_settings.max_header_value_length = 4096
+                                mock_ph_settings.enable_header_passthrough = False
+                                mock_ph_settings.enable_overwrite_base_headers = False
+                                await tr._proxy_list_tools_to_gateway(gw, request_headers, {}, None)
+
+        assert captured["Authorization"] == "Bearer stored-token"
 
     @pytest.mark.asyncio
     async def test_list_resources_renames_upstream_auth(self):
@@ -13654,6 +13725,48 @@ async def test_handle_streamable_http_server_scope_requires_servers_use(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_denied_caller_never_reaches_the_instructions_resolver(monkeypatch):
+    """A caller without permission on the virtual server gets 403 before any handshake answer or text lookup."""
+    # Third-Party
+    import orjson
+
+    # First-Party
+    from mcpgateway.transports.streamablehttp_transport import SessionManagerWrapper, user_context_var
+
+    class DummySessionManager:
+        @asynccontextmanager
+        async def run(self):
+            yield self
+
+    dummy_manager = DummySessionManager()
+    dummy_manager.handle_request = AsyncMock()
+    resolve = AsyncMock(return_value="secret text")
+
+    monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport.StreamableHTTPSessionManager", lambda **kwargs: dummy_manager)
+    monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport.settings.mcpgateway_session_affinity_enabled", False)
+    monkeypatch.setattr("mcpgateway.services.server_service.ServerService.resolve_instructions", resolve)
+
+    wrapper = SessionManagerWrapper()
+    await wrapper.initialize()
+
+    token = user_context_var.set({"email": "dev@example.com", "teams": ["other-team"], "is_admin": False, "is_authenticated": True})
+    try:
+        monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport._check_streamable_permission", AsyncMock(return_value=False))
+
+        scope = _make_scope("/servers/abc-123-def/mcp", method="POST", headers=[])
+        receive = _make_receive(orjson.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}))
+        send, messages = _make_send_collector()
+
+        await wrapper.handle_streamable_http(scope, receive, send)
+
+        starts = [m for m in messages if m["type"] == "http.response.start"]
+        assert starts and starts[0]["status"] == tr.HTTP_403_FORBIDDEN
+        dummy_manager.handle_request.assert_not_awaited()
+        resolve.assert_not_awaited()
+    finally:
+        user_context_var.reset(token)
+
+
 async def test_handle_streamable_http_server_scope_rbac_forbidden_on_get(monkeypatch):
     """#4205 regression guard: GET without RBAC permission must 403, not 405.
 
