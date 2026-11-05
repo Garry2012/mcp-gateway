@@ -282,7 +282,8 @@ COPY run.sh /app/
 #   - gunicorn config + mcp catalog (rare/occasional)
 #   - mcpgateway/ + plugins/ (change most often)
 # ----------------------------------------------------------------------------
-# See note above: classic-builder compatible form of `COPY --chmod=`.
+# Classic-builder compatible form of `COPY --chmod=`: Azure ACR Tasks uses the
+# classic Docker builder, which fails with "the --chmod option requires BuildKit".
 COPY run-gunicorn.sh docker-entrypoint.sh run.sh /app/
 RUN chmod 0755 /app/run-gunicorn.sh /app/docker-entrypoint.sh /app/run.sh
 COPY gunicorn.config.py mcp-catalog.yml /app/
