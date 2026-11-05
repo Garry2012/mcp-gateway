@@ -230,15 +230,24 @@ Trace naming adds no separate database lookup and occurs after tool authorizatio
 Run `tests/unit/mcpgateway/test_tool_trace_names.py` and `tests/live_gateway/test_call_sessions.py`.
 Unit tests cover server renames and multiple servers. The live OTLP test verifies named roots and call-session grouping.
 
+#### FastAPI request tracing ownership
+
 FastAPI native tracing is disabled with `telemetry={"tracing": False}` on the gateway application.
 `OpenTelemetryRequestMiddleware` owns HTTP request tracing and applies the transport-path filter.
 Native tracing bypasses that filter and creates unwanted HTTP roots for static, administrative, and probe requests.
 It also duplicates request tracing for MCP calls. Native dependency, endpoint, and serialization spans are intentionally omitted.
 ContextForge tool spans, payload capture, call-session grouping, and HTTPX tracing retain their existing configuration.
+FastAPI requires version 0.143.0 or later, which supports this setting and makes automatic exporter setup opt-in.
+Only tracing is disabled because this correction concerns trace ownership. Native metrics and logs retain their defaults.
+ContextForge currently registers no global meter or logger provider. Adding either can reactivate the native wrapper and requires a separate telemetry review.
+This override applies to the gateway application, not the separate applications in `mcpgateway.translate`.
+Translator tracing requires separate review because those applications do not share the gateway's request middleware.
 
 **Merge guidance:** retain the override until upstream provides one HTTP tracing owner with equivalent filtering and propagation.
 Run `tests/live_gateway/mcp/test_request_trace_policy.py` with observability extras.
 The live collector checks excluded routes, remote parents, generated roots, payload capture, and tracing failures.
+For FastAPI dependency, endpoint, or serialization timing, temporarily set `tracing` to `True` in an isolated non-production build.
+Expect duplicate and unfiltered HTTP spans during that diagnostic run. Restore `False` when the investigation finishes.
 
 ### 7. Deferred dashboard loading and partial errors
 
