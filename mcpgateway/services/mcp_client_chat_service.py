@@ -24,39 +24,36 @@ from typing import Any, AsyncGenerator, Dict, List, Literal, Optional, Union
 from uuid import uuid4
 
 # Third-Party
+import httpx2
+from mcp.client import Client as MCPSDKClient
+from mcp.client.sse import sse_client
+from mcp.client.stdio import StdioServerParameters
+import mcp_types
 import orjson
 
 try:
     # Third-Party
-    from fastmcp import Client as FastMCPClient
-    from fastmcp.client.elicitation import ElicitResult
-    from fastmcp.client.transports import SSETransport, StdioTransport, StreamableHttpTransport
-    from langchain.mcp import MCPAdapter
     from langchain_core.language_models import BaseChatModel
     from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
-    from langchain_core.tools import BaseTool
+    from langchain_core.tools import BaseTool, StructuredTool, ToolException
     from langchain_ollama import ChatOllama, OllamaLLM
     from langchain_openai import AzureChatOpenAI, AzureOpenAI, ChatOpenAI, OpenAI
     from langgraph.prebuilt import create_react_agent
 
     _LLMCHAT_AVAILABLE = True
     _LLMCHAT_IMPORT_ERROR: Optional[ImportError] = None
-except ImportError as _import_error:
+except ImportError as import_error:
     # Optional dependencies for LLM chat feature not installed
     # These are only needed if LLMCHAT_ENABLED=true
     _LLMCHAT_AVAILABLE = False
-    _LLMCHAT_IMPORT_ERROR = _import_error
+    _LLMCHAT_IMPORT_ERROR = import_error
     BaseChatModel = None  # type: ignore
     AIMessage = None  # type: ignore
     BaseMessage = None  # type: ignore
     HumanMessage = None  # type: ignore
     BaseTool = None  # type: ignore
-    MCPAdapter = None  # type: ignore
-    FastMCPClient = None  # type: ignore
-    ElicitResult = None  # type: ignore
-    SSETransport = None  # type: ignore
-    StdioTransport = None  # type: ignore
-    StreamableHttpTransport = None  # type: ignore
+    StructuredTool = None  # type: ignore
+    ToolException = None  # type: ignore
     ChatOllama = None  # type: ignore
     OllamaLLM = None
     AzureChatOpenAI = None  # type: ignore
@@ -105,10 +102,25 @@ from mcpgateway.config import settings
 from mcpgateway.observability import create_span, set_span_attribute
 from mcpgateway.services.cancellation_service import cancellation_service
 from mcpgateway.services.logging_service import LoggingService
+from mcpgateway.utils.streamable_http_compat import streamable_http_client
 from mcpgateway.utils.trace_redaction import is_input_capture_enabled, is_output_capture_enabled, serialize_trace_payload
 
 logging_service = LoggingService()
 logger = logging_service.get_logger(__name__)
+
+
+def _llmchat_missing_message() -> str:
+    """Explain why the LLM chat dependencies cannot be used, naming the import that failed.
+
+    Returns:
+        str: The error message, with the install hint.
+
+    Examples:
+        >>> "pip install '.[llmchat]'" in _llmchat_missing_message()
+        True
+    """
+    cause = f" ({_LLMCHAT_IMPORT_ERROR})" if _LLMCHAT_IMPORT_ERROR else ""
+    return f"LLM chat dependencies are missing{cause}. Install them with: pip install '.[llmchat]'"
 
 
 def _llm_system_name(service: "MCPChatService") -> str:
@@ -2125,26 +2137,146 @@ class ChatHistoryManager:
 # ==================== MCP CLIENT ====================
 
 
-async def _decline_elicitation(message: str, _response_type: Any, _params: Any, _context: Any) -> Any:
-    """
-    Decline an MCP elicitation request raised during LLM chat.
+#: Connection and read timeouts for tool calls over HTTP transports: a tool may run for minutes.
+_TOOL_CALL_TIMEOUT = httpx2.Timeout(30.0, read=300.0)
 
-    LLM chat runs a LangGraph agent without a checkpointer, so it cannot pause a
-    tool call for user input. Without this handler, ``MCPAdapter`` turns the request
-    into a LangGraph interrupt and the chat returns an empty answer. Declining lets
-    the MCP server complete the call with a decline outcome.
+
+def _build_transport(connection: Dict[str, Any]) -> Any:
+    """Return the MCP SDK transport for one chat server connection.
 
     Args:
-        message: The prompt the MCP server wants to show the user.
-        _response_type: Expected response type (unused).
-        _params: Raw elicitation request parameters (unused).
-        _context: MCP request context (unused).
+        connection: Server settings with ``transport`` and either ``url`` plus optional
+            ``headers``, or ``command`` plus optional ``args``.
 
     Returns:
-        Any: An ``ElicitResult`` with ``action="decline"``.
+        Any: A target accepted by ``mcp.client.Client``.
+
+    Raises:
+        ValueError: If the transport is not supported.
+
+    Examples:
+        >>> _build_transport({"transport": "stdio", "command": "python", "args": ["server.py"]}).args
+        ['server.py']
+        >>> _build_transport({"transport": "websocket"})
+        Traceback (most recent call last):
+            ...
+        ValueError: Unsupported MCP transport: websocket
     """
-    logger.info("Declining MCP elicitation request during LLM chat (%s characters)", len(message or ""))
-    return ElicitResult(action="decline")
+    transport = connection.get("transport")
+    if transport == "streamable_http":
+        return streamable_http_client(connection["url"], headers=connection.get("headers"), timeout=_TOOL_CALL_TIMEOUT)
+    if transport == "sse":
+        return sse_client(connection["url"], headers=connection.get("headers"), timeout=30.0, sse_read_timeout=300.0)
+    if transport == "stdio":
+        return StdioServerParameters(command=connection["command"], args=connection.get("args") or [])
+    raise ValueError(f"Unsupported MCP transport: {transport}")
+
+
+def _result_text(result: "mcp_types.CallToolResult") -> str:
+    """Join the text blocks of a tool result.
+
+    Args:
+        result: The result returned by ``tools/call``.
+
+    Returns:
+        str: The text blocks joined by newlines; empty when the result carries no text.
+
+    Examples:
+        >>> _result_text(mcp_types.CallToolResult(content=[mcp_types.TextContent(type="text", text="a"), mcp_types.TextContent(type="text", text="b")]))
+        'a\\nb'
+    """
+    return "\n".join(block.text for block in result.content if isinstance(block, mcp_types.TextContent))
+
+
+class MCPToolLoader:
+    """Load the tools of one MCP server as LangChain tools, using the MCP SDK client.
+
+    Every listing and every tool call opens its own session, so nothing stays connected
+    between chat turns. Talking to the server (:meth:`list_tools`, :meth:`call_tool`) is
+    kept apart from wrapping the result for LangChain (:meth:`_as_langchain_tool`).
+
+    Examples:
+        >>> loader = MCPToolLoader({"transport": "stdio", "command": "python"})
+        >>> loader.connection["command"]
+        'python'
+    """
+
+    def __init__(self, connection: Dict[str, Any]):
+        """Keep the server settings for later sessions.
+
+        Args:
+            connection: Server settings as accepted by :func:`_build_transport`.
+        """
+        self.connection = connection
+
+    async def list_tools(self) -> List["mcp_types.Tool"]:
+        """List every tool definition the server offers, following pagination.
+
+        Returns:
+            List[mcp_types.Tool]: The definitions exactly as ``tools/list`` returned them.
+        """
+        tools: List[mcp_types.Tool] = []
+        async with MCPSDKClient(_build_transport(self.connection)) as client:
+            cursor: Optional[str] = None
+            while True:
+                page = await client.list_tools(cursor=cursor)
+                tools.extend(page.tools)
+                cursor = page.next_cursor
+                if not cursor:
+                    break
+        return tools
+
+    async def call_tool(self, name: str, arguments: Dict[str, Any]) -> tuple[str, bool]:
+        """Call one tool over a fresh session.
+
+        Args:
+            name: The tool to call.
+            arguments: The tool arguments.
+
+        Returns:
+            tuple[str, bool]: The text content of the result and whether the server marked it an error.
+        """
+        async with MCPSDKClient(_build_transport(self.connection)) as client:
+            result = await client.call_tool(name, arguments)
+        return _result_text(result), bool(result.is_error)
+
+    async def get_tools(self) -> List["BaseTool"]:
+        """List the server's tools as LangChain tools.
+
+        Returns:
+            List[BaseTool]: One LangChain tool per MCP tool.
+        """
+        return [self._as_langchain_tool(tool) for tool in await self.list_tools()]
+
+    def _as_langchain_tool(self, tool: "mcp_types.Tool") -> "BaseTool":
+        """Wrap one MCP tool definition in a LangChain tool that calls it through :meth:`call_tool`.
+
+        Args:
+            tool: The tool definition from ``tools/list``.
+
+        Returns:
+            BaseTool: A ``StructuredTool`` whose argument schema is the MCP input schema.
+        """
+
+        async def _call(**arguments: Any) -> str:
+            """Call the MCP tool and return its text content.
+
+            Args:
+                **arguments: The tool arguments chosen by the LLM.
+
+            Returns:
+                str: The text content of the result.
+
+            Raises:
+                ToolException: If the server marked the result as an error.
+            """
+            text, is_error = await self.call_tool(tool.name, arguments)
+            if is_error:
+                raise ToolException(text or f"Tool {tool.name} failed")
+            return text
+
+        # handle_tool_error hands a ToolException back to the model as a tool message instead of aborting the run
+        return StructuredTool(name=tool.name, description=tool.description or "", args_schema=tool.input_schema, coroutine=_call, handle_tool_error=True)
 
 
 class MCPClient:
@@ -2192,7 +2324,7 @@ class MCPClient:
             'streamable_http'
         """
         self.config = config
-        self._client: Optional[MCPAdapter] = None
+        self._client: Optional[MCPToolLoader] = None
         self._tools: Optional[List[BaseTool]] = None
         self._connected = False
         logger.info("MCP client initialized with transport: %s", config.transport)
@@ -2227,10 +2359,25 @@ class MCPClient:
         try:
             logger.info("Connecting to MCP server via %s...", self.config.transport)
 
-            if not MCPAdapter:
-                logger.error("Some dependencies are missing. Install those with: pip install '.[llmchat]'")
+            # Build the server connection for the tool loader
+            server_config = {
+                "transport": self.config.transport,
+            }
 
-            self._client = MCPAdapter(FastMCPClient(self._build_transport(), elicitation_handler=_decline_elicitation, mode=settings.mcp_client_connect_mode))
+            if self.config.transport in ["streamable_http", "sse"]:
+                server_config["url"] = self.config.url
+                if self.config.headers:
+                    server_config["headers"] = self.config.headers
+            elif self.config.transport == "stdio":
+                server_config["command"] = self.config.command
+                if self.config.args:
+                    server_config["args"] = self.config.args
+
+            if not _LLMCHAT_AVAILABLE:
+                logger.error(_llmchat_missing_message())
+                raise ImportError(_llmchat_missing_message())
+
+            self._client = MCPToolLoader(server_config)
             self._connected = True
             logger.info("Successfully connected to MCP server")
 
@@ -2238,25 +2385,6 @@ class MCPClient:
             logger.error("Failed to connect to MCP server: %s", e)
             self._connected = False
             raise ConnectionError(f"Failed to connect to MCP server: {e}") from e
-
-    def _build_transport(self) -> Any:
-        """
-        Build the FastMCP client transport for the configured MCP server.
-
-        Returns:
-            Any: A ``StreamableHttpTransport``, ``SSETransport`` or ``StdioTransport``.
-
-        Raises:
-            ValueError: If the configured transport is not supported.
-        """
-        headers = self.config.headers or None
-        if self.config.transport == "streamable_http":
-            return StreamableHttpTransport(self.config.url, headers=headers)
-        if self.config.transport == "sse":
-            return SSETransport(self.config.url, headers=headers)
-        if self.config.transport == "stdio":
-            return StdioTransport(self.config.command, list(self.config.args or []))
-        raise ValueError(f"Unsupported MCP transport: {self.config.transport}")
 
     async def disconnect(self) -> None:
         """
@@ -2288,7 +2416,7 @@ class MCPClient:
 
         try:
             if self._client:
-                # MCPAdapter opens a session per tool listing and per tool call
+                # The loader opens a session per operation; nothing is held open
                 self._client = None
 
             self._connected = False
@@ -2339,7 +2467,7 @@ class MCPClient:
 
         try:
             logger.info("Loading tools from MCP server...")
-            self._tools = await self._client.list_tools()
+            self._tools = await self._client.get_tools()
             logger.info("Successfully loaded %s tools", len(self._tools))
             return self._tools
 
@@ -2484,7 +2612,7 @@ class MCPChatService:
             return
 
         if not _LLMCHAT_AVAILABLE:
-            raise ImportError(f"LLM chat dependencies are missing or incompatible ({_LLMCHAT_IMPORT_ERROR}). Install them with: pip install '.[llmchat]'")
+            raise ImportError(_llmchat_missing_message())
 
         try:
             logger.info("Initializing chat service...")
@@ -3162,7 +3290,7 @@ class MCPChatService:
             raise RuntimeError("Chat service not initialized")
 
         if not _LLMCHAT_AVAILABLE:
-            raise ImportError(f"LLM chat dependencies are missing or incompatible ({_LLMCHAT_IMPORT_ERROR}). Install them with: pip install '.[llmchat]'")
+            raise ImportError(_llmchat_missing_message())
 
         try:
             logger.info("Reloading tools from MCP server...")

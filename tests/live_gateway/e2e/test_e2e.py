@@ -63,8 +63,9 @@ import httpx2
 from mcp import ClientSession, MCPError as McpError
 from mcp.client import Client
 from mcp.client.streamable_http import create_mcp_http_client, streamable_http_client
+from mcp.server.lowlevel.server import Server
 from mcp.server.mcpserver import MCPServer
-from mcp.types import PaginatedRequestParams
+from mcp.types import ListPromptsResult, ListToolsResult, PaginatedRequestParams, Prompt, Tool
 from mcp_types import LoggingMessageNotificationParams
 import pytest
 import uvicorn
@@ -91,7 +92,6 @@ from ..helpers.mcp_test_helpers import (
     build_initialize,
     JWT_SECRET,
     skip_no_gateway,
-    skip_no_rust_mcp_gateway,
     TEST_PASSWORD,
     TOKEN_EXPIRY,
 )
@@ -141,7 +141,7 @@ skip_no_mcp_apps = pytest.mark.skipif(
 _MODERN_INBOUND_E2E_ENABLED = os.getenv("MCP_INBOUND_PROTOCOL_MODE", "legacy").strip().lower() == "auto"
 skip_no_modern_inbound = pytest.mark.skipif(
     not _MODERN_INBOUND_E2E_ENABLED,
-    reason="Modern MCP E2E requires a gateway started with MCP_INBOUND_PROTOCOL_MODE=auto and RUST_MCP_MODE=off",
+    reason="Modern MCP E2E requires a gateway started with MCP_INBOUND_PROTOCOL_MODE=auto",
 )
 
 
@@ -397,6 +397,92 @@ def tool_error_upstream() -> Generator[str, None, None]:
         server.should_exit = True
         thread.join(timeout=10)
         listener.close()
+
+
+@pytest.fixture
+def repeating_pagination_upstream(request):
+    """Serve overlapping MCP pages with a repeated outgoing cursor."""
+    kind = request.param
+    host = os.getenv("MCP_NAMESPACING_UPSTREAM_HOST", "host.docker.internal")
+
+    async def list_tools(context, params):
+        """Return overlapping tool pages."""
+        if kind == "prompts":
+            return ListToolsResult(tools=[])
+        keys = "ab" if params is None or params.cursor is None else "bc"
+        return ListToolsResult(tools=[Tool(name=key, input_schema={"type": "object"}) for key in keys], next_cursor="repeat")
+
+    async def list_prompts(context, params):
+        """Return overlapping prompt pages."""
+        keys = "ab" if params is None or params.cursor is None else "bc"
+        return ListPromptsResult(prompts=[Prompt(name=key) for key in keys], next_cursor="repeat")
+
+    options = {"on_list_tools": list_tools}
+    if kind == "prompts":
+        options["on_list_prompts"] = list_prompts
+    app = Server("repeating-pagination", **options)
+    listener = socket.socket()
+    listener.bind(("0.0.0.0", 0))
+    port = listener.getsockname()[1]
+    server = uvicorn.Server(
+        uvicorn.Config(
+            app.streamable_http_app(host="0.0.0.0", stateless_http=True, json_response=True),
+            log_level="error",
+        )
+    )
+    thread = threading.Thread(target=server.run, kwargs={"sockets": [listener]}, daemon=True)
+    thread.start()
+    try:
+        deadline = time.monotonic() + 10
+        while not server.started and thread.is_alive() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert server.started, "Repeating pagination upstream failed to start"
+        yield kind, f"http://{host}:{port}/mcp"
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)
+        listener.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("repeating_pagination_upstream", ["tools", "prompts"], indirect=True)
+async def test_repeated_pagination_registration(jwt_token, repeating_pagination_upstream):
+    """Register overlapping pages and retain each distinct upstream identity."""
+    kind, url = repeating_pagination_upstream
+    name = f"pagination{uuid.uuid4().hex[:12]}"
+    gateway_id = None
+    async with httpx.AsyncClient(base_url=BASE_URL, headers={"Authorization": f"Bearer {jwt_token}"}, timeout=60) as http:
+        try:
+            response = await http.post(
+                "/gateways",
+                json={"name": name, "url": url, "transport": "STREAMABLEHTTP", "visibility": "public"},
+            )
+            assert response.status_code in (200, 201, 202), response.text
+            gateway_id = response.json()["id"]
+            deadline = time.monotonic() + 60
+            rows = []
+            while time.monotonic() < deadline:
+                response = await http.get(f"/{kind}", params={"gateway_id": gateway_id, "limit": 100})
+                assert response.status_code == 200, response.text
+                rows = [row for row in response.json() if row.get("gatewayId") == gateway_id]
+                if len(rows) == 3:
+                    break
+                await asyncio.sleep(0.5)
+            assert sorted(row["originalName"] for row in rows) == ["a", "b", "c"], rows
+        finally:
+            if gateway_id is not None:
+                response = await http.delete(f"/gateways/{gateway_id}")
+                assert response.status_code in (200, 202, 204), response.text
+                deadline = time.monotonic() + 60
+                gateway_found = True
+                while time.monotonic() < deadline:
+                    response = await http.get("/gateways", params={"include_inactive": True, "limit": 0})
+                    assert response.status_code == 200, response.text
+                    gateway_found = any(row.get("id") == gateway_id for row in response.json())
+                    if not gateway_found:
+                        break
+                    await asyncio.sleep(0.5)
+                assert not gateway_found, f"Gateway {gateway_id} remains after deletion"
 
 
 @pytest.fixture
@@ -1265,38 +1351,6 @@ class TestRawJsonRpc:
                     http.delete(f"{BASE_URL}/resources/{resource_id}", headers=rest_headers)
 
 
-@skip_no_rust_mcp_gateway
-class TestRawHttpTransportParity:
-    """Direct HTTP checks for the Rust-fronted MCP transport."""
-
-    def test_initialize_delete_flow_uses_rust_transport(self, jwt_token: str) -> None:
-        """Raw initialize and DELETE should stay on the Rust MCP edge when enabled."""
-        initialize_headers = {
-            "authorization": f"Bearer {jwt_token}",
-            "accept": "application/json, text/event-stream",
-            "content-type": "application/json",
-            "mcp-protocol-version": "2025-03-26",
-        }
-
-        with httpx.Client(timeout=10.0) as client:
-            init_response = client.post(f"{BASE_URL}/mcp/", headers=initialize_headers, json=build_initialize())
-            assert init_response.status_code == 200, init_response.text
-            runtime_marker = init_response.headers.get("x-contextforge-mcp-runtime")
-            if runtime_marker != "rust":
-                pytest.skip("Rust MCP runtime not enabled on target gateway")
-
-            print(f"    -> Raw HTTP initialize runtime header: {runtime_marker}")
-
-            delete_headers = {
-                "authorization": f"Bearer {jwt_token}",
-                "accept": "application/json, text/event-stream",
-            }
-            delete_response = client.request("DELETE", f"{BASE_URL}/mcp/", headers=delete_headers)
-            assert delete_response.status_code == 405, delete_response.text
-            assert delete_response.headers.get("x-contextforge-mcp-runtime") == "rust"
-            print(f"    -> Raw HTTP DELETE runtime header: {delete_response.headers.get('x-contextforge-mcp-runtime')}")
-
-
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -1965,8 +2019,6 @@ async def _federated_templates(peers: list[TemplatePeer], token: str, *, standar
             health = await http.get("/health")
             health.raise_for_status()
             runtime = health.headers.get("x-contextforge-mcp-transport-mounted", "python")
-            if runtime == "rust":
-                pytest.skip("Issue #6625 covers the Python MCP runtime")
             print(json.dumps({"issue": 6625, "gateway_commit": os.getenv("MCP_TEMPLATE_GATEWAY_COMMIT", "unverified"), "runtime": runtime, "client_mcp_sdk": version("mcp")}))
             for peer in peers:
                 response = await http.post("/gateways", json={"name": peer.label, "url": peer.url, "transport": "STREAMABLEHTTP", "visibility": "public"})

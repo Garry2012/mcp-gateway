@@ -2829,6 +2829,100 @@ class TestRecoverTokenTeamsFromJwt:
         assert _recover_token_teams_from_jwt(request) is None
 
 
+_DCR_ISSUER = "https://issuer.example.com"
+
+
+async def _run_dcr_initiate(mock_db, mock_request, mock_current_user, oauth_config, metadata):
+    """Run initiate_oauth_flow through the DCR branch with the given config and AS metadata.
+
+    Returns:
+        Tuple of the gateway mock and the initiate_oauth_flow result.
+    """
+    mock_gateway = Mock(spec=Gateway)
+    mock_gateway.id = "gateway123"
+    mock_gateway.name = "Gateway"
+    mock_gateway.url = "https://mcp.example.com"
+    mock_gateway.visibility = "public"
+    mock_gateway.team_id = None
+    mock_gateway.auth_type = None
+    mock_gateway.oauth_config = {
+        "grant_type": "authorization_code",
+        "issuer": _DCR_ISSUER,
+        "redirect_uri": "https://gateway.example.com/oauth/callback",
+        **oauth_config,
+    }
+    mock_db.execute.return_value.scalar_one_or_none.return_value = mock_gateway
+
+    class _Registered:
+        client_id = "client-123"
+        client_secret_encrypted = None
+        token_endpoint_auth_method = "client_secret_post"
+
+    class _FakeDcrService:
+        async def get_or_register_client(self, **_kwargs):
+            return _Registered()
+
+        async def discover_as_metadata(self, _issuer):
+            return metadata
+
+    with patch("mcpgateway.routers.oauth_router.DcrService", return_value=_FakeDcrService()):
+        with patch("mcpgateway.routers.oauth_router.OAuthManager") as mock_oauth_mgr:
+            mock_mgr = Mock()
+            mock_mgr.initiate_authorization_code_flow = AsyncMock(return_value={"authorization_url": f"{_DCR_ISSUER}/auth"})
+            mock_oauth_mgr.return_value = mock_mgr
+
+            with patch("mcpgateway.routers.oauth_router.TokenStorageService"):
+                # First-Party
+                from mcpgateway.routers.oauth_router import initiate_oauth_flow
+
+                with patch("mcpgateway.routers.oauth_router.settings") as mock_settings:
+                    mock_settings.dcr_enabled = True
+                    mock_settings.dcr_auto_register_on_missing_credentials = True
+                    mock_settings.dcr_default_scopes = ["openid"]
+
+                    result = await initiate_oauth_flow("gateway123", mock_request, mock_current_user, mock_db)
+    return mock_gateway, result
+
+
+class TestDcrDiscoveredEndpointGate:
+    """Authorize-time DCR must gate AS metadata endpoints to the issuer origin."""
+
+    @pytest.mark.asyncio
+    async def test_dcr_metadata_rejects_cross_origin_token_endpoint(self, mock_db, mock_request, mock_current_user):
+        """A cross-origin token_endpoint aborts DCR and is not persisted."""
+        metadata = {"authorization_endpoint": f"{_DCR_ISSUER}/auth", "token_endpoint": "https://evil.example.net/token"}
+
+        with pytest.raises(HTTPException) as exc_info:
+            await _run_dcr_initiate(mock_db, mock_request, mock_current_user, {}, metadata)
+
+        assert exc_info.value.status_code == 500
+        mock_db.commit.assert_not_called()
+        assert "token_url" not in mock_db.execute.return_value.scalar_one_or_none.return_value.oauth_config
+
+    @pytest.mark.asyncio
+    async def test_dcr_metadata_rejects_cross_origin_authorization_endpoint(self, mock_db, mock_request, mock_current_user):
+        """A cross-origin authorization_endpoint aborts DCR and is not persisted."""
+        metadata = {"authorization_endpoint": "https://evil.example.net/auth", "token_endpoint": f"{_DCR_ISSUER}/token"}
+
+        with pytest.raises(HTTPException) as exc_info:
+            await _run_dcr_initiate(mock_db, mock_request, mock_current_user, {}, metadata)
+
+        assert exc_info.value.status_code == 500
+        mock_db.commit.assert_not_called()
+        assert "authorization_url" not in mock_db.execute.return_value.scalar_one_or_none.return_value.oauth_config
+
+    @pytest.mark.asyncio
+    async def test_dcr_metadata_keeps_admin_configured_token_url(self, mock_db, mock_request, mock_current_user):
+        """An admin-configured token_url is neither validated against metadata nor overwritten."""
+        metadata = {"authorization_endpoint": f"{_DCR_ISSUER}/auth", "token_endpoint": "https://evil.example.net/token"}
+
+        mock_gateway, result = await _run_dcr_initiate(mock_db, mock_request, mock_current_user, {"token_url": f"{_DCR_ISSUER}/admin-token"}, metadata)
+
+        assert isinstance(result, RedirectResponse)
+        assert mock_gateway.oauth_config["token_url"] == f"{_DCR_ISSUER}/admin-token"
+        assert mock_gateway.oauth_config["authorization_url"] == f"{_DCR_ISSUER}/auth"
+
+
 class TestOAuthRouterAdditionalCoverage:
     """Additional coverage for OAuth router branches."""
 
@@ -4528,7 +4622,13 @@ class TestOAuthRouterPopupMode:
 
     @pytest.mark.asyncio
     async def test_oauth_callback_without_popup_state_returns_html_page(self, mock_db):
-        """Test oauth_callback returns full HTML page when state does not start with 'popup.'"""
+        """Test oauth_callback returns full HTML page when state does not start with 'popup.'
+
+        Structural assertions verify that:
+        - postMessage with status 'success' is emitted only inside the ``if (response.ok)`` branch.
+        - The ``else`` branch throws an error, not a success message.
+        - Changing ``if (response.ok)`` to ``if (!response.ok)`` breaks every assertion below.
+        """
         from mcpgateway.routers.oauth_router import oauth_callback
 
         # Mock gateway
@@ -4539,7 +4639,7 @@ class TestOAuthRouterPopupMode:
         mock_gateway.oauth_config = {
             "client_id": "test-client",
             "authorization_url": "https://oauth.example.com/authorize",
-            "token_url": "https://oauth.example.com/token"
+            "token_url": "https://oauth.example.com/token",
         }
         mock_gateway.ca_certificate = None
         mock_gateway.client_cert = None
@@ -4547,43 +4647,82 @@ class TestOAuthRouterPopupMode:
 
         mock_db.execute.return_value.scalar_one_or_none.return_value = mock_gateway
 
-        # Mock OAuth manager
         with patch("mcpgateway.routers.oauth_router.OAuthManager") as mock_oauth_manager_class:
             mock_oauth_manager = Mock()
             mock_oauth_manager.resolve_gateway_id_from_state = AsyncMock(return_value="test-gateway")
-            mock_oauth_manager.complete_authorization_code_flow = AsyncMock(return_value={
-                "user_id": "user@example.com",
-                "expires_at": "2026-12-31T23:59:59Z",
-                "state_data": {"app_user_email": "user@example.com", "team_id": None},
-            })
+            mock_oauth_manager.complete_authorization_code_flow = AsyncMock(
+                return_value={
+                    "user_id": "user@example.com",
+                    "expires_at": "2026-12-31T23:59:59Z",
+                    "state_data": {"app_user_email": "user@example.com", "team_id": None},
+                }
+            )
             mock_oauth_manager_class.return_value = mock_oauth_manager
 
             with patch("mcpgateway.routers.oauth_router.TokenStorageService"):
                 with patch("mcpgateway.routers.oauth_router._persist_learned_audience", new_callable=AsyncMock):
-                    # Mock request with CSP nonce
                     mock_request = Mock()
                     mock_request.state = Mock()
                     mock_request.state.csp_nonce = "test-nonce-legacy"
 
-                    # Execute with non-popup state
                     result = await oauth_callback(
                         code="auth-code-123",
                         state="regular-state-abc123",
                         request=mock_request,
-                        db=mock_db
+                        db=mock_db,
                     )
 
-                    # Assert HTMLResponse with legacy admin UI
-                    assert isinstance(result, HTMLResponse)
-                    body = result.body.decode()
+        # --- Basic page assertions ---
+        assert isinstance(result, HTMLResponse)
+        body = result.body.decode()
+        assert "OAuth Authorization Successful" in body
+        assert "Fetch Tools from MCP Server" in body
+        assert "Return to Admin Panel" in body
+        assert "/oauth/fetch-tools/test-gateway" in body
 
-                    # Verify legacy admin UI elements are present
-                    assert 'OAuth Authorization Successful' in body
-                    assert 'Fetch Tools from MCP Server' in body
-                    assert 'Return to Admin Panel' in body
+        # --- Structural JS assertions (break when `if (response.ok)` → `if (!response.ok)`) ---
 
-                    # Verify NO postMessage script (should use inline fetch script instead)
-                    assert 'window.opener.postMessage' not in body
+        # 1. The success branch opens with `if (response.ok)`.
+        #    Swapping to `if (!response.ok)` would put success text in the wrong branch.
+        ok_branch_open = "if (response.ok)"
+        assert ok_branch_open in body, "Expected `if (response.ok)` guard in the HTML script"
+
+        ok_open_pos = body.index(ok_branch_open)
+
+        # 2. postMessage with status 'success' must be INSIDE the `if (response.ok)` block,
+        #    i.e. it appears AFTER `if (response.ok)`.
+        post_message_pos = body.index("window.opener.postMessage")
+        assert ok_open_pos < post_message_pos, (
+            "postMessage must appear after `if (response.ok)`. "
+            "If the guard were `if (!response.ok)` this ordering would be reversed."
+        )
+
+        # 3. The `} else {` clause that throws an error must come AFTER the postMessage call,
+        #    confirming that `status: 'success'` and postMessage are in the truthy branch.
+        else_pos = body.index("} else {")
+        assert post_message_pos < else_pos, (
+            "`} else {` must appear after the postMessage call. "
+            "Swapping the condition would move `throw new Error` before `postMessage`."
+        )
+
+        # 4. The `else` branch must contain a `throw new Error`, not a success message.
+        else_block = body[else_pos:]
+        assert "throw new Error" in else_block, "else branch must throw an error, not emit a success"
+        assert "status: 'success'" not in else_block, (
+            "status: 'success' must not appear in the else branch. "
+            "If the guard were inverted, success would land here."
+        )
+
+        # 5. The fetch URL must appear BEFORE the postMessage (tool fetch triggers the message).
+        fetch_url_pos = body.index("/oauth/fetch-tools/")
+        assert fetch_url_pos < post_message_pos, "fetch-tools URL must precede the postMessage call"
+
+        # 6. The opener guard (`window.opener && !window.opener.closed`) must appear between
+        #    `if (response.ok)` and the postMessage — it wraps the notification.
+        opener_guard_pos = body.index("window.opener && !window.opener.closed")
+        assert ok_open_pos < opener_guard_pos < post_message_pos, (
+            "opener guard must appear inside the `if (response.ok)` block, before postMessage"
+        )
 
     @pytest.mark.asyncio
     async def test_oauth_callback_without_popup_state_provider_error_returns_html(self, mock_db):
@@ -5533,3 +5672,110 @@ class TestEnforceGatewayAccessCacheLayer:
         mock_cache.get_user_role.assert_awaited_once_with("outsider@example.com", "team-1")
         # No DB fallback on a negative cache hit
         mock_db.query.assert_not_called()
+
+
+# --------------------------------------------------------------------------- #
+# RFC 9207 iss validation on the callback (MCP 2026-07-28)
+# --------------------------------------------------------------------------- #
+
+DISCOVER = "mcpgateway.services.oauth_manager.DcrService.discover_as_metadata"
+
+
+def _as_metadata(issuer: str, advertised: bool) -> dict:
+    return {"issuer": issuer, "authorization_response_iss_parameter_supported": advertised}
+
+
+@pytest.fixture
+def issuer_gateway(mock_gateway, mock_db):
+    """A gateway with an issuer, resolved from any state through the real manager."""
+    mock_gateway.oauth_config["issuer"] = "https://as.example.com"
+    mock_db.execute.return_value.scalar_one_or_none.return_value = mock_gateway
+    with patch("mcpgateway.services.oauth_manager.OAuthManager.resolve_gateway_id_from_state", new=AsyncMock(return_value="gateway123")):
+        yield mock_gateway
+
+
+@pytest.mark.asyncio
+async def test_callback_error_with_mismatching_iss_hides_provider_error(mock_db, mock_request, issuer_gateway):
+    # First-Party
+    from mcpgateway.routers.oauth_router import oauth_callback
+
+    with patch(DISCOVER, new=AsyncMock(return_value=_as_metadata("https://as.example.com", False))), patch("mcpgateway.services.oauth_manager.get_security_logger"):
+        response = await oauth_callback(request=mock_request, code=None, state="state-token", error="access_denied", error_description="user said no", iss="https://attacker.example", db=mock_db)
+
+    body = response.body.decode()
+    assert response.status_code == 400
+    assert "issuer mismatch" in body
+    assert "access_denied" not in body
+    assert "user said no" not in body
+
+
+@pytest.mark.asyncio
+async def test_callback_error_without_iss_from_an_advertising_server_is_refused(mock_db, mock_request, issuer_gateway):
+    # First-Party
+    from mcpgateway.routers.oauth_router import oauth_callback
+
+    with patch(DISCOVER, new=AsyncMock(return_value=_as_metadata("https://as.example.com", True))), patch("mcpgateway.services.oauth_manager.get_security_logger"):
+        response = await oauth_callback(request=mock_request, code=None, state="state-token", error="access_denied", db=mock_db)
+
+    assert "issuer mismatch" in response.body.decode()
+
+
+@pytest.mark.asyncio
+async def test_callback_error_with_matching_iss_shows_provider_error(mock_db, mock_request, issuer_gateway):
+    # First-Party
+    from mcpgateway.routers.oauth_router import oauth_callback
+
+    with patch(DISCOVER, new=AsyncMock(return_value=_as_metadata("https://as.example.com", True))):
+        response = await oauth_callback(request=mock_request, code=None, state="state-token", error="access_denied", error_description="user said no", iss="https://as.example.com", db=mock_db)
+
+    assert response.status_code == 400
+    assert "access_denied" in response.body.decode()
+
+
+@pytest.mark.asyncio
+async def test_callback_error_without_state_shows_provider_error(mock_db, mock_request):
+    # First-Party
+    from mcpgateway.routers.oauth_router import oauth_callback
+
+    response = await oauth_callback(request=mock_request, code=None, state=None, error="access_denied", iss="https://anything.example", db=mock_db)
+
+    assert "access_denied" in response.body.decode()
+    mock_db.execute.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_callback_success_path_refuses_wrong_iss_before_the_code_exchange(mock_db, mock_request, issuer_gateway):
+    """Through the real route and the real manager: the state is consumed, the token endpoint is never called."""
+    # First-Party
+    from mcpgateway.routers.oauth_router import oauth_callback
+
+    with (
+        patch(DISCOVER, new=AsyncMock(return_value=_as_metadata("https://as.example.com", True))),
+        patch("mcpgateway.services.oauth_manager.OAuthManager._validate_and_retrieve_state", new=AsyncMock(return_value={"code_verifier": "v", "app_user_email": "test@example.com"})),
+        patch("mcpgateway.services.oauth_manager.OAuthManager._exchange_code_for_tokens", new=AsyncMock()) as exchange,
+        patch("mcpgateway.services.oauth_manager.get_security_logger"),
+        patch("mcpgateway.routers.oauth_router.TokenStorageService"),
+    ):
+        response = await oauth_callback(request=mock_request, code="auth_code_123", state="state-token", iss="https://attacker.example", db=mock_db)
+
+    assert response.status_code == 400
+    assert "OAuth Authorization Failed" in response.body.decode()
+    exchange.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_callback_passes_iss_to_the_completion_flow(mock_db, mock_request, mock_gateway):
+    # First-Party
+    from mcpgateway.routers.oauth_router import oauth_callback
+
+    mock_db.execute.return_value.scalar_one_or_none.return_value = mock_gateway
+    token_result = {"user_id": "oauth_user_123", "expires_at": None, "token_aud": None, "state_data": {"app_user_email": "test@example.com", "team_id": None}}
+    with patch("mcpgateway.routers.oauth_router.OAuthManager") as manager_class:
+        manager = Mock()
+        manager.resolve_gateway_id_from_state = AsyncMock(return_value="gateway123")
+        manager.complete_authorization_code_flow = AsyncMock(return_value=token_result)
+        manager_class.return_value = manager
+        with patch("mcpgateway.routers.oauth_router.TokenStorageService"):
+            await oauth_callback(request=mock_request, code="auth_code_123", state="state-token", iss="https://as.example.com", db=mock_db)
+
+    assert manager.complete_authorization_code_flow.call_args[1]["iss"] == "https://as.example.com"

@@ -395,6 +395,7 @@ mcpContextForge:
     TOOLOPS_ENABLED: "false"            # enable ToolOps feature
     MCPGATEWAY_STDIO_TRANSPORT_ENABLED: "false" # DANGER: enables stdio process execution; only for trusted environments
     PLUGINS_CAN_OVERRIDE_RBAC: "false"  # allow plugins to bypass built-in RBAC (audit-only when false)
+    # PLUGIN_MANAGER_CACHE_TTL: "300"   # seconds before a cached plugin manager is rebuilt (0 = never expire)
 
     # ─ LLM Chat Feature ─
     LLMCHAT_ENABLED: "false"            # disabled by default; enable only if LLM providers are configured
@@ -927,6 +928,7 @@ mcpContextForge:
     DCR_DEFAULT_SCOPES: '["mcp:read"]'     # default OAuth scopes to request during DCR (JSON array)
     DCR_ALLOWED_ISSUERS: "[]"              # allowlist of trusted issuer URLs for DCR (empty = allow any)
     DCR_TOKEN_ENDPOINT_AUTH_METHOD: "client_secret_basic" # token endpoint auth method for DCR
+    DCR_APPLICATION_TYPE: "auto"           # application_type in DCR requests: auto (native for a loopback redirect URI, web otherwise), web, native
     DCR_METADATA_CACHE_TTL: "3600"         # AS metadata cache TTL in seconds (RFC 8414 discovery)
     DCR_CLIENT_NAME_TEMPLATE: "ContextForge ({gateway_name})" # template for client_name in DCR requests
     DCR_REQUEST_REFRESH_TOKEN_WHEN_UNSUPPORTED: "false" # request refresh_token when AS omits grant_types_supported

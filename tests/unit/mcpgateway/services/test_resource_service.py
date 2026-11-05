@@ -25,6 +25,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 # Third-Party
 import pytest
+import mcp_types as types
 from sqlalchemy import create_engine
 from sqlalchemy.exc import IntegrityError, MultipleResultsFound
 from sqlalchemy.orm import Session
@@ -87,7 +88,7 @@ def mock_resource():
     resource = MagicMock()
 
     # core attributes
-    resource.id = "39334ce0ed2644d79ede8913a66930c9"
+    resource.id = "39334ce0ed2644d79ede8913a66930c9"  # pragma: allowlist secret
     resource.uri = "http://example.com/resource"
     resource.gateway_id = None
     resource.name = "Test Resource"
@@ -127,7 +128,7 @@ def mock_resource_template():
     resource = MagicMock()
 
     # core attributes
-    resource.id = "39334ce0ed2644d79ede8913a66930c9"
+    resource.id = "39334ce0ed2644d79ede8913a66930c9"  # pragma: allowlist secret
     resource.uri = "http://example.com/resource/{name}"
     resource.gateway_id = None
     resource.name = "Test Resource"
@@ -272,7 +273,7 @@ class TestResourceRegistration:
             patch.object(resource_service, "convert_resource_to_read") as mock_convert,
         ):
             mock_convert.return_value = ResourceRead(
-                id="39334ce0ed2644d79ede8913a66930c9",
+                id="39334ce0ed2644d79ede8913a66930c9",  # pragma: allowlist secret
                 uri=sample_resource_create.uri,
                 name=sample_resource_create.name,
                 description=sample_resource_create.description or "",
@@ -305,6 +306,39 @@ class TestResourceRegistration:
             # Verify result
             assert result.uri == sample_resource_create.uri
             assert result.name == sample_resource_create.name
+
+    @pytest.mark.asyncio
+    async def test_register_resource_ignores_nested_team_and_owner(self, resource_service, mock_db):
+        """Stored team and owner come from the parameters, never from the payload."""
+        mock_scalar = MagicMock()
+        mock_scalar.scalar_one_or_none.return_value = None
+        mock_db.execute.return_value = mock_scalar
+        resource = ResourceCreate(uri="file:///scoped.txt", name="scoped", content="data", team_id="team-other", owner_email="other@example.com")
+
+        with (
+            patch.object(resource_service, "_detect_mime_type", return_value="text/plain"),
+            patch.object(resource_service, "_notify_resource_added", new_callable=AsyncMock),
+            patch.object(resource_service, "convert_resource_to_read", return_value=MagicMock()),
+        ):
+            await resource_service.register_resource(mock_db, resource, created_by="alice@example.com", team_id="team-a", owner_email="alice@example.com", visibility="private")
+
+        added = mock_db.add.call_args[0][0]
+        assert added.team_id == "team-a"
+        assert added.owner_email == "alice@example.com"
+
+    @pytest.mark.asyncio
+    async def test_register_resources_bulk_ignores_nested_team_and_owner(self, resource_service, mock_db):
+        """Bulk create stores the parameter scope, never the payload scope."""
+        mock_db.execute.return_value.scalars.return_value.all.return_value = []
+        mock_db.add_all = MagicMock()
+        resource_service._notify_resource_added = AsyncMock()
+        resource = ResourceCreate(uri="file:///bulk.txt", name="bulk", content="data", team_id="team-other", owner_email="other@example.com")
+
+        await resource_service.register_resources_bulk(db=mock_db, resources=[resource], created_by="alice@example.com", team_id=None, owner_email=None, visibility="public")
+
+        added = mock_db.add_all.call_args[0][0][0]
+        assert added.team_id is None
+        assert added.owner_email == "alice@example.com"
 
     @pytest.mark.asyncio
     async def test_register_resource_uri_conflict_active(self, resource_service, mock_db, sample_resource_create, mock_resource):
@@ -401,7 +435,7 @@ class TestResourceRegistration:
             patch.object(resource_service, "convert_resource_to_read") as mock_convert,
         ):
             mock_convert.return_value = ResourceRead(
-                id="39334ce0ed2644d79ede8913a66930c9",
+                id="39334ce0ed2644d79ede8913a66930c9",  # pragma: allowlist secret
                 uri=binary_resource.uri,
                 name=binary_resource.name,
                 description=binary_resource.description or "",
@@ -641,6 +675,29 @@ class TestResourceListing:
 
 class TestResourceReading:
     """Test resource reading functionality."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("blob", ["", "AP9iaW5hcnk="])
+    async def test_read_resource_preserves_upstream_binary_content(self, resource_service, mock_db, mock_resource, blob):
+        """Gateway reads preserve binary contents and upstream metadata."""
+        mock_resource.gateway_id = "gw-1"
+        mock_db.execute.return_value.scalar_one_or_none.return_value = mock_resource
+        upstream = types.BlobResourceContents(uri=mock_resource.uri, mimeType="application/octet-stream", blob=blob, _meta={"source": "upstream"})
+
+        with (
+            patch.object(resource_service, "invoke_resource", new=AsyncMock(return_value=upstream)),
+            patch("mcpgateway.services.resource_service.create_span") as mock_span,
+            patch("mcpgateway.services.resource_service.is_input_capture_enabled", return_value=False),
+            patch("mcpgateway.services.resource_service.is_output_capture_enabled", return_value=True),
+            patch("mcpgateway.services.resource_service.serialize_trace_payload") as mock_serialize,
+            patch("mcpgateway.common.models.BlobResourceContents.__str__", side_effect=AssertionError("Blob representations must not be built")),
+        ):
+            result = await resource_service.read_resource(mock_db, resource_id=mock_resource.id)
+
+        assert result.model_dump(by_alias=True, exclude_none=True) == upstream.model_dump(by_alias=True, exclude_none=True)
+        assert not hasattr(result, "text")
+        mock_serialize.assert_not_called()
+        mock_span.return_value.__enter__.return_value.set_attribute.assert_any_call("content.size", len(blob))
 
     @pytest.mark.asyncio
     async def test_read_resource_with_metadata(self, resource_service, mock_db, mock_resource):
@@ -1059,6 +1116,21 @@ class TestResourceManagement:
             assert mock_resource.name == "Updated Name"
             assert mock_resource.description == "Updated description"
             mock_db.commit.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_update_resource_validates_foreign_team_before_uri_conflict(self, resource_service, mock_db, mock_resource):
+        """A foreign target team fails before the URI lookup, so a 409 never confirms a URI in that team."""
+        # First-Party
+        from mcpgateway.utils.error_formatter import PublicValidationError
+
+        with (
+            patch("mcpgateway.services.resource_service.get_for_update", side_effect=[mock_resource]) as lock,
+            patch("mcpgateway.services.permission_service.PermissionService.check_resource_ownership", new=AsyncMock(return_value=True)),
+            patch("mcpgateway.services.resource_service._validate_resource_team_assignment", side_effect=PublicValidationError("User membership in team not sufficient for this update.")),
+        ):
+            with pytest.raises(Exception, match="membership"):
+                await resource_service.update_resource(mock_db, mock_resource.id, ResourceUpdate(uri="file:///taken.txt", visibility="team", team_id="foreign-team"), user_email="user@example.com")
+        assert lock.call_count == 1
 
     @pytest.mark.asyncio
     async def test_update_resource_accepts_ui_extension_metadata(self, resource_service, mock_db, mock_resource, monkeypatch):
@@ -4029,6 +4101,32 @@ class TestInvokeResourceCoverage:
         gw.oauth_config = None
         gw.auth_query_params = None
         return gw
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("transport", ["sse", "streamablehttp"])
+    @pytest.mark.parametrize("blob", ["", "AP9iaW5hcnk="])
+    async def test_invoke_binary_resource(self, resource_service, transport, blob):
+        """Remote binary reads preserve the payload without accessing a text field."""
+        resource = self._make_resource()
+        gateway = self._make_gateway(transport=transport)
+        content = types.BlobResourceContents(uri="test://binary", mimeType="application/octet-stream", blob=blob)
+        session = AsyncMock()
+        session.session = session
+        session.read_resource.return_value = types.ReadResourceResult(contents=[content])
+
+        with (
+            patch("mcpgateway.services.resource_service.mcp_proxy_client") as mock_client,
+            patch("mcpgateway.services.resource_service.create_span"),
+            patch("mcpgateway.services.resource_service.is_input_capture_enabled", return_value=False),
+            patch("mcpgateway.services.resource_service.is_output_capture_enabled", return_value=True),
+            patch("mcpgateway.services.resource_service.serialize_trace_payload") as mock_serialize,
+        ):
+            mock_client.return_value.__aenter__ = AsyncMock(return_value=session)
+            mock_client.return_value.__aexit__ = AsyncMock(return_value=False)
+            result = await resource_service.invoke_resource(MagicMock(), resource.id, str(content.uri), resource_obj=resource, gateway_obj=gateway)
+
+        assert result == content
+        mock_serialize.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_no_resource_found(self, resource_service):
@@ -7168,6 +7266,88 @@ class TestInvokeResourceCoverageEdges:
         assert captured_url["url"] == "http://gw.test"
         mock_decode.assert_not_called()
         mock_apply.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("gateway_setting", "expect_identity"),
+        [
+            ({"enabled": False}, False),
+            ({"enabled": True}, True),
+        ],
+    )
+    async def test_invoke_resource_identity_follows_gateway_setting(self, monkeypatch, gateway_setting, expect_identity):
+        """Resource reads honour the gateway's identity setting over the global one."""
+        # Third-Party
+        from cpex.framework import UserContext
+
+        # First-Party
+        from mcpgateway.services.resource_service import ResourceService
+
+        monkeypatch.setattr("mcpgateway.utils.identity_propagation.settings.identity_propagation_enabled", True)
+
+        svc = ResourceService()
+        db = MagicMock()
+        resource = MagicMock(id="res-1", name="R", gateway_id="gw-1")
+        gateway = MagicMock()
+        gateway.id = "gw-1"
+        gateway.name = "GW"
+        gateway.url = "http://gw.test"
+        gateway.transport = "sse"
+        gateway.ca_certificate = None
+        gateway.ca_certificate_sig = None
+        gateway.auth_type = None
+        gateway.auth_value = {}
+        gateway.oauth_config = None
+        gateway.auth_query_params = None
+        gateway.identity_propagation = gateway_setting
+
+        cs_session = AsyncMock()
+        cs_session.initialize = AsyncMock(return_value=None)
+        cs_session.read_resource.return_value = MagicMock(contents=[MagicMock(text="ok", blob=None)])
+        cs_session.session = cs_session
+
+        captured_headers: dict[str, object] = {}
+
+        def _capture_headers(*_a, **kw):
+            captured_headers.update(kw.get("headers") or {})
+            return mock_sse.return_value
+
+        with (
+            patch(
+                "mcpgateway.services.resource_service.settings",
+                MagicMock(
+                    enable_ed25519_signing=False,
+                    platform_admin_email="admin@test.com",
+                    httpx_max_connections=10,
+                    httpx_max_keepalive_connections=5,
+                    httpx_keepalive_expiry=30,
+                    mcp_session_pool_enabled=False,
+                    health_check_timeout=1,
+                ),
+            ),
+            patch("mcpgateway.services.resource_service.current_trace_id") as mock_trace,
+            patch("mcpgateway.services.resource_service.create_span", MagicMock(return_value=MagicMock(__enter__=MagicMock(return_value=MagicMock()), __exit__=MagicMock(return_value=False)))),
+            patch("mcpgateway.services.metrics_buffer_service.get_metrics_buffer_service", return_value=MagicMock()),
+            patch("mcpgateway.services.resource_service.mcp_proxy_client") as mock_sse,
+        ):
+            mock_trace.get = MagicMock(return_value=None)
+            mock_sse.side_effect = _capture_headers
+            mock_sse.return_value.__aenter__ = AsyncMock(return_value=cs_session)
+            mock_sse.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            out = await svc.invoke_resource(
+                db,
+                "res-1",
+                "http://ignored",
+                resource_obj=resource,
+                gateway_obj=gateway,
+                user_identity=UserContext(user_id="alice@example.com", email="alice@example.com", is_admin=True, teams=["t1"]),
+            )
+
+        assert out == "ok"
+        assert any(k.startswith("X-Forwarded-User") for k in captured_headers) is expect_identity
+        if not expect_identity:
+            assert "alice@example.com" not in captured_headers.values()
 
     @pytest.mark.asyncio
     async def test_invoke_resource_oauth_authorization_code_token_sets_authorization_header(self):

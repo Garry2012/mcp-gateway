@@ -6,11 +6,54 @@ This repository (`Garry2012/mcp-gateway`) is a fork of
 The fork tracks upstream as closely as possible. It carries only the divergences below.
 Keep UI changes limited to the functional fixes listed below. Submit fixes upstream and avoid branding or cosmetic changes.
 
-Last updated: **2026-10-28**.
+Last updated: **2026-11-05**.
 
 ## Syncing with upstream
 
-The 2026-10-26 integration targets upstream `85dabf0be` (1.1.0). It retains the divergences below.
+The 2026-11-05 integration targets upstream `e712b1b8e`. It imports 46 commits and retains every
+divergence below except divergence 3, which upstream resolved. It adopts upstream's removal of all
+repository-owned Rust (EPIC #5817), so `crates/`, the Cargo manifests and `rust-toolchain.toml` are gone.
+`tests/live_gateway/test_call_sessions.py` builds its stub upstream server on `mcp.server.mcpserver`,
+because upstream's `llmchat` extra no longer supplies `fastmcp`.
+
+The integration adopts upstream's documented requirement to send `auth_type` when updating a
+credential field. `PUT /gateways/{gateway_id}` and `PUT /a2a/{agent_id}` now return 422 when a
+request sets `auth_token`, `auth_password` or `auth_header_value` without `auth_type`. Upstream
+records this under Breaking Changes in commit `937011adf` (PR #7172).
+
+### Deferred upstream issues
+
+**`auth_value` updates without `auth_type` are silently ignored.** `GatewayUpdate` and
+`A2AAgentUpdate` accept `auth_value` without `auth_type`, because
+`validate_auth_type_required_for_credential_rotation` checks only `auth_token`, `auth_password`
+and `auth_header_value` (`mcpgateway/schemas.py:4126` and `:6220`). `GatewayService.update_gateway`
+and `A2AAgentService.update_agent` then keep the stored credential. The caller receives success and
+the old credential stays. This differs from the documented rejection of the other three fields.
+Upstream introduced the behaviour in `937011adf` (PR #7172).
+
+The reproduction builds real Pydantic models and compares service behaviour against pre-sync code.
+HTTP-level confirmation remains pending.
+Evidence lives in untracked review artifacts, so a fresh clone does not carry it:
+`.context/review_auth_value_probe.py` and
+`.context/independent-sync-review-20261105/whole-sync-auth-comparison.log`.
+
+**Follow-up:** confirm the behaviour through HTTP, then report it upstream. Ask upstream to reject
+ambiguous `auth_value` updates for consistency. Keep `mcpgateway/services/gateway_service.py` and
+`mcpgateway/services/a2a_service.py` byte-identical to upstream until upstream decides.
+
+**The Vault plugin E2E suite skips without `fastmcp`.** Upstream's `llmchat` extra no longer
+supplies `fastmcp`, and `plugins/vault/echo_mcp.py` imports it for `Context`, `FastMCP` and
+`get_http_headers`. The five tests in `tests/e2e/test_vault_plugin_a2a_e2e.py` therefore skip at
+`pytest.importorskip("fastmcp")`. The sync keeps `fastmcp` out of the gateway's dependencies.
+
+The code itself is sound. A temporary environment that pins every gateway dependency to its
+locked version and adds `fastmcp==4.0.10` runs all five tests green. `fastmcp` changes no locked
+version and adds 17 packages, so no version conflict exists.
+
+**Follow-up:** add `fastmcp` to a test-only dependency group, or port `plugins/vault/echo_mcp.py`
+to the MCP SDK. Until then, run the suite in a separate environment.
+
+The 2026-10-26 integration targeted upstream `85dabf0be` (1.1.0).
 The published baseline matches deployed source `0cdfa2109`; temporary LLM Chat changes remain excluded.
 
 Upstream rewrites historical commits. The ancestry reconciliation maps `51a4ee414` to `2dd1c487e` and accepts three example-redaction changes.
@@ -21,8 +64,9 @@ Keep `OTEL_HTTPX_INSTRUMENTATION_ENABLED=true` in the healthcare profile for HTT
 The per-user MCP-server rate-limiter plugin remains disabled unless explicitly configured.
 The healthcare profile uses the EU Langfuse endpoint and its existing Key Vault header reference.
 The healthcare profile accepts both inbound protocol eras with `MCP_INBOUND_PROTOCOL_MODE=auto`.
-It keeps `MCP_CLIENT_CONNECT_MODE=legacy` for upstream servers and LLM Chat.
-Some upstream servers reject modern discovery or omit its required cache metadata.
+It keeps `MCP_CLIENT_CONNECT_MODE=auto` for outbound connections to upstream MCP servers.
+LLM Chat no longer reads the setting; see divergence 3.
+Set it to `legacy` when an upstream server rejects modern discovery or omits its required cache metadata.
 The current voice client retains its `2025-11-25` handshake. Modern clients can use `2026-07-28` discovery.
 Restore `MCP_INBOUND_PROTOCOL_MODE=legacy` to roll back inbound acceptance.
 This configuration does not enable upstream session reuse or change upstream protocol negotiation.
@@ -45,7 +89,10 @@ Preserve upstream secret-scan audit decisions when the filename and finding hash
 The live E2E module keeps the synchronous Playwright resource-renaming test after the asynchronous MCP tests.
 It uses the SDK v2 `is_error` property and accepts both existing detached-tool denial messages.
 Pagination tests inspect response headers to distinguish stateful session isolation from stateless scope reuse.
-Both modes retain team, permission, anonymous-access, and revoked-membership denial checks.
+Both modes retain team, permission, and anonymous-access denial checks.
+Upstream #7258 deleted the Rust session-isolation suite, including its removed-member and
+revoked-role session denial cases. Port them into `tests/live_gateway/e2e/test_e2e.py` if the
+fork relies on bounded session-reuse denial.
 Preserve these test compatibility fixes until upstream includes them.
 
 ### Upstream reset: 2026-10-02
@@ -87,30 +134,30 @@ public-only deny cases. New handlers, including `completion/complete`, must use 
 Upstream helper references can merge without conflicts after a fork rename.
 Submit this fix upstream, then drop this divergence when it merges.
 
-### 3. LLM Chat on MCP SDK 2.x (`langchain.mcp`)
+### 3. LLM Chat on MCP SDK 2.x — RESOLVED 2026-11-05
 
 Upstream moved to MCP SDK 2.x (#6868), but LLM Chat still used `langchain-mcp-adapters`, which
 imports MCP 1.x APIs and fails at import time. Reported as
 [IBM/mcp-context-forge#7090](https://github.com/IBM/mcp-context-forge/issues/7090).
+The fork loaded tools through `langchain.mcp.MCPAdapter` over FastMCP transports until upstream
+shipped its own fix.
 
-`MCPClient` in `mcpgateway/services/mcp_client_chat_service.py` now loads tools through
-`langchain.mcp.MCPAdapter` with FastMCP transports (`StreamableHttpTransport`, `SSETransport`,
-`StdioTransport`). The `llmchat` extra replaces `langchain-mcp-adapters` with `langchain[mcp]` and
-raises the `langchain-core` cap. It pins the directly imported FastMCP client to the tested version.
-`langgraph-sdk` caps `websockets<17`, so the lock
-resolves `websockets` 16.x. The import guard keeps the original `ImportError` in the error message.
+Upstream PR #7332 (`260d1abcf`) addresses #7090. It loads tools with the MCP SDK client directly.
+The 2026-11-05 integration took upstream's version and retired this divergence.
+`mcpgateway/services/mcp_client_chat_service.py` is now identical to upstream.
+`fastmcp`, `langchain[mcp]`, `MCPAdapter` and `_decline_elicitation` are gone.
+The `llmchat` extra is upstream's, which lowers the `langchain-core` cap from `1.6.4` to `1.5.1`.
 
-LLM Chat runs a LangGraph agent without a checkpointer, so it cannot pause for user input. The
-FastMCP client therefore declines MCP elicitation requests (`_decline_elicitation`); without it,
-`MCPAdapter` turns them into a LangGraph interrupt and the chat returns an empty answer.
+Upstream's loader takes no `mode` argument, so LLM Chat no longer reads
+`MCP_CLIENT_CONNECT_MODE` and uses the MCP SDK default. The setting still governs outbound
+gateway connections to upstream MCP servers.
 
-LLM Chat uses `MCP_CLIENT_CONNECT_MODE` for its FastMCP connections, including external targets.
-The healthcare profile keeps outbound mode at `legacy`, so chat uses the existing initialization handshake.
-Other deployments retain the setting's `auto` default.
+One piece survives: `test_llmchat_dependencies_import_against_installed_mcp_sdk` in
+`tests/unit/mcpgateway/services/test_mcp_client_chat_service_extended.py`. It imports the real
+chat stack, so a future MCP SDK upgrade that breaks LLM Chat fails there. It was rewritten onto
+`mcp.client.Client` when the adapter went away.
 
-**Merge guidance:** when upstream fixes #7090, take upstream's version and drop this divergence.
-Keep `test_llmchat_dependencies_import_against_installed_mcp_sdk`: it imports the real chat stack.
-Keep `mode=settings.mcp_client_connect_mode` unless upstream preserves this behavior.
+**Merge guidance:** keep that test. Expect no other fork delta in this area.
 
 ### 2. Azure deployment
 
@@ -127,7 +174,8 @@ Per-target overrides live in `deploy/scripts/profiles/*.env` (for example `healt
 which reuses that resource group's registry, environment, Key Vault and Postgres server).
 
 ACR Tasks uses the classic Docker builder, which rejects `COPY --chmod`. The `Containerfile`
-replaces both `COPY --chmod=0755` lines with `COPY` plus `RUN chmod 0755`.
+replaces the remaining `COPY --chmod=0755` line with `COPY` plus `RUN chmod 0755`.
+Upstream #7359 deleted the native-extension stage that held the second one.
 `deploy/scripts/02-build-images.sh` fails fast if a `COPY --chmod` line returns.
 
 **Merge guidance:** if upstream adds a new `COPY --chmod` line, convert it to the same form.

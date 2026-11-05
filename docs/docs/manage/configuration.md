@@ -218,6 +218,7 @@ For detailed guidance on embedding and section customization, see [Admin UI Cust
 | Setting                        | Description                            | Default | Options |
 | ------------------------------ | -------------------------------------- | ------- | ------- |
 | `MCPGATEWAY_UI_ENABLED`        | Enable the interactive Admin dashboard | `false` | bool    |
+| `MCPGATEWAY_UI_DEPRECATION_NOTICE_ENABLED` | Show the built-in Admin UI deprecation notice | `true` | bool |
 | `MCPGATEWAY_ADMIN_API_ENABLED` | Enable API endpoints for admin ops     | `false` | bool    |
 | `MCPGATEWAY_UI_AIRGAPPED`      | Use local CDN assets for airgapped deployments | `false` | bool |
 | `MCPGATEWAY_UI_EMBEDDED`       | Embedded UI mode (hides logout + team selector by default) | `false` | bool |
@@ -232,6 +233,14 @@ For detailed guidance on embedding and section customization, see [Admin UI Cust
 | `MCPGATEWAY_MCP_APPS_SESSION_CLEANUP_ENABLED` | Enable automatic cleanup of expired AppBridge sessions | `true` | bool |
 | `MCPGATEWAY_MCP_APPS_SESSION_CLEANUP_INTERVAL_SECONDS` | Seconds between expired AppBridge session cleanup runs | `300` | int, 60-86400 |
 | `MCPGATEWAY_MCP_APPS_SESSION_CLEANUP_BATCH_SIZE` | Maximum expired AppBridge sessions to delete per cleanup batch | `1000` | int, 1-100000 |
+
+The Admin UI deprecation banner announces that support ends on **27 January 2027**.
+It appears below the header on authenticated Admin UI pages and links to the
+[new UI](https://github.com/contextforge-org/contextforge-web-ui) and
+[getting started documentation](https://github.com/IBM/mcp-context-forge#optional-web-ui).
+The close button hides the banner until the page refreshes. Dismissal does not persist across page loads.
+Set `MCPGATEWAY_UI_DEPRECATION_NOTICE_ENABLED=false` to hide it, then restart the gateway.
+The banner remains informational after the notice date. It does not disable the Admin UI or automatically expire.
 
 !!! note "Per-Request UI Hiding"
     For embedded contexts, you can also hide UI sections per-request by adding `?ui_hide=...` to the Admin UI URL.
@@ -545,9 +554,8 @@ The 2025 protocol requires a tool result's `structuredContent` to be a JSON obje
 
 `MCP_CLIENT_CONNECT_MODE` controls how the gateway, acting as an MCP **client**, opens **outbound** connections to upstream MCP servers. It applies to both upstream connection paths: the pooled session registry and the per-call (ad-hoc) proxy connections.
 
-LLM Chat also uses this setting for its MCP connections, including connections to gateway virtual servers and external MCP servers.
-With `legacy`, LLM Chat starts with `initialize` and skips the modern discovery probe.
-Use `auto` when LLM Chat must connect to a modern-only MCP server.
+LLM Chat does not use this setting. It loads tools with the MCP SDK client, which applies its own
+default negotiation.
 
 | Setting                        | Description                                      | Default               | Options |
 | ------------------------------ | ------------------------------------------------ | --------------------- | ------- |
@@ -692,6 +700,7 @@ ContextForge implements **OAuth 2.0 Dynamic Client Registration (RFC 7591)** and
 | `DCR_DEFAULT_SCOPES`                       | Default OAuth scopes to request during DCR                     | `["mcp:read"]`                 | JSON array    |
 | `DCR_ALLOWED_ISSUERS`                      | Allowlist of trusted issuer URLs (empty = allow any)           | `[]`                           | JSON array    |
 | `DCR_TOKEN_ENDPOINT_AUTH_METHOD`           | Token endpoint auth method                                     | `client_secret_basic`          | `client_secret_basic`, `client_secret_post`, `none` |
+| `DCR_APPLICATION_TYPE`                     | `application_type` sent in DCR requests (MCP 2026-07-28)       | `auto`                         | `auto`, `web`, `native` |
 | `DCR_METADATA_CACHE_TTL`                   | AS metadata cache TTL in seconds                               | `3600`                         | int           |
 | `DCR_CLIENT_NAME_TEMPLATE`                 | Template for client_name in DCR requests                       | `ContextForge ({gateway_name})` | string        |
 | `DCR_REQUEST_REFRESH_TOKEN_WHEN_UNSUPPORTED` | Request refresh_token when AS omits grant_types_supported    | `false`                        | bool          |
@@ -1433,6 +1442,7 @@ plugins are fully trusted.
 | ------------------------------------ | --------------------------------------------------------------------------------------------------------------------- | ------- | ------- |
 | `PLUGINS_CAN_OVERRIDE_RBAC`         | Allow `HTTP_AUTH_CHECK_PERMISSION` plugin hooks to short-circuit built-in RBAC grants. When disabled, plugin grant decisions are audit-only. | `false` | bool    |
 | `PLUGINS_CAN_OVERRIDE_AUTH_HEADERS`  | Allow pre-request plugin hooks to override auth-sensitive headers (`Authorization`, `Cookie`, `X-Api-Key`, `Proxy-Authorization`) that the client already sent. Required for plugin-driven token exchange workflows (e.g. WXO auth). | `false` | bool    |
+| `PLUGIN_MANAGER_CACHE_TTL`           | Seconds a cached plugin manager lives before the next request rebuilds it. The TTL bounds staleness when a Redis invalidation message is missed. `0` disables expiry. | `300` | int (≥ 0) |
 
 !!! danger "Security Impact"
     Enabling `PLUGINS_CAN_OVERRIDE_AUTH_HEADERS` allows a plugin to rewrite the
