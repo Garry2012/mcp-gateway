@@ -16,6 +16,31 @@ repository-owned Rust (EPIC #5817), so `crates/`, the Cargo manifests and `rust-
 `tests/live_gateway/test_call_sessions.py` builds its stub upstream server on `mcp.server.mcpserver`,
 because upstream's `llmchat` extra no longer supplies `fastmcp`.
 
+The integration adopts upstream's documented requirement to send `auth_type` when updating a
+credential field. `PUT /gateways/{gateway_id}` and `PUT /a2a/{agent_id}` now return 422 when a
+request sets `auth_token`, `auth_password` or `auth_header_value` without `auth_type`. Upstream
+records this under Breaking Changes in commit `937011adf` (PR #7172).
+
+### Deferred upstream issues
+
+**`auth_value` updates without `auth_type` are silently ignored.** `GatewayUpdate` and
+`A2AAgentUpdate` accept `auth_value` without `auth_type`, because
+`validate_auth_type_required_for_credential_rotation` checks only `auth_token`, `auth_password`
+and `auth_header_value` (`mcpgateway/schemas.py:4126` and `:6220`). `GatewayService.update_gateway`
+and `A2AAgentService.update_agent` then keep the stored credential. The caller receives success and
+the old credential stays. This differs from the documented rejection of the other three fields.
+Upstream introduced the behaviour in `937011adf` (PR #7172).
+
+The reproduction builds real Pydantic models and compares service behaviour against pre-sync code.
+HTTP-level confirmation remains pending.
+Evidence lives in untracked review artifacts, so a fresh clone does not carry it:
+`.context/review_auth_value_probe.py` and
+`.context/independent-sync-review-20261105/whole-sync-auth-comparison.log`.
+
+**Follow-up:** confirm the behaviour through HTTP, then report it upstream. Ask upstream to reject
+ambiguous `auth_value` updates for consistency. Keep `mcpgateway/services/gateway_service.py` and
+`mcpgateway/services/a2a_service.py` byte-identical to upstream until upstream decides.
+
 The 2026-10-26 integration targeted upstream `85dabf0be` (1.1.0).
 The published baseline matches deployed source `0cdfa2109`; temporary LLM Chat changes remain excluded.
 
