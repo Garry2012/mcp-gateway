@@ -1,5 +1,10 @@
 # -*- coding: utf-8 -*-
-"""Exercise Azure deployment safety through the real shell entry point."""
+"""Location: ./tests/unit/deploy/test_deployment_safety.py
+Copyright contributors to the MCP-CONTEXT-FORGE project
+SPDX-License-Identifier: Apache-2.0
+
+Exercise Azure deployment safety through the real shell entry point.
+"""
 
 # Third-Party
 import pytest

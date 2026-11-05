@@ -1,5 +1,10 @@
 # -*- coding: utf-8 -*-
-"""Verify voice call identifiers group gateway spans without changing MCP sessions."""
+"""Location: ./tests/unit/mcpgateway/test_call_session_tracing.py
+Copyright contributors to the MCP-CONTEXT-FORGE project
+SPDX-License-Identifier: Apache-2.0
+
+Verify voice call identifiers group gateway spans without changing MCP sessions.
+"""
 
 # Standard
 import asyncio
