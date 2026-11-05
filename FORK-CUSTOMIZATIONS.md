@@ -230,6 +230,16 @@ Trace naming adds no separate database lookup and occurs after tool authorizatio
 Run `tests/unit/mcpgateway/test_tool_trace_names.py` and `tests/live_gateway/test_call_sessions.py`.
 Unit tests cover server renames and multiple servers. The live OTLP test verifies named roots and call-session grouping.
 
+FastAPI native tracing is disabled with `telemetry={"tracing": False}` on the gateway application.
+`OpenTelemetryRequestMiddleware` owns HTTP request tracing and applies the transport-path filter.
+Native tracing bypasses that filter and creates unwanted HTTP roots for static, administrative, and probe requests.
+It also duplicates request tracing for MCP calls. Native dependency, endpoint, and serialization spans are intentionally omitted.
+ContextForge tool spans, payload capture, call-session grouping, and HTTPX tracing retain their existing configuration.
+
+**Merge guidance:** retain the override until upstream provides one HTTP tracing owner with equivalent filtering and propagation.
+Run `tests/live_gateway/mcp/test_request_trace_policy.py` with observability extras.
+The live collector checks excluded routes, remote parents, generated roots, payload capture, and tracing failures.
+
 ### 7. Deferred dashboard loading and partial errors
 
 Admin panels fetch content when visible instead of loading every panel at startup.

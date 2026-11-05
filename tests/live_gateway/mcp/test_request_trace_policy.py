@@ -151,6 +151,7 @@ def traced_gateway(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[A
             spans = [
                 {
                     "name": span.name,
+                    "scope": scope.scope.name,
                     "trace_id": span.trace_id.hex(),
                     "span_id": span.span_id.hex(),
                     "parent_span_id": span.parent_span_id.hex(),
@@ -341,6 +342,51 @@ def test_request_trace_policy(traced_gateway: Any) -> None:
         assert len(captured) == baseline, artifacts
 
 
+@pytest.mark.parametrize(
+    "traced_gateway",
+    [{"MCP_INBOUND_PROTOCOL_MODE": mode, "MCPGATEWAY_UI_ENABLED": "true", "OTEL_CAPTURE_INPUT_SPANS": "tool.invoke", "OTEL_CAPTURE_OUTPUT_SPANS": "tool.invoke"} for mode in ("auto", "legacy")],
+    ids=["auto", "legacy"],
+    indirect=True,
+)
+def test_http_trace_owner_excludes_non_mcp_requests(traced_gateway: Any) -> None:
+    """Exclude non-MCP requests without dropping tool payloads or adding duplicate HTTP tracing."""
+    client, server_id, tool_name, snapshot, _events, _system_enabled, artifacts = traced_gateway
+    excluded_traces = set()
+    for propagated in (False, True):
+        for method, path in (
+            ("GET", "/"),
+            ("GET", "/health"),
+            ("GET", "/healthz"),
+            ("GET", "/ready"),
+            ("GET", "/metrics"),
+            ("GET", "/favicon.ico"),
+            ("GET", "/static/missing-trace-probe.css"),
+            ("GET", "/admin/login"),
+            ("POST", "/api/logs/search"),
+            ("GET", "/missing-trace-probe"),
+        ):
+            trace_id = secrets.token_hex(16)
+            excluded_traces.add(trace_id)
+            headers = {"traceparent": f"00-{trace_id}-0123456789abcdef-01"} if propagated else {}
+            response = client.request(method, path, headers=headers)
+            assert response.status_code < 500, (path, response.status_code, artifacts)
+
+    trace_id = secrets.token_hex(16)
+    _invoke(client, server_id, tool_name, trace_id, "01", "http-owner-call")
+    _wait(
+        lambda: any(span["trace_id"] == trace_id and span["name"] == "trace-server / echo" for span in _spans(snapshot)),
+        "completed MCP request export after excluded requests",
+    )
+    spans = _spans(snapshot)
+    assert not any(span["trace_id"] in excluded_traces for span in spans), artifacts
+    assert not any(span["scope"] == "fastapi" for span in spans), artifacts
+    invocation = next(span for span in spans if span["trace_id"] == trace_id and span["name"] == "tool.invoke")
+    attrs = invocation["attributes"]
+    assert attrs["langfuse.session.id"] == "http-owner-call"
+    assert json.loads(attrs["langfuse.observation.input"]) == {"value": "trace-probe"}
+    assert "trace-probe" in attrs["langfuse.observation.output"]
+
+
 @pytest.mark.parametrize("call_id", ["voice-generated-root", None])
 def test_request_without_traceparent_retains_tool_tree(traced_gateway: Any, call_id: str | None) -> None:
     """Generated HTTP roots retain tool and HTTP children without leaking call identifiers."""
@@ -364,6 +410,7 @@ def test_request_without_traceparent_retains_tool_tree(traced_gateway: Any, call
 
     _wait(request_exported, "generated request trace export")
     spans = _spans(snapshot)
+    assert not any(span["scope"] == "fastapi" for span in spans), artifacts
     invoked = next(span for span in spans if span["name"] == "tool.invoke" and span["span_id"] not in previous_ids)
     tree = [span for span in spans if span["trace_id"] == invoked["trace_id"]]
     roots = [span for span in tree if not span["parent_span_id"]]
