@@ -2122,6 +2122,8 @@ app = FastAPI(
     description="ContextForge AI Gateway — an AI gateway, registry, and proxy for MCP, A2A, and REST/gRPC APIs. Exposes a unified control plane with centralized governance, discovery, and observability. Optimizes agent and tool calling, and supports plugins.",
     root_path=settings.app_root_path,
     lifespan=lifespan,
+    # ContextForge's middleware owns request spans and excludes non-transport paths.
+    telemetry={"tracing": False},
     default_response_class=ORJSONResponse,  # Use orjson for high-performance JSON serialization
 )
 
