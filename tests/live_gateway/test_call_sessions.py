@@ -120,9 +120,11 @@ def test_call_sessions() -> None:
             )
             upstream = base / "upstream.py"
             upstream.write_text(
-                'from fastmcp import FastMCP\nmcp = FastMCP("call-session-test")\n'
-                "@mcp.tool\ndef echo(value: str) -> str:\n    return value\n"
-                f'mcp.run(transport="http", host="127.0.0.1", port={upstream_port})\n'
+                "from mcp.server.mcpserver import MCPServer\nimport uvicorn\n"
+                'mcp = MCPServer("call-session-test")\n'
+                '@mcp.tool(structured_output=False)\ndef echo(value: str) -> str:\n    """Return the supplied value."""\n    return value\n'
+                "app = mcp.streamable_http_app(stateless_http=True, json_response=True)\n"
+                f'uvicorn.run(app, host="127.0.0.1", port={upstream_port}, log_level="error")\n'
             )
             with (base / "upstream.log").open("w") as log:
                 processes.append(subprocess.Popen([sys.executable, str(upstream)], cwd=work, env=env, stdout=log, stderr=subprocess.STDOUT))
