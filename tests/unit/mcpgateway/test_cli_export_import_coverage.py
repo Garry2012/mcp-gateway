@@ -33,7 +33,10 @@ async def test_get_auth_token_from_env():
 @pytest.mark.asyncio
 async def test_get_auth_token_basic_fallback_when_enabled():
     """Test fallback to basic auth when API_ALLOW_BASIC_AUTH=true."""
-    with patch.dict("os.environ", {}, clear=True):
+    # Clearing the whole environment makes the lazy settings proxy rebuild Settings
+    # without the test secrets, which raises SecurityConfigurationError.
+    with patch.dict("os.environ"):
+        os.environ.pop("MCPGATEWAY_BEARER_TOKEN", None)
         with patch("mcpgateway.cli_export_import.settings") as mock_settings:
             mock_settings.api_allow_basic_auth = True  # Enable basic auth for API
             mock_settings.basic_auth_user = "admin"
@@ -47,7 +50,8 @@ async def test_get_auth_token_basic_fallback_when_enabled():
 @pytest.mark.asyncio
 async def test_get_auth_token_basic_fallback_disabled_by_default():
     """Test that basic auth fallback is skipped when API_ALLOW_BASIC_AUTH=false (default)."""
-    with patch.dict("os.environ", {}, clear=True):
+    with patch.dict("os.environ"):
+        os.environ.pop("MCPGATEWAY_BEARER_TOKEN", None)
         with patch("mcpgateway.cli_export_import.settings") as mock_settings:
             mock_settings.api_allow_basic_auth = False  # Disabled by default
             mock_settings.basic_auth_user = "admin"
@@ -61,7 +65,8 @@ async def test_get_auth_token_basic_fallback_disabled_by_default():
 @pytest.mark.asyncio
 async def test_get_auth_token_no_config():
     """Test when no auth is configured."""
-    with patch.dict("os.environ", {}, clear=True):
+    with patch.dict("os.environ"):
+        os.environ.pop("MCPGATEWAY_BEARER_TOKEN", None)
         with patch("mcpgateway.cli_export_import.settings") as mock_settings:
             mock_settings.api_allow_basic_auth = True
             mock_settings.basic_auth_user = None
