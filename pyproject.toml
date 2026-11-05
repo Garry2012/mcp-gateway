@@ -147,6 +147,7 @@ dev = [
     "dodgy>=0.2.1",
     "faker>=40.28.1",
     "fakeredis[lua]>=2.36.2",
+    "fastmcp>=4.1.4", # Test-only MCP server/client used by tests/e2e/test_vault_plugin_a2a_e2e.py
     "fawltydeps>=0.20.0",
     "gprof2dot>=2025.4.14",
     "hypothesis>=6.152.1",
