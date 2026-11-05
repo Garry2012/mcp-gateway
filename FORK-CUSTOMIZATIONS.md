@@ -41,6 +41,18 @@ Evidence lives in untracked review artifacts, so a fresh clone does not carry it
 ambiguous `auth_value` updates for consistency. Keep `mcpgateway/services/gateway_service.py` and
 `mcpgateway/services/a2a_service.py` byte-identical to upstream until upstream decides.
 
+**The Vault plugin E2E suite skips without `fastmcp`.** Upstream's `llmchat` extra no longer
+supplies `fastmcp`, and `plugins/vault/echo_mcp.py` imports it for `Context`, `FastMCP` and
+`get_http_headers`. The five tests in `tests/e2e/test_vault_plugin_a2a_e2e.py` therefore skip at
+`pytest.importorskip("fastmcp")`. The sync keeps `fastmcp` out of the gateway's dependencies.
+
+The code itself is sound. A temporary environment that pins every gateway dependency to its
+locked version and adds `fastmcp==4.0.10` runs all five tests green. `fastmcp` changes no locked
+version and adds 17 packages, so no version conflict exists.
+
+**Follow-up:** add `fastmcp` to a test-only dependency group, or port `plugins/vault/echo_mcp.py`
+to the MCP SDK. Until then, run the suite in a separate environment.
+
 The 2026-10-26 integration targeted upstream `85dabf0be` (1.1.0).
 The published baseline matches deployed source `0cdfa2109`; temporary LLM Chat changes remain excluded.
 
