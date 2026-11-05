@@ -554,9 +554,8 @@ The 2025 protocol requires a tool result's `structuredContent` to be a JSON obje
 
 `MCP_CLIENT_CONNECT_MODE` controls how the gateway, acting as an MCP **client**, opens **outbound** connections to upstream MCP servers. It applies to both upstream connection paths: the pooled session registry and the per-call (ad-hoc) proxy connections.
 
-LLM Chat also uses this setting for its MCP connections, including connections to gateway virtual servers and external MCP servers.
-With `legacy`, LLM Chat starts with `initialize` and skips the modern discovery probe.
-Use `auto` when LLM Chat must connect to a modern-only MCP server.
+LLM Chat does not use this setting. It loads tools with the MCP SDK client, which applies its own
+default negotiation.
 
 | Setting                        | Description                                      | Default               | Options |
 | ------------------------------ | ------------------------------------------------ | --------------------- | ------- |

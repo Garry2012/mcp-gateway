@@ -33,7 +33,6 @@ tests/                      # Test suite (see tests/AGENTS.md)
 plugins/                    # Plugin implementations (see plugins/AGENTS.md)
 charts/                     # Helm charts (see charts/AGENTS.md)
 docs/                       # Architecture and usage documentation (see docs/AGENTS.md)
-a2a-agents/                 # A2A agent implementations (used for testing/examples)
 llms/                       # End-user LLM guidance (not for code agents)
 ```
 
