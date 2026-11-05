@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Verify call sessions through a local gateway and a local OTLP collector.
+"""Location: ./tests/live_gateway/test_call_sessions.py
+Copyright contributors to the MCP-CONTEXT-FORGE project
+SPDX-License-Identifier: Apache-2.0
+
+Verify call sessions through a local gateway and a local OTLP collector.
 
 Run with ``python -m tests.live_gateway.test_call_sessions`` and observability extras.
 The test creates isolated synthetic services and never uses Azure credentials.

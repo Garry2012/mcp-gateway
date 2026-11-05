@@ -1,5 +1,10 @@
 # -*- coding: utf-8 -*-
-"""Exercise safe completion logs through the tool service and JSON formatter."""
+"""Location: ./tests/unit/mcpgateway/services/test_tool_completion_logging.py
+Copyright contributors to the MCP-CONTEXT-FORGE project
+SPDX-License-Identifier: Apache-2.0
+
+Exercise safe completion logs through the tool service and JSON formatter.
+"""
 
 # Standard
 import asyncio

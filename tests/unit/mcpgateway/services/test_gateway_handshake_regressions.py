@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Regression checks for administrative upstream MCP negotiation.
-
+"""Location: ./tests/unit/mcpgateway/services/test_gateway_handshake_regressions.py
 Copyright contributors to the MCP-CONTEXT-FORGE project
 SPDX-License-Identifier: Apache-2.0
+
+Regression checks for administrative upstream MCP negotiation.
 """
 
 # Standard
