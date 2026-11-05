@@ -21,8 +21,8 @@ Keep `OTEL_HTTPX_INSTRUMENTATION_ENABLED=true` in the healthcare profile for HTT
 The per-user MCP-server rate-limiter plugin remains disabled unless explicitly configured.
 The healthcare profile uses the EU Langfuse endpoint and its existing Key Vault header reference.
 The healthcare profile accepts both inbound protocol eras with `MCP_INBOUND_PROTOCOL_MODE=auto`.
-It keeps `MCP_CLIENT_CONNECT_MODE=legacy` for upstream servers and LLM Chat.
-Some upstream servers reject modern discovery or omit its required cache metadata.
+It keeps `MCP_CLIENT_CONNECT_MODE=auto` for upstream servers and LLM Chat.
+Set it to `legacy` when an upstream server rejects modern discovery or omits its required cache metadata.
 The current voice client retains its `2025-11-25` handshake. Modern clients can use `2026-07-28` discovery.
 Restore `MCP_INBOUND_PROTOCOL_MODE=legacy` to roll back inbound acceptance.
 This configuration does not enable upstream session reuse or change upstream protocol negotiation.
@@ -105,12 +105,16 @@ FastMCP client therefore declines MCP elicitation requests (`_decline_elicitatio
 `MCPAdapter` turns them into a LangGraph interrupt and the chat returns an empty answer.
 
 LLM Chat uses `MCP_CLIENT_CONNECT_MODE` for its FastMCP connections, including external targets.
-The healthcare profile keeps outbound mode at `legacy`, so chat uses the existing initialization handshake.
-Other deployments retain the setting's `auto` default.
+The healthcare profile and `deploy/scripts/00-config.sh` both set `auto`, the setting's default.
 
-**Merge guidance:** when upstream fixes #7090, take upstream's version and drop this divergence.
+**Merge guidance:** upstream fixed #7090 in `260d1abcf` (PR #7332). Take upstream's version and drop this divergence.
+Upstream loads tools with the MCP SDK client directly. `fastmcp`, `langchain[mcp]`, and `MCPAdapter` all go away.
+Take upstream's `llmchat` extra verbatim. It lowers the `langchain-core` cap from `1.6.4` to `1.5.1`.
+It also drops `fastmcp==4.0.10` and `langchain[mcp]<=1.4.2`.
+Regenerate `uv.lock` instead of merging its hunks by hand.
+`_decline_elicitation` goes with `MCPAdapter`. Upstream has no adapter that turns elicitation into a LangGraph interrupt.
+Upstream drops `mode=settings.mcp_client_connect_mode`. `MCP_CLIENT_CONNECT_MODE` stays `auto` everywhere, so chat keeps the default negotiation.
 Keep `test_llmchat_dependencies_import_against_installed_mcp_sdk`: it imports the real chat stack.
-Keep `mode=settings.mcp_client_connect_mode` unless upstream preserves this behavior.
 
 ### 2. Azure deployment
 
