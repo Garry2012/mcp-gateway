@@ -120,15 +120,18 @@ def test_call_sessions() -> None:
             )
             upstream = base / "upstream.py"
             upstream.write_text(
-                "from mcp.server.mcpserver import MCPServer\nimport uvicorn\n"
+                "from mcp.server.mcpserver import MCPServer\nfrom starlette.responses import PlainTextResponse\nfrom starlette.routing import Route\nimport uvicorn\n"
                 'mcp = MCPServer("call-session-test")\n'
                 '@mcp.tool(structured_output=False)\ndef echo(value: str) -> str:\n    """Return the supplied value."""\n    return value\n'
                 "app = mcp.streamable_http_app(stateless_http=True, json_response=True)\n"
+                # A bare GET on /mcp opens an SSE stream that never closes, so wait_ready's
+                # httpx.get blocks until its deadline. Probe a finite route instead.
+                'app.router.routes.append(Route("/ready", lambda request: PlainTextResponse("ok")))\n'
                 f'uvicorn.run(app, host="127.0.0.1", port={upstream_port}, log_level="error")\n'
             )
             with (base / "upstream.log").open("w") as log:
                 processes.append(subprocess.Popen([sys.executable, str(upstream)], cwd=work, env=env, stdout=log, stderr=subprocess.STDOUT))
-            wait_ready(f"http://127.0.0.1:{upstream_port}/mcp", processes[-1])
+            wait_ready(f"http://127.0.0.1:{upstream_port}/ready", processes[-1])
             with (base / "gateway.log").open("w") as log:
                 processes.append(
                     subprocess.Popen(
