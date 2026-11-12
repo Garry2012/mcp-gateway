@@ -185,11 +185,22 @@ The deployment script requires an endpoint and a supported protocol when export 
 
 ### Healthcare Azure deployment
 
-The `healthcare-rg` profile currently exports traces to Langfuse Cloud in the EU for an interface trial.
-The endpoint is `https://cloud.langfuse.com/api/public/otel/v1/traces`, using HTTP with TLS verification.
+The `healthcare-rg` profile exports traces to self-hosted Langfuse over HTTP with TLS verification.
+`KV_OTEL_ENDPOINT` names the Key Vault secret containing the full `<Langfuse URL>/api/public/otel/v1/traces` endpoint.
+A non-empty `KV_OTEL_ENDPOINT` takes precedence over `OTEL_EXPORTER_OTLP_ENDPOINT`.
+An empty or unset `KV_OTEL_ENDPOINT` falls back to the literal endpoint; it does not remove the endpoint setting.
 `KV_OTEL_HEADERS` names the Key Vault secret containing the OTLP authorization and `x-langfuse-ingestion-version=4` headers.
-Provision the secret before deployment. The preparation script grants the gateway identity access to that secret only.
-The deployment script uses a Key Vault reference; it never reads the header value.
+Provision both secrets before deployment. The preparation script grants the gateway identity access to each named secret.
+The deployment script uses Key Vault references; it never reads either value.
+Changing separately stored Langfuse keys does not rebuild the combined authorization header. Update the header secret with the matching keys.
+
+Container App secret aliases apply across revisions. A scripted deployment repoints `otel-headers` to the profile's configured vault secret.
+Reactivating an old revision alone does not restore its previous authentication.
+For a cloud rollback, restore the cloud endpoint and matching cloud header secret in the deployment profile together.
+Set `KV_OTEL_ENDPOINT=` and `OTEL_EXPORTER_OTLP_ENDPOINT=https://cloud.langfuse.com/api/public/otel/v1/traces`.
+Set `KV_OTEL_HEADERS=mcpgw-langfuse-eu-otel-headers`, then run the deployment script with that profile.
+The script restores the cloud authentication reference before creating the revision with the cloud endpoint.
+Keep the cloud secrets until the rollback window closes.
 
 The trial uses the gateway's default credential masking, with no additional patient-field masking.
 Tool input and output capture remains enabled, including test names, phone numbers, summary text, and knowledge queries.

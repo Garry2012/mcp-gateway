@@ -40,7 +40,7 @@ def run_deploy(tmp_path: Path, entrypoint: str = "03-deploy-gateway.sh", script_
         "args = sys.argv[1:]\n"
         "with open(os.environ['AZ_CALLS'], 'a') as out:\n"
         "    out.write(json.dumps(args) + '\\n')\n"
-        "if args[:3] == ['keyvault', 'secret', 'show'] and args[args.index('--name') + 1] == os.environ.get('KV_OTEL_HEADERS'):\n"
+        "if args[:3] == ['keyvault', 'secret', 'show'] and args[args.index('--name') + 1] in (os.environ.get('KV_OTEL_HEADERS'), os.environ.get('KV_OTEL_ENDPOINT')):\n"
         "    error = os.environ.get('TEST_OTEL_SECRET_ERROR')\n"
         "    if error:\n"
         "        print(error, file=sys.stderr)\n"
@@ -104,7 +104,7 @@ def run_deploy(tmp_path: Path, entrypoint: str = "03-deploy-gateway.sh", script_
     excluded = (
         "OTEL_",
         "LANGFUSE_",
-        "KV_OTEL_HEADERS",
+        "KV_OTEL_",
         "TEST_",
         "IMAGE",
         "EXPECTED_REVISION",
@@ -177,11 +177,12 @@ def test_export_auth_uses_key_vault_reference(tmp_path):
 
 
 @pytest.mark.parametrize("error", ["SecretNotFound", "Forbidden"])
-def test_unavailable_export_secret_stops_before_app_mutation(tmp_path, error):
+@pytest.mark.parametrize("setting", ["KV_OTEL_HEADERS", "KV_OTEL_ENDPOINT"])
+def test_unavailable_export_secret_stops_before_app_mutation(tmp_path, error, setting):
     """Reject missing or inaccessible exporter secrets before changing the container app."""
-    result, calls = run_deploy(tmp_path, KV_OTEL_HEADERS="trace-export-headers", TEST_OTEL_SECRET_ERROR=error)
+    result, calls = run_deploy(tmp_path, **{setting: "trace-export-secret", "TEST_OTEL_SECRET_ERROR": error})
     assert result.returncode != 0
-    assert "trace-export-headers" in result.stderr
+    assert "trace-export-secret" in result.stderr
     mutations = (["containerapp", "update"], ["containerapp", "create"], ["containerapp", "secret", "set"])
     assert not any(call[: len(prefix)] == prefix for call in calls for prefix in mutations)
 
@@ -194,14 +195,15 @@ def test_omitted_export_secret_adds_no_auth_reference(tmp_path):
 
 
 @pytest.mark.parametrize("secret_name", ["", "trace-export-headers"])
-def test_export_secret_grant_is_scoped_to_named_secret(secret_name):
+@pytest.mark.parametrize("setting", ["KV_OTEL_HEADERS", "KV_OTEL_ENDPOINT"])
+def test_export_secret_grant_is_scoped_to_named_secret(secret_name, setting):
     """Grant exporter access only to the configured secret and gateway identity."""
     source = (ROOT / "deploy/scripts/01-prepare-azure.sh").read_text()
     selection = source[source.index("GATEWAY_SECRETS=(") : source.index("\nrandom_secret()")]
     grants = source[source.index("GRANTED=0") : source.index('\nif [ "$GRANTED"')]
     script = f"""set -euo pipefail
 KV_JWT_SECRET=jwt KV_ENC_SECRET=enc KV_DB_URL=db KV_ADMIN_PASSWORD=admin KV_DEFAULT_USER_PASSWORD=user
-KV_OTEL_HEADERS={secret_name}
+{setting}={secret_name}
 UAMI_PRINCIPAL=gateway-identity KV_ID=/vaults/test-vault ACR_ID=/registries/test-acr
 ok() {{ :; }}
 az() {{
@@ -220,12 +222,17 @@ az() {{
 
 
 def test_healthcare_deployment_negotiates_inbound_and_upstream_protocols(tmp_path):
-    """Negotiate inbound and upstream protocols while preserving dashboard session settings."""
+    """Preserve healthcare protocol, dashboard session, and exporter settings on redeployment."""
     result, calls = run_deploy(tmp_path, DEPLOY_PROFILE="profiles/healthcare-rg.env")
     assert result.returncode == 0, result.stderr
     update = next(call for call in calls if call[:2] == ["containerapp", "update"])
     for setting in ("MCP_CLIENT_CONNECT_MODE=auto", "MCP_INBOUND_PROTOCOL_MODE=auto", "TOKEN_EXPIRY=480", "TOKEN_IDLE_TIMEOUT=480"):
         assert setting in update
+    assert "OTEL_EXPORTER_OTLP_ENDPOINT=secretref:otel-endpoint" in update
+    assert "OTEL_EXPORTER_OTLP_HEADERS=secretref:otel-headers" in update
+    secret_set = next(call for call in calls if call[:3] == ["containerapp", "secret", "set"])
+    for name in ("mcpgw-langfuse-selfhosted-otel-endpoint", "mcpgw-langfuse-selfhosted-otel-headers"):
+        assert any(f"/{name},identityref:" in arg for arg in secret_set)
 
 
 def test_default_deployment_uses_upstream_protocol_defaults(tmp_path):
@@ -253,3 +260,22 @@ def test_trace_environment_does_not_change_auth_environment(tmp_path):
     assert "DEPLOYMENT_ENV=staging" in update
     assert "ENVIRONMENT=production" in update
     assert "OTEL_TOOL_RESULT_METADATA_FIELDS=outcome,nextStep" in update
+
+
+@pytest.mark.parametrize("literal_endpoint", ["", "https://old.example/api/public/otel/v1/traces"])
+def test_export_endpoint_uses_key_vault_reference(tmp_path, literal_endpoint):
+    """Resolve the exporter URL through managed identity instead of a literal endpoint."""
+    result, calls = run_deploy(
+        tmp_path,
+        OTEL_ENABLE_OBSERVABILITY="true",
+        OTEL_EXPORTER_OTLP_ENDPOINT=literal_endpoint,
+        KV_OTEL_ENDPOINT="trace-export-endpoint",
+    )
+    assert result.returncode == 0, result.stderr
+    update = next(call for call in calls if call[:2] == ["containerapp", "update"])
+    assert [arg for arg in update if arg.startswith("OTEL_EXPORTER_OTLP_ENDPOINT=")] == ["OTEL_EXPORTER_OTLP_ENDPOINT=secretref:otel-endpoint"]
+    secret_set = next(call for call in calls if call[:3] == ["containerapp", "secret", "set"])
+    assert any(arg.startswith("otel-endpoint=keyvaultref:") and "/trace-export-endpoint,identityref:" in arg for arg in secret_set)
+    secret_read = next(call for call in calls if call[:3] == ["keyvault", "secret", "show"] and "trace-export-endpoint" in call)
+    assert secret_read[secret_read.index("-o") + 1] == "none"
+    assert "--query" not in secret_read
