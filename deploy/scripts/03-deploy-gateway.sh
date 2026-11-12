@@ -13,7 +13,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/00-config.sh"
 log "Preflight"
 case "$OTEL_ENABLE_OBSERVABILITY" in
   true)
-    [ -n "$OTEL_EXPORTER_OTLP_ENDPOINT" ] || die "OTEL_EXPORTER_OTLP_ENDPOINT is required when tracing is enabled"
+    [ -n "${KV_OTEL_ENDPOINT:-}$OTEL_EXPORTER_OTLP_ENDPOINT" ] || die "KV_OTEL_ENDPOINT or OTEL_EXPORTER_OTLP_ENDPOINT is required when tracing is enabled"
     case "$OTEL_EXPORTER_OTLP_PROTOCOL" in
       grpc|http) ;;
       *) die "OTEL_EXPORTER_OTLP_PROTOCOL must be grpc or http" ;;
@@ -61,6 +61,7 @@ ok "target resources: CPU=$APP_CPU memory=$APP_MEMORY replicas=$APP_MIN_REPLICAS
 
 REQUIRED_SECRETS=("$KV_JWT_SECRET" "$KV_ENC_SECRET" "$KV_DB_URL" "$KV_ADMIN_PASSWORD" "$KV_DEFAULT_USER_PASSWORD")
 [ -n "${KV_OTEL_HEADERS:-}" ] && REQUIRED_SECRETS+=("$KV_OTEL_HEADERS")
+[ -n "${KV_OTEL_ENDPOINT:-}" ] && REQUIRED_SECRETS+=("$KV_OTEL_ENDPOINT")
 for s in "${REQUIRED_SECRETS[@]}"; do
   az keyvault secret show --vault-name "$KEYVAULT_NAME" --name "$s" -o none 2>/dev/null \
     || die "Key Vault secret '$s' missing - run ./01-prepare-azure.sh first"
@@ -75,6 +76,12 @@ SECRET_REFS=(
   "default-user-password=keyvaultref:${KV_URI}/${KV_DEFAULT_USER_PASSWORD},identityref:${UAMI_ID}"
 )
 [ -n "${KV_OTEL_HEADERS:-}" ] && SECRET_REFS+=("otel-headers=keyvaultref:${KV_URI}/${KV_OTEL_HEADERS},identityref:${UAMI_ID}")
+
+RESOLVED_OTLP_ENDPOINT="$OTEL_EXPORTER_OTLP_ENDPOINT"
+if [ -n "${KV_OTEL_ENDPOINT:-}" ]; then
+  SECRET_REFS+=("otel-endpoint=keyvaultref:${KV_URI}/${KV_OTEL_ENDPOINT},identityref:${UAMI_ID}")
+  RESOLVED_OTLP_ENDPOINT=secretref:otel-endpoint
+fi
 
 # APP_DOMAIN must be the gateway's own public URL. On a first deploy the FQDN
 # does not exist yet, so it is set on the follow-up update below.
@@ -114,7 +121,7 @@ ENV_VARS=(
   "OTEL_ENABLE_OBSERVABILITY=${OTEL_ENABLE_OBSERVABILITY}"
   "OTEL_HTTPX_INSTRUMENTATION_ENABLED=${OTEL_HTTPX_INSTRUMENTATION_ENABLED}"
   "OTEL_TRACES_EXPORTER=otlp"
-  "OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT}"
+  "OTEL_EXPORTER_OTLP_ENDPOINT=${RESOLVED_OTLP_ENDPOINT}"
   "OTEL_EXPORTER_OTLP_PROTOCOL=${OTEL_EXPORTER_OTLP_PROTOCOL}"
   "OTEL_EXPORTER_OTLP_INSECURE=${OTEL_EXPORTER_OTLP_INSECURE}"
   "OTEL_EMIT_LANGFUSE_ATTRIBUTES=${OTEL_EMIT_LANGFUSE_ATTRIBUTES}"
